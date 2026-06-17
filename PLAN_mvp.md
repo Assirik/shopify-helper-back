@@ -1,9 +1,11 @@
 # Plan MVP: Shopify WhatsApp & SMS Notification Service
 
 ## Summary
-Construire un MVP backend deployable qui reçoit les webhooks `orders/create` Shopify, valide leur signature HMAC, normalise les numéros sénégalais, envoie une confirmation WhatsApp via Meta Cloud API, bascule vers SMS Termii en cas d’échec, trace tout dans MongoDB, et expose une API dashboard sécurisée pour lecture + retry.
+Construire un MVP backend deployable qui reçoit les webhooks `orders/create` Shopify, valide leur signature HMAC, normalise les numéros sénégalais, envoie une confirmation WhatsApp via Meta Cloud API, bascule vers SMS Termii en cas d’échec, trace tout dans MongoDB Atlas, et expose une API dashboard sécurisée pour lecture + retry.
 
 Base actuelle: starter Express/TypeScript/MongoDB avec auth, health, Swagger et Pino. Le projet compile déjà avec `tsc --noEmit`.
+
+Déploiement cible MVP: Docker Compose pour orchestrer l’API Node.js et Redis. MongoDB ne sera pas conteneurisé dans ce projet: l’application utilisera directement MongoDB Atlas via `MONGODB_URI`.
 
 ## Key Changes
 
@@ -18,8 +20,10 @@ Base actuelle: starter Express/TypeScript/MongoDB avec auth, health, Swagger et 
   - `META_WHATSAPP_TEMPLATE_LANGUAGE=fr`
   - `TERMII_API_KEY`
   - `TERMII_SENDER_ID`
+  - `MONGODB_URI` pointant vers MongoDB Atlas
   - `REDIS_URL`
 - Mettre à jour `.env.example` avec toutes les variables attendues.
+- Ne pas ajouter de service MongoDB dans Docker Compose: Atlas est la source de données unique.
 - Remplacer le secret JWT hardcodé dans `auth.controller.ts`.
 - Ajouter un middleware `requireAuth` pour protéger les endpoints dashboard/retry.
 - Garder `/api/webhooks/shopify/orders-create` public mais protégé par HMAC Shopify.
@@ -66,6 +70,7 @@ Base actuelle: starter Express/TypeScript/MongoDB avec auth, health, Swagger et 
 
 ### Queue BullMQ + Redis
 - Ajouter BullMQ + Redis pour traiter les notifications après ack webhook.
+- Redis tourne en container Docker Compose, sur un réseau privé, avec volume persistant et mot de passe.
 - Créer une queue `notifications`.
 - Job principal: `sendOrderConfirmation`.
 - Backoff/retry:
@@ -130,6 +135,18 @@ Base actuelle: starter Express/TypeScript/MongoDB avec auth, health, Swagger et 
   - `middlewares`
 - Corriger les incohérences mineures existantes si rencontrées, notamment les types Express obsolètes ou imports inutiles.
 
+### Déploiement Docker Compose
+- Ajouter un `Dockerfile` pour l’API Node.js.
+- Ajouter un `docker-compose.yml` orienté dev/prod simple avec:
+  - service `api`
+  - service `redis`
+  - volume persistant Redis
+  - réseau privé Docker
+- Ne pas inclure MongoDB dans Compose: `MONGODB_URI` doit pointer vers Atlas.
+- En dev, exposer seulement l’API sur le port local utilisé par ngrok.
+- En prod, exposer l’API via reverse proxy/Coolify; garder Redis non public.
+- Render reste une alternative possible, mais nécessiterait une adaptation en services Render/`render.yaml` plutôt qu’un déploiement direct du Compose tel quel.
+
 ## Test Plan
 - Tests automatisés avec Jest/Supertest, mais priorité au MVP fonctionnel.
 - Tests minimum utiles:
@@ -143,7 +160,7 @@ Base actuelle: starter Express/TypeScript/MongoDB avec auth, health, Swagger et 
   - endpoints dashboard refusent les requêtes sans JWT
 - Vérifications manuelles:
   - `npm run tsc -- --noEmit`
-  - `npm run dev`
+  - `npm run dev` ou `docker compose up`
   - appel webhook local avec payload Shopify simulé
   - consultation Swagger `/api/docs`
   - lecture commandes/messages via API.
@@ -153,6 +170,9 @@ Base actuelle: starter Express/TypeScript/MongoDB avec auth, health, Swagger et 
 - Marché cible initial: Sénégal, format final téléphone `+221XXXXXXXXX`.
 - Provider initial: Meta WhatsApp Cloud API + Termii SMS.
 - Traitement webhook: ack rapide + job BullMQ/Redis.
+- MongoDB est fourni par Atlas; aucune configuration MongoDB locale ou container MongoDB n’est prévue pour le MVP.
+- Docker Compose orchestre l’API et Redis; Redis reste privé au réseau Docker.
+- Déploiement recommandé: VPS + Coolify + Docker Compose + MongoDB Atlas. Alternative Render possible avec adaptation.
 - Auth: durcissement minimal, pas refonte complète.
 - Frontend non inclus dans ce plan; l’API sera prête pour un dashboard futur.
 - Les templates WhatsApp devront être créés/validés côté Meta avant usage production.
@@ -164,4 +184,4 @@ Base actuelle: starter Express/TypeScript/MongoDB avec auth, health, Swagger et 
 - Ajouter analytics: taux succès WhatsApp/SMS, coût provider, échecs par opérateur.
 - Ajouter multi-boutique Shopify si plusieurs shops doivent utiliser le même backend.
 - Ajouter rate limiting, audit admin, refresh tokens et rôles plus stricts.
-- Ajouter déploiement Docker + healthchecks Redis/Mongo + monitoring.
+- Ajouter healthchecks Redis/API, monitoring, alerting et backups opérationnels Atlas/Redis.

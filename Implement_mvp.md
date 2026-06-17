@@ -1,7 +1,9 @@
 # Plan D’implémentation Granulaire MVP
 
 ## Objectif
-Livrer un backend MVP deployable qui reçoit `orders/create` Shopify, valide le webhook, crée une commande, envoie une confirmation WhatsApp Meta via job BullMQ, bascule vers SMS Termii si WhatsApp échoue, trace tout dans MongoDB, puis expose une API dashboard protégée pour lecture et retry.
+Livrer un backend MVP deployable qui reçoit `orders/create` Shopify, valide le webhook, crée une commande, envoie une confirmation WhatsApp Meta via job BullMQ, bascule vers SMS Termii si WhatsApp échoue, trace tout dans MongoDB Atlas, puis expose une API dashboard protégée pour lecture et retry.
+
+Le déploiement cible du MVP utilise Docker Compose pour l’API Node.js et Redis. MongoDB n’est pas déployé en container: `MONGODB_URI` pointe directement vers MongoDB Atlas pour éviter de perdre du temps sur l’administration MongoDB locale/prod.
 
 ## Étape 0: Stabilisation Technique
 - Ajouter les dépendances nécessaires:
@@ -12,9 +14,15 @@ Livrer un backend MVP deployable qui reçoit `orders/create` Shopify, valide le 
 - Créer la configuration Jest minimale, sans viser une couverture exhaustive.
 - Vérifier que `npm run tsc -- --noEmit` reste vert après chaque gros bloc.
 - Nettoyer les incohérences existantes si elles bloquent le build ou les nouveaux types.
+- Préparer la base Docker:
+  - `Dockerfile` API Node.js
+  - `.dockerignore`
+  - `docker-compose.yml` avec `api` + `redis`
+  - pas de service MongoDB dans Compose.
 
 Critère d’acceptation:
 - Le projet démarre toujours avec `npm run dev`.
+- Le projet peut aussi démarrer avec `docker compose up`.
 - Le projet compile sans erreur TypeScript.
 
 ## Étape 1: Configuration & Sécurité
@@ -28,8 +36,11 @@ Critère d’acceptation:
   - `metaWhatsApp.templateLanguage`
   - `termii.apiKey`
   - `termii.senderId`
+  - `mongodbUri` connecté à MongoDB Atlas
   - `redisUrl`
 - Mettre à jour `.env.example`.
+- Documenter que `MONGODB_URI` doit être une URI Atlas, par exemple `mongodb+srv://...`.
+- Utiliser `REDIS_URL=redis://:<password>@redis:6379` dans Docker Compose.
 - Remplacer `RANDOM_TOKEN_SECRET` dans `auth.controller.ts` par `config.jwtSecret`.
 - Ajouter un middleware `requireAuth`.
 - Protéger les futures routes dashboard avec ce middleware.
@@ -37,6 +48,7 @@ Critère d’acceptation:
 Critère d’acceptation:
 - Login génère un JWT avec le secret d’environnement.
 - Une route protégée rejette les requêtes sans `Authorization: Bearer <token>`.
+- L’application se connecte à Atlas sans dépendre d’un container MongoDB local.
 
 ## Étape 2: Modèles MongoDB MVP
 - Créer `Order` avec les champs Shopify utiles:
@@ -141,6 +153,12 @@ Critère d’acceptation:
   - `messageId`
   - `channel`
 - Configurer Redis via `REDIS_URL`.
+- Faire tourner Redis via Docker Compose:
+  - image `redis:7.2-alpine`
+  - `appendonly yes`
+  - `requirepass`
+  - volume `redis_data`
+  - aucun port Redis exposé publiquement en prod.
 - Démarrer le worker au boot serveur après init config.
 - Ajouter retries BullMQ avec backoff exponentiel.
 
@@ -148,6 +166,7 @@ Critère d’acceptation:
 - Un webhook ajoute un job.
 - Le worker récupère le job.
 - Les erreurs provider ne crashent pas le serveur.
+- Redis est joignable depuis l’API via le nom de service Docker `redis`.
 
 ## Étape 7: Provider Meta WhatsApp
 - Créer une interface commune `MessagingProvider`.
@@ -255,9 +274,18 @@ Critère d’acceptation:
 - Les tests critiques passent localement.
 - `npm run tsc -- --noEmit` passe.
 
-## Étape 13: Vérification Fonctionnelle Locale
-- Lancer MongoDB et Redis.
-- Lancer `npm run dev`.
+## Étape 13: Docker Compose, Atlas & Vérification Fonctionnelle Locale
+- Vérifier que MongoDB Atlas est prêt:
+  - cluster créé
+  - utilisateur DB créé
+  - IP autorisée ou accès réseau configuré
+  - `MONGODB_URI` renseigné dans `.env`.
+- Lancer Redis et l’API via Docker Compose:
+  - `docker compose up --build`
+- En alternative dev hors Docker:
+  - lancer Redis via Compose
+  - lancer l’API avec `npm run dev`
+  - garder `MONGODB_URI` vers Atlas.
 - Créer un utilisateur via `/api/auth/signup`.
 - Se connecter via `/api/auth/login`.
 - Envoyer un payload Shopify simulé avec HMAC valide.
@@ -271,19 +299,47 @@ Critère d’acceptation:
 
 Critère d’acceptation:
 - Le flux complet webhook -> queue -> WhatsApp ou fallback SMS -> tracking fonctionne.
+- Aucune étape ne nécessite un MongoDB local.
 
-## Étape 14: Préparation Déploiement MVP
+## Étape 14: Préparation Docker Compose MVP
+- Créer un `docker-compose.yml` minimal:
+  - `api`: build local, `env_file: .env`, port API exposé.
+  - `redis`: `redis:7.2-alpine`, mot de passe, AOF, volume persistant.
+  - réseau Docker privé par défaut.
+- Config dev/ngrok:
+  - exposer seulement le port API, par exemple `3600:3600`.
+  - `API_ENDPOINT=https://<fixed-domain-ngrok>`.
+  - Shopify pointe vers `https://<fixed-domain-ngrok>/api/webhooks/shopify/orders-create`.
+- Config prod recommandée:
+  - VPS + Coolify + Docker Compose.
+  - MongoDB Atlas externe.
+  - Redis privé au réseau Docker.
+  - API exposée via proxy HTTPS Coolify.
+- Render:
+  - possible comme alternative.
+  - nécessite une adaptation en services Render/`render.yaml`.
+  - ne doit pas être considéré comme cible principale pour déployer le `docker-compose.yml` tel quel.
+
+Critère d’acceptation:
+- `docker compose up --build` lance l’API et Redis.
+- Redis n’est pas exposé publiquement.
+- Atlas est la seule base MongoDB utilisée.
+
+## Étape 15: Préparation Déploiement MVP
 - Documenter les variables d’environnement obligatoires.
 - Ajouter une section README “Run local”.
+- Ajouter une section README “Run with Docker Compose”.
+- Ajouter une section README “MongoDB Atlas setup”.
 - Ajouter une section README “Webhook Shopify setup”.
 - Ajouter une section README “Meta WhatsApp template”.
 - Ajouter une section README “Redis required”.
+- Ajouter une section README “Deployment target: VPS + Coolify”.
 - Vérifier que l’app fail clairement si une variable critique manque en production.
 - Garder les secrets hors repo.
 
 Critère d’acceptation:
 - Un déploiement peut être configuré sans lire le code.
-- Les prérequis MongoDB/Redis/providers sont explicites.
+- Les prérequis Atlas/Redis/providers sont explicites.
 
 ## Ordre Recommandé De Livraison
 1. Config/auth/env.
@@ -299,11 +355,16 @@ Critère d’acceptation:
 11. Retry.
 12. Swagger.
 13. Tests ciblés.
-14. Documentation déploiement.
+14. Docker Compose + Atlas + vérification locale.
+15. Documentation déploiement.
 
 ## Assumptions
 - Le MVP reste backend-only.
 - Meta WhatsApp utilise un template déjà validé côté Meta.
-- Redis est disponible en local et en production.
+- MongoDB est MongoDB Atlas en dev et en prod; aucun MongoDB container/local n’est nécessaire.
+- Docker Compose est utilisé pour orchestrer l’API et Redis.
+- Redis est disponible via Docker Compose en dev et en production.
+- La cible prod recommandée est VPS + Coolify + Docker Compose + Atlas.
+- Render reste une alternative possible, mais demande une configuration Render dédiée plutôt qu’un Compose direct.
 - Termii est uniquement fallback SMS, pas canal principal.
 - Les tests automatisés sont utiles mais ne doivent pas retarder excessivement un premier MVP fonctionnel.
