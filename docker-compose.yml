@@ -1,0 +1,34 @@
+services:
+  api:
+    build:
+      context: .
+    working_dir: /app
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: ${NODE_ENV:-development}
+      PORT: ${PORT:-3600}
+      REDIS_URL: redis://:${REDIS_PASSWORD:-redis_password}@redis:6379
+    command: npm run live-dev
+    ports:
+      - "${PORT:-3600}:${PORT:-3600}"
+    volumes:
+      - .:/app
+    depends_on:
+      - redis
+    restart: unless-stopped
+
+  redis:
+    image: redis:7.2-alpine
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --requirepass
+      - ${REDIS_PASSWORD:-redis_password}
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+
+volumes:
+  redis_data:

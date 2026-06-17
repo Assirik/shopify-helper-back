@@ -1,0 +1,11 @@
+node_modules
+build
+dist
+coverage
+.git
+.env
+.env.*
+*.log
+npm-debug.log*
+Dockerfile
+docker-compose.yml
