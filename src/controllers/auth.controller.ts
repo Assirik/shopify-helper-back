@@ -1,6 +1,7 @@
 import { NextFunction, Request, Response } from 'express';
 import { User, IUser } from '../models/User';
 import jwt from 'jsonwebtoken';
+import config from '../utilities/config/env.config';
 
 export class AuthController {
   public static async signup(req: Request, res: Response) {
@@ -14,7 +15,6 @@ export class AuthController {
   }
 
   public static login(req: Request, res: Response) {
-    console.log('Login attempt with body:', req.body);
     User.findOne({ userName: req.body.userName })
       .then(async user => {
         if (!user) {
@@ -28,12 +28,29 @@ export class AuthController {
         delete retour.password;
         res.status(200).json({
           userId: user._id,
-          token: jwt.sign({ userId: user._id }, 'RANDOM_TOKEN_SECRET', { expiresIn: '365d' }),
+          token: jwt.sign({ userId: user._id }, config.jwtSecret, { expiresIn: '365d' }),
           user: retour,
           message: 'Successful'
         });
       })
       .catch((error: any) => res.status(500).json({ error }));
+  }
+
+  public static async me(req: Request, res: Response) {
+    try {
+      const user = await User.findById(req.userId);
+
+      if (!user) {
+        return res.status(404).json({ error: 'UserNotFound' });
+      }
+
+      const retour: Partial<IUser> = user.toObject() as IUser;
+      delete retour.password;
+
+      return res.status(200).json({ user: retour });
+    } catch (error) {
+      return res.status(500).json({ error });
+    }
   }
 
   public static async resetPassword(req: Request, res: Response) {
