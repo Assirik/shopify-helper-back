@@ -7,6 +7,7 @@ declare global {
       userId?: string;
       user?: IUser;
       device?: IDevice; // Add the device property to the Request interface
+      rawBody?: Buffer;
     }
   }
 }

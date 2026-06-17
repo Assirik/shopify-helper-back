@@ -1,13 +1,20 @@
 import express from 'express';
 import cors from 'cors';
 import swaggerUi from 'swagger-ui-express';
+import { IncomingMessage, ServerResponse } from 'http';
 import { swaggerSpec } from './docs/swagger.config';
 import router from './routes/routes';
 import config from './utilities/config/env.config';
 
 const app = express();
 
-app.use(express.json({ limit: '1mb' }));
+const captureRawBody = (req: IncomingMessage, _res: ServerResponse, buffer: Buffer) => {
+  if (buffer.length) {
+    (req as express.Request).rawBody = Buffer.from(buffer);
+  }
+};
+
+app.use(express.json({ limit: '1mb', verify: captureRawBody }));
 app.use(express.urlencoded({ extended: false }));
 app.use(cors({ origin: config.allowedOrigins }));
 
