@@ -174,7 +174,7 @@ const processOrderConfirmation = async (job: Job<SendOrderConfirmationJobData>) 
 
   const customer = order.customerId ? await Customer.findById(order.customerId) : null;
   const input = buildOrderConfirmationInput(order, customer);
-  await markMessageAsSending(job, input);
+  const message = await markMessageAsSending(job, input);
 
   const result = await metaWhatsAppProvider.sendOrderConfirmation(input);
 
@@ -183,6 +183,19 @@ const processOrderConfirmation = async (job: Job<SendOrderConfirmationJobData>) 
       status: MessageStatus.SENT,
       providerMessageId: result.providerMessageId,
       providerResponse: result.response
+    },
+    $unset: {
+      errorCode: '',
+      errorMessage: ''
+    },
+    $push: {
+      attempts: {
+        attemptNumber: message.attemptCount,
+        status: MessageStatus.SENT,
+        providerMessageId: result.providerMessageId,
+        providerResponse: result.response,
+        at: new Date()
+      }
     }
   });
 
@@ -238,7 +251,7 @@ const processSmsFallback = async (job: Job<SendOrderConfirmationJobData>) => {
     currency: order.currency
   });
 
-  await markSmsMessageAsSending(job, text);
+  const message = await markSmsMessageAsSending(job, text);
 
   const result = await termiiSmsProvider.sendSms({
     orderId: order._id.toString(),
@@ -251,6 +264,19 @@ const processSmsFallback = async (job: Job<SendOrderConfirmationJobData>) => {
       status: MessageStatus.SENT,
       providerMessageId: result.providerMessageId,
       providerResponse: result.response
+    },
+    $unset: {
+      errorCode: '',
+      errorMessage: ''
+    },
+    $push: {
+      attempts: {
+        attemptNumber: message.attemptCount,
+        status: MessageStatus.SENT,
+        providerMessageId: result.providerMessageId,
+        providerResponse: result.response,
+        at: new Date()
+      }
     }
   });
 
@@ -339,11 +365,21 @@ const handleJobFailure = async (
     return;
   }
 
+  const errorCode = err instanceof ProviderError ? err.code : 'PROVIDER_ERROR';
+
   await Message.findByIdAndUpdate(messageId, {
     $set: {
       status: MessageStatus.FAILED,
-      errorCode: err instanceof ProviderError ? err.code : 'PROVIDER_ERROR',
+      errorCode,
       errorMessage: err.message
+    },
+    $push: {
+      attempts: {
+        status: MessageStatus.FAILED,
+        errorCode,
+        errorMessage: err.message,
+        at: new Date()
+      }
     }
   });
 

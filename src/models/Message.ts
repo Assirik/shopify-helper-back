@@ -19,6 +19,19 @@ export enum MessageStatus {
   FAILED = 'failed'
 }
 
+const MessageAttemptSchema = new Schema<IMessageAttempt>(
+  {
+    attemptNumber: { type: Number, min: 1 },
+    status: { type: String, enum: [MessageStatus.SENT, MessageStatus.FAILED], required: true },
+    providerMessageId: { type: String, trim: true },
+    providerResponse: { type: Schema.Types.Mixed },
+    errorCode: { type: String, trim: true },
+    errorMessage: { type: String, trim: true },
+    at: { type: Date, default: Date.now }
+  },
+  { _id: false }
+);
+
 const MessageSchema = new Schema<IMessage>(
   {
     orderId: { type: Schema.Types.ObjectId, ref: 'Order', required: true, index: true },
@@ -33,6 +46,7 @@ const MessageSchema = new Schema<IMessage>(
     providerResponse: { type: Schema.Types.Mixed },
     errorCode: { type: String, trim: true },
     errorMessage: { type: String, trim: true },
+    attempts: { type: [MessageAttemptSchema], default: [] },
     fallbackOfMessageId: { type: Schema.Types.ObjectId, ref: 'Message', index: true }
   },
   {
@@ -51,6 +65,16 @@ MessageSchema.set('toJSON', {
 
 export const Message = mongoose.model<IMessage>('Message', MessageSchema);
 
+export interface IMessageAttempt {
+  attemptNumber?: number;
+  status: MessageStatus.SENT | MessageStatus.FAILED;
+  providerMessageId?: string;
+  providerResponse?: unknown;
+  errorCode?: string;
+  errorMessage?: string;
+  at: Date;
+}
+
 export interface IMessage extends Document {
   _id: Types.ObjectId;
   orderId: Types.ObjectId;
@@ -65,6 +89,7 @@ export interface IMessage extends Document {
   providerResponse?: unknown;
   errorCode?: string;
   errorMessage?: string;
+  attempts: IMessageAttempt[];
   fallbackOfMessageId?: Types.ObjectId;
   createdAt: Date;
   updatedAt: Date;
