@@ -54,8 +54,8 @@ const OrderSchema = new Schema<IOrder>(
     orderStatusUrl: { type: String, trim: true },
     noteAttributes: { type: Schema.Types.Mixed },
     isTest: { type: Boolean, default: false, index: true },
-    cancelledAt: { type: Date },
-    cancelReason: { type: String, trim: true },
+    shopifyCancelledAt: { type: Date },
+    shopifyCancelReason: { type: String, trim: true },
     financialStatus: { type: String, trim: true },
     fulfillmentStatus: { type: String, trim: true },
     notificationStatus: {
@@ -106,8 +106,8 @@ export interface IOrder extends Document {
   orderStatusUrl?: string;
   noteAttributes?: Record<string, string>;
   isTest: boolean;
-  cancelledAt?: Date;
-  cancelReason?: string;
+  shopifyCancelledAt?: Date;
+  shopifyCancelReason?: string;
   financialStatus?: string;
   fulfillmentStatus?: string;
   notificationStatus: NotificationStatus;

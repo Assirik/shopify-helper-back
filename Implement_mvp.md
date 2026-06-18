@@ -54,6 +54,12 @@ Critère d’acceptation:
 - L’application se connecte à Atlas sans dépendre d’un container MongoDB local.
 
 ## Étape 2: Modèles MongoDB MVP
+Notes importantes:
+- Ne pas mélanger l’annulation Shopify et l’annulation du workflow confirmation. Utiliser des champs séparés:
+  - `shopifyCancelledAt`, `shopifyCancelReason`
+  - `confirmationCancelledAt`, `confirmationCancelReason`
+- Les champs liés à la confirmation client sont planifiés à l’étape 11. Les premiers modèles MVP déjà créés ne les contiennent pas encore tous.
+
 - Créer `Order` avec les champs Shopify utiles:
   - identifiants Shopify
   - référence `customerId`
@@ -66,7 +72,7 @@ Critère d’acceptation:
   - gateways de paiement et `isCashOnDelivery`
   - tags, source, URL statut commande
   - note attributes Easysell
-  - indicateurs `isTest`, `cancelledAt`, `cancelReason`
+  - indicateurs `isTest`, `shopifyCancelledAt`, `shopifyCancelReason`
   - statuts Shopify
   - `notificationStatus`, avec `skipped` pour les commandes persistées mais non notifiées
 - Créer `Customer` pour avoir une liste clients exploitable:
@@ -321,7 +327,8 @@ Critère d’acceptation:
 - Étendre `Order` avec:
   - `customerConfirmationStatus`: `pending | confirmed | needs_attention | expired | cancelled | sms_only`
   - `confirmationSource`: `whatsapp_button | admin`
-  - `confirmedAt`, `cancelledAt`, `expiredAt`
+  - `confirmedAt`, `confirmationCancelledAt`, `expiredAt`
+  - `confirmationCancelReason`
   - `lastCustomerMessageAt`, `lastCustomerMessageText`
   - `reminderCount`, `lastReminderAt`, `lastReminderSource`
   - `confirmationPayload`, `attentionReason`
@@ -389,7 +396,7 @@ Critère d’acceptation:
 - Annulation manuelle admin:
   - endpoint `POST /api/orders/:id/cancel`
   - passer `customerConfirmationStatus=cancelled`
-  - définir `cancelledAt`
+  - définir `confirmationCancelledAt`
   - ne plus relancer automatiquement
 - Relance manuelle:
   - endpoint `POST /api/orders/:id/remind`

@@ -474,8 +474,8 @@ export class ShopifyWebhookController {
         isCashOnDelivery: cod,
         sourceName: payload.source_name,
         isTest: Boolean(payload.test),
-        cancelledAt: payload.cancelled_at,
-        cancelReason: payload.cancel_reason,
+        shopifyCancelledAt: payload.cancelled_at,
+        shopifyCancelReason: payload.cancel_reason,
         skipNotificationReason
       },
       'Extracted Shopify order and customer data'
@@ -561,8 +561,8 @@ export class ShopifyWebhookController {
       orderStatusUrl: payload.order_status_url || undefined,
       noteAttributes,
       isTest: Boolean(payload.test),
-      cancelledAt: payload.cancelled_at ? new Date(payload.cancelled_at) : undefined,
-      cancelReason: payload.cancel_reason || undefined,
+      shopifyCancelledAt: payload.cancelled_at ? new Date(payload.cancelled_at) : undefined,
+      shopifyCancelReason: payload.cancel_reason || undefined,
       financialStatus: payload.financial_status || undefined,
       fulfillmentStatus: payload.fulfillment_status || undefined,
       notificationStatus

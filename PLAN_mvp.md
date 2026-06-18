@@ -49,6 +49,12 @@ Déploiement cible MVP: Docker Compose pour orchestrer l’API Node.js et Redis.
 - Ajouter des logs Pino structurés à chaque étape importante: réception webhook, idempotence, extraction client/commande, création client, création commande, création produit, audit webhook, message, enqueue ou skip.
 
 ### Données MongoDB
+Notes importantes:
+- Ne pas réutiliser le même champ pour deux sens métier différents. L’annulation Shopify et l’annulation du workflow de confirmation client/admin doivent rester séparées:
+  - Shopify: `shopifyCancelledAt`, `shopifyCancelReason`
+  - Workflow confirmation: `confirmationCancelledAt`, `confirmationCancelReason`
+- Les champs de confirmation client listés ci-dessous font partie du nouveau workflow WhatsApp entrant; ils ne sont pas encore tous présents dans les modèles actuellement implémentés.
+
 - Ajouter `Order`:
   - `shopifyOrderId`, `shopifyOrderName`
   - `customerId`
@@ -58,12 +64,13 @@ Déploiement cible MVP: Docker Compose pour orchestrer l’API Node.js et Redis.
   - `shippingPrice`, `shippingTitle`
   - `paymentGatewayNames`, `isCashOnDelivery`
   - `tags`, `sourceName`, `orderStatusUrl`, `noteAttributes`
-  - `isTest`, `cancelledAt`, `cancelReason`
+  - `isTest`, `shopifyCancelledAt`, `shopifyCancelReason`
   - `financialStatus`, `fulfillmentStatus`
   - `notificationStatus`: `pending | sent | failed | skipped | partially_sent`
   - `customerConfirmationStatus`: `pending | confirmed | needs_attention | expired | cancelled | sms_only`
   - `confirmationSource`: `whatsapp_button | admin`
-  - `confirmedAt`, `cancelledAt`, `expiredAt`
+  - `confirmedAt`, `confirmationCancelledAt`, `expiredAt`
+  - `confirmationCancelReason`
   - `lastCustomerMessageAt`, `lastCustomerMessageText`
   - `reminderCount`, `lastReminderAt`, `lastReminderSource`
   - `confirmationPayload`, `attentionReason`
