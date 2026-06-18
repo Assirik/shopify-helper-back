@@ -10,13 +10,14 @@ export interface SendOrderConfirmationJobData {
   channel: 'whatsapp' | 'sms';
 }
 
-const getRedisConnection = () => {
+export const getRedisConnection = () => {
   const redisUrl = new URL(config.redisUrl);
 
   return {
     host: redisUrl.hostname,
     port: Number(redisUrl.port || 6379),
-    password: redisUrl.password || undefined
+    password: redisUrl.password || undefined,
+    maxRetriesPerRequest: null
   };
 };
 

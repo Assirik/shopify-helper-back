@@ -4,6 +4,7 @@ import app from './src/app';
 import config from './src/utilities/config/env.config';
 import log from './src/utilities/logger/logger';
 import { DatabaseService } from './src/utilities/services/database.service';
+import { startNotificationWorker, stopNotificationWorker } from './src/workers/notification.worker';
 
 const port = config.port;
 app.set('port', port);
@@ -50,8 +51,34 @@ const logNetworkAddresses = () => {
 };
 
 server.on('error', errorHandler);
-server.listen(port, () => {
+server.listen(port, async () => {
   log.info(`Server listening at ${config.apiEndpoint}`);
   logNetworkAddresses();
-  DatabaseService.connectWithRetry();
+
+  await DatabaseService.connectWithRetry();
+  startNotificationWorker();
+});
+
+const shutdown = async (signal: string) => {
+  log.info({ signal }, 'Shutting down server');
+
+  await stopNotificationWorker();
+  server.close(() => {
+    log.info('HTTP server closed');
+    process.exit(0);
+  });
+};
+
+process.on('SIGTERM', () => {
+  shutdown('SIGTERM').catch(err => {
+    log.error({ err }, 'Shutdown failed');
+    process.exit(1);
+  });
+});
+
+process.on('SIGINT', () => {
+  shutdown('SIGINT').catch(err => {
+    log.error({ err }, 'Shutdown failed');
+    process.exit(1);
+  });
 });

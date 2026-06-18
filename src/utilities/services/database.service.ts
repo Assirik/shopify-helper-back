@@ -5,18 +5,18 @@ import log from '../logger/logger';
 export class DatabaseService {
   private static retryCount = 0;
 
-  public static connectWithRetry = () => {
+  public static connectWithRetry = async (): Promise<void> => {
     log.info('Connecting to MongoDB');
 
-    mongoose
-      .connect(config.mongodbUri)
-      .then(() => {
-        log.info('MongoDB connected');
-      })
-      .catch((err: unknown) => {
-        DatabaseService.retryCount += 1;
-        log.error({ err }, `MongoDB connection failed. Retry ${DatabaseService.retryCount} in 5 seconds.`);
-        setTimeout(DatabaseService.connectWithRetry, 5000);
-      });
+    try {
+      await mongoose.connect(config.mongodbUri);
+      log.info('MongoDB connected');
+    } catch (err) {
+      DatabaseService.retryCount += 1;
+      log.error({ err }, `MongoDB connection failed. Retry ${DatabaseService.retryCount} in 5 seconds.`);
+
+      await new Promise(resolve => setTimeout(resolve, 5000));
+      return DatabaseService.connectWithRetry();
+    }
   };
 }
