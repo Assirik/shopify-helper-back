@@ -34,6 +34,7 @@ Critère d’acceptation:
   - `shopify.webhookSecret`
   - `shopify.shopDomain`
   - `metaWhatsApp.accessToken`
+  - `metaWhatsApp.appSecret`
   - `metaWhatsApp.phoneNumberId`
   - `metaWhatsApp.templateName`
   - `metaWhatsApp.templateLanguage`
@@ -321,7 +322,9 @@ Critère d’acceptation:
 - Étendre `env.config.ts` avec les variables nécessaires au nouveau flux:
   - `metaWhatsApp.confirmedTemplateName`
   - `metaWhatsApp.webhookVerifyToken`
+  - `metaWhatsApp.appSecret`
 - Ajouter dans `.env.example`:
+  - `META_WHATSAPP_APP_SECRET=...`
   - `META_WHATSAPP_CONFIRMED_TEMPLATE_NAME=order_confirmed`
   - `META_WHATSAPP_WEBHOOK_VERIFY_TOKEN=...`
 - Étendre `Order` avec:
@@ -332,6 +335,7 @@ Critère d’acceptation:
   - `lastCustomerMessageAt`, `lastCustomerMessageText`
   - `reminderCount`, `lastReminderAt`, `lastReminderSource`
   - `confirmationPayload`, `attentionReason`
+  - `needsHelpdeskAttention`
 - Étendre `Message` avec:
   - statuts provider `delivered` et `read`
   - `templatePurpose`: `order_confirmation_request | order_confirmed | reminder | sms_fallback`
@@ -357,6 +361,7 @@ Critère d’acceptation:
   - comparer avec `META_WHATSAPP_WEBHOOK_VERIFY_TOKEN`
   - retourner le challenge si valide, sinon `403`
 - `POST`:
+  - vérifier la signature Meta `X-Hub-Signature-256` avec `META_WHATSAPP_APP_SECRET`
   - recevoir les événements Meta WhatsApp
   - extraire les messages entrants
   - extraire les statuts `sent`, `delivered`, `read`, `failed`
@@ -370,7 +375,7 @@ Critère d’acceptation:
 - Pour un message libre:
   - stocker le texte
   - passer la commande en `needs_attention`
-  - définir `lastCustomerMessageAt`, `lastCustomerMessageText`, `attentionReason`
+  - définir `lastCustomerMessageAt`, `lastCustomerMessageText`, `attentionReason`, `needsHelpdeskAttention`
 - Pour les statuts Meta:
   - retrouver le `Message` par `providerMessageId`/`wamid` si possible
   - mettre à jour `sent`, `delivered`, `read` ou `failed`

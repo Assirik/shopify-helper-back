@@ -100,7 +100,8 @@ const OrderSchema = new Schema<IOrder>(
     lastReminderAt: { type: Date },
     lastReminderSource: { type: String, enum: Object.values(ReminderSource) },
     confirmationPayload: { type: Schema.Types.Mixed },
-    attentionReason: { type: String, trim: true }
+    attentionReason: { type: String, trim: true },
+    needsHelpdeskAttention: { type: Boolean, default: false, index: true }
   },
   {
     timestamps: true
@@ -162,6 +163,7 @@ export interface IOrder extends Document {
   lastReminderSource?: ReminderSource;
   confirmationPayload?: unknown;
   attentionReason?: string;
+  needsHelpdeskAttention: boolean;
   createdAt: Date;
   updatedAt: Date;
 }

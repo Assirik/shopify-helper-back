@@ -15,6 +15,7 @@ Déploiement cible MVP: Docker Compose pour orchestrer l’API Node.js et Redis.
   - `SHOPIFY_WEBHOOK_SECRET`
   - `SHOPIFY_SHOP_DOMAIN` optionnel
   - `META_WHATSAPP_ACCESS_TOKEN`
+  - `META_WHATSAPP_APP_SECRET`
   - `META_WHATSAPP_PHONE_NUMBER_ID`
   - `META_WHATSAPP_TEMPLATE_NAME`
   - `META_WHATSAPP_CONFIRMED_TEMPLATE_NAME`
@@ -73,7 +74,7 @@ Notes importantes:
   - `confirmationCancelReason`
   - `lastCustomerMessageAt`, `lastCustomerMessageText`
   - `reminderCount`, `lastReminderAt`, `lastReminderSource`
-  - `confirmationPayload`, `attentionReason`
+  - `confirmationPayload`, `attentionReason`, `needsHelpdeskAttention`
   - timestamps
 - Ajouter `Customer`:
   - `shopifyCustomerId`, `shopifyCustomerGraphqlId`
@@ -158,6 +159,7 @@ Notes importantes:
 - Ajouter:
   - `GET /api/webhooks/whatsapp` pour la vérification Meta avec `META_WHATSAPP_WEBHOOK_VERIFY_TOKEN`
   - `POST /api/webhooks/whatsapp` pour recevoir les messages entrants, clics bouton et statuts Meta
+- Protéger `POST /api/webhooks/whatsapp` avec la signature Meta `X-Hub-Signature-256` et `META_WHATSAPP_APP_SECRET`.
 - Quand le client clique sur le bouton Confirmer:
   - lire `button.payload`
   - parser `CONFIRM_ORDER:{orderId}`
@@ -168,10 +170,12 @@ Notes importantes:
 - Si le client répond un message libre:
   - stocker le message
   - passer la commande en `needs_attention`
+  - définir `needsHelpdeskAttention=true`
   - ne pas confirmer automatiquement
 - Si le client confirme après expiration ou annulation:
   - ne pas confirmer automatiquement
   - passer ou garder la commande en `needs_attention`
+  - définir `needsHelpdeskAttention=true`
 - Les statuts Meta `sent/delivered/read/failed` mettent à jour les `Message` correspondants quand le `wamid` est connu.
 
 ### Relances & prise en charge admin

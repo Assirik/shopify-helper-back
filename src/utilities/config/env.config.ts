@@ -23,6 +23,7 @@ export default {
   },
   metaWhatsApp: {
     accessToken: process.env.META_WHATSAPP_ACCESS_TOKEN || '',
+    appSecret: process.env.META_WHATSAPP_APP_SECRET || process.env.META_APP_SECRET || '',
     phoneNumberId: process.env.META_WHATSAPP_PHONE_NUMBER_ID || '',
     templateName: process.env.META_WHATSAPP_TEMPLATE_NAME || '',
     confirmedTemplateName: process.env.META_WHATSAPP_CONFIRMED_TEMPLATE_NAME || 'order_confirmed',
