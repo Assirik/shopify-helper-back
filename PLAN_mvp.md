@@ -34,16 +34,43 @@ Déploiement cible MVP: Docker Compose pour orchestrer l’API Node.js et Redis.
 - Valider `X-Shopify-Hmac-Sha256` avec le raw body et `SHOPIFY_WEBHOOK_SECRET`.
 - Répondre rapidement `200/202` après validation et persistance initiale, sans attendre l’envoi des messages.
 - Gérer l’idempotence avec `X-Shopify-Webhook-Id` et/ou `shopifyOrderId` pour éviter les doublons.
-- Extraire uniquement les champs utiles au MVP: order id, order name, customer name, phone, email, total, currency, financial status, fulfillment status.
+- Supporter le payload Shopify direct et les payloads de test locaux enveloppés dans `{ payload: ... }`.
+- Extraire les champs utiles au MVP:
+  - order id, order name, customer name, phone, email
+  - total, subtotal, total restant à collecter, frais de livraison, devise
+  - financial status, fulfillment status
+  - produits commandés (`line_items`)
+  - mode de paiement, notamment Cash on Delivery
+  - tags, source, URL de statut commande
+  - champs Easysell dans `note_attributes`: `Nom complet`, `Téléphone`, `Adresse`, `Région`, `country`, `full_url`.
+- Ne pas enqueue de notification pour les commandes `test`, annulées (`cancelled_at`) ou `financial_status=voided`; les persister quand même avec statut `skipped`.
+- Ajouter des logs Pino structurés à chaque étape importante: réception webhook, idempotence, extraction client/commande, création client, création commande, création produit, audit webhook, message, enqueue ou skip.
 
 ### Données MongoDB
 - Ajouter `Order`:
   - `shopifyOrderId`, `shopifyOrderName`
+  - `customerId`
   - `customerName`, `customerPhoneRaw`, `customerPhoneE164`, `customerEmail`
-  - `totalPrice`, `currency`
+  - `lineItems` avec produit, variante, quantité, prix, SKU, vendor
+  - `totalPrice`, `subtotalPrice`, `currentTotalPrice`, `totalOutstanding`, `totalDiscounts`, `currency`
+  - `shippingPrice`, `shippingTitle`
+  - `paymentGatewayNames`, `isCashOnDelivery`
+  - `tags`, `sourceName`, `orderStatusUrl`, `noteAttributes`
+  - `isTest`, `cancelledAt`, `cancelReason`
   - `financialStatus`, `fulfillmentStatus`
-  - `notificationStatus`: `pending | sent | failed | partially_sent`
+  - `notificationStatus`: `pending | sent | failed | skipped | partially_sent`
   - timestamps
+- Ajouter `Customer`:
+  - `shopifyCustomerId`, `shopifyCustomerGraphqlId`
+  - `fullName`, `firstName`, `lastName`
+  - `phoneRaw`, `phoneE164`, `email`
+  - adresse, ville/région/pays
+  - `orderCount`, `lastOrderId`, `lastOrderName`, `lastOrderAt`
+- Ajouter `Product` pour préparer le futur module stock:
+  - `shopifyProductId`, `title`, `vendor`, `productExists`
+  - variantes avec `shopifyVariantId`, `title`, `sku`, `lastKnownPrice`, `inventoryManagement`
+  - `lastOrderId`, `lastOrderName`, `lastSeenAt`, `totalOrderedQuantity`
+  - champs stock futurs: `stockTrackingEnabled`, `stockQuantity`, `lowStockThreshold`
 - Ajouter `Message`:
   - `orderId`
   - `channel`: `whatsapp | sms`
@@ -101,12 +128,14 @@ Déploiement cible MVP: Docker Compose pour orchestrer l’API Node.js et Redis.
 ### API Dashboard / Helpdesk MVP
 - Protéger avec JWT.
 - Ajouter:
+  - `GET /api/customers`
   - `GET /api/orders`
   - `GET /api/orders/:id`
   - `GET /api/messages`
   - `GET /api/messages/:id`
   - `POST /api/messages/:id/retry`
 - Filtres MVP:
+  - clients: `search`, `phone`, `email`, pagination
   - `status`
   - `channel`
   - `provider`
@@ -136,12 +165,13 @@ Déploiement cible MVP: Docker Compose pour orchestrer l’API Node.js et Redis.
 - Corriger les incohérences mineures existantes si rencontrées, notamment les types Express obsolètes ou imports inutiles.
 
 ### Déploiement Docker Compose
-- Ajouter un `Dockerfile` pour l’API Node.js.
-- Ajouter un `docker-compose.yml` orienté dev/prod simple avec:
+- Ajouter un `Dockerfile` dev minimal pour l’API Node.js.
+- Ajouter un `docker-compose.yml` et un `docker-compose.dev.yml` orientés dev simple avec:
   - service `api`
   - service `redis`
   - volume persistant Redis
   - réseau privé Docker
+- En dev, bind-mount tout le projet dans `/app` et utiliser les `node_modules` locaux pour que `npm install` local + `docker compose restart api` suffise sans rebuild.
 - Ne pas inclure MongoDB dans Compose: `MONGODB_URI` doit pointer vers Atlas.
 - En dev, exposer seulement l’API sur le port local utilisé par ngrok.
 - En prod, exposer l’API via reverse proxy/Coolify; garder Redis non public.

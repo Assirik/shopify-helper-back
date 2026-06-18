@@ -175,3 +175,6 @@ $RECYCLE.BIN/
 # build output
 dist/
 build/
+
+
+shopify_*.json

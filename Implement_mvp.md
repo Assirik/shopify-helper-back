@@ -15,10 +15,13 @@ Le déploiement cible du MVP utilise Docker Compose pour l’API Node.js et Redi
 - Vérifier que `npm run tsc -- --noEmit` reste vert après chaque gros bloc.
 - Nettoyer les incohérences existantes si elles bloquent le build ou les nouveaux types.
 - Préparer la base Docker:
-  - `Dockerfile` API Node.js
+  - `Dockerfile` API Node.js minimal pour le dev
   - `.dockerignore`
   - `docker-compose.yml` avec `api` + `redis`
+  - `docker-compose.dev.yml` avec bind mount du projet local
   - pas de service MongoDB dans Compose.
+- En dev, garder `node_modules` en local et bind-mount tout le projet dans `/app`.
+- Après un `npm install` local, un simple `docker compose restart api` ou `docker compose down && docker compose up` doit suffire, sans rebuild.
 
 Critère d’acceptation:
 - Le projet démarre toujours avec `npm run dev`.
@@ -53,11 +56,30 @@ Critère d’acceptation:
 ## Étape 2: Modèles MongoDB MVP
 - Créer `Order` avec les champs Shopify utiles:
   - identifiants Shopify
+  - référence `customerId`
   - client
   - téléphone brut et normalisé
+  - produits commandés (`lineItems`)
   - total/devise
+  - subtotal, current total, montant restant à collecter, discounts
+  - frais/titre de livraison
+  - gateways de paiement et `isCashOnDelivery`
+  - tags, source, URL statut commande
+  - note attributes Easysell
+  - indicateurs `isTest`, `cancelledAt`, `cancelReason`
   - statuts Shopify
-  - `notificationStatus`
+  - `notificationStatus`, avec `skipped` pour les commandes persistées mais non notifiées
+- Créer `Customer` pour avoir une liste clients exploitable:
+  - identifiants Shopify
+  - nom, téléphone brut/normalisé, email
+  - adresse, ville/région/pays
+  - nombre de commandes et dernière commande
+- Créer `Product` pour préparer le futur module gestion de stock:
+  - identifiant produit Shopify
+  - titre, vendor, existence Shopify
+  - variantes Shopify avec SKU, prix vu, inventory management
+  - quantité totale commandée observée
+  - champs stock futurs désactivés par défaut
 - Créer `Message` avec:
   - commande liée
   - canal `whatsapp | sms`
@@ -79,6 +101,8 @@ Critère d’acceptation:
 Critère d’acceptation:
 - Une commande Shopify ne peut pas être créée deux fois.
 - Un webhook déjà reçu est reconnu comme doublon.
+- Un client peut être créé/mis à jour depuis une commande.
+- Un produit et ses variantes peuvent être créés/mis à jour depuis `line_items`.
 
 ## Étape 3: Normalisation Téléphone Sénégal
 - Créer un service `phoneNormalization.service.ts`.
@@ -118,12 +142,19 @@ Critère d’acceptation:
 - Extraire du payload Shopify:
   - `id`
   - `name`
+  - payload direct Shopify ou payload local enveloppé dans `{ payload: ... }`
   - `customer.first_name`
   - `customer.last_name`
   - `customer.email`
   - `phone`, `customer.phone`, `shipping_address.phone`, `billing_address.phone`
+  - `note_attributes` Easysell (`Nom complet`, `Téléphone`, `Adresse`, `Région`, `country`, `full_url`)
   - `total_price`
+  - `subtotal_price`, `current_total_price`, `total_outstanding`, `total_discounts`
+  - frais et titre de livraison
   - `currency`
+  - `payment_gateway_names`, tags, source, URL statut commande
+  - `line_items`
+  - `test`, `cancelled_at`, `cancel_reason`
   - `financial_status`
   - `fulfillment_status`
 - Choisir le premier téléphone disponible dans l’ordre:
@@ -132,16 +163,33 @@ Critère d’acceptation:
   - `customer.phone`
   - `phone`
 - Créer/mettre à jour `Order`.
+- Créer/mettre à jour `Customer`.
+- Créer/mettre à jour `Product` et ses variantes depuis les `line_items`, sans encore gérer les décréments de stock.
 - Créer `WebhookEvent`.
 - Créer un premier `Message` WhatsApp en `queued` si numéro valide.
 - Si numéro invalide, marquer `Order.notificationStatus = failed`.
+- Si commande test, annulée ou `financial_status=voided`, créer la commande et le message d’audit mais ne pas enqueue; marquer `Order.notificationStatus = skipped`.
 - Enqueue le job BullMQ seulement après persistance.
 - Répondre vite `202`.
+- Ajouter des logs Pino structurés pour suivre tout le flux:
+  - réception webhook
+  - doublon par `webhookId`
+  - doublon par `shopifyOrderId`
+  - champs requis manquants
+  - extraction client/commande
+  - upsert client
+  - création commande
+  - upsert produits
+  - stockage `WebhookEvent`
+  - création message
+  - enqueue ou skip
 
 Critère d’acceptation:
 - Le webhook crée une commande et un message WhatsApp queued.
+- Le webhook alimente aussi les clients et produits.
 - Le endpoint ne fait pas d’appel Meta/Termii directement.
 - Un doublon ne recrée pas de message inutile.
+- Une commande test/annulée/voided ne déclenche pas de notification.
 
 ## Étape 6: Queue BullMQ + Worker
 - Créer une queue `notifications`.
@@ -206,8 +254,14 @@ Critère d’acceptation:
 
 ## Étape 9: API Dashboard Orders
 - Ajouter routes protégées:
+  - `GET /api/customers`
   - `GET /api/orders`
   - `GET /api/orders/:id`
+- Pour `GET /api/customers`, supporter:
+  - pagination `page`, `limit`
+  - recherche texte `search`
+  - filtre `phone`
+  - filtre `email`
 - Supporter:
   - pagination `page`, `limit`
   - filtre `status`
@@ -220,6 +274,7 @@ Critère d’acceptation:
 
 Critère d’acceptation:
 - Sans JWT: `401`.
+- Avec JWT: liste paginée des clients.
 - Avec JWT: liste paginée des commandes.
 - Le détail montre commande + messages associés.
 
@@ -265,6 +320,9 @@ Critère d’acceptation:
 - Ajouter tests API Supertest sur:
   - webhook signature invalide
   - webhook signature valide
+  - payload direct Shopify et payload enveloppé `{ payload: ... }`
+  - extraction client depuis `note_attributes`
+  - skip des commandes test/annulées/voided
   - endpoints dashboard sans JWT
   - retry message non failed refusé.
 - Mocker Meta, Termii, Redis si nécessaire pour éviter dépendance externe forte.
@@ -306,6 +364,11 @@ Critère d’acceptation:
   - `api`: build local, `env_file: .env`, port API exposé.
   - `redis`: `redis:7.2-alpine`, mot de passe, AOF, volume persistant.
   - réseau Docker privé par défaut.
+- Créer un `docker-compose.dev.yml` avec:
+  - bind mount `.:/app`
+  - pas de volume anonyme sur `node_modules`
+  - commande `npm run live-dev`
+  - dépendances installées localement visibles dans le conteneur.
 - Config dev/ngrok:
   - exposer seulement le port API, par exemple `3600:3600`.
   - `API_ENDPOINT=https://<fixed-domain-ngrok>`.
@@ -346,7 +409,7 @@ Critère d’acceptation:
 2. Modèles MongoDB.
 3. Normalisation téléphone.
 4. HMAC Shopify.
-5. Webhook ingestion + idempotence.
+5. Webhook ingestion + idempotence + clients/produits/logs.
 6. BullMQ/Redis.
 7. Worker.
 8. Meta WhatsApp.
