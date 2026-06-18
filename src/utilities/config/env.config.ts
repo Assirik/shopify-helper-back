@@ -26,7 +26,8 @@ export default {
     phoneNumberId: process.env.META_WHATSAPP_PHONE_NUMBER_ID || '',
     templateName: process.env.META_WHATSAPP_TEMPLATE_NAME || '',
     templateLanguage:
-      process.env.META_WHATSAPP_TEMPLATE_LANGUAGE || process.env.META_WHATSAPP_TEMPLATE_LANGUAGE_CODE || 'fr'
+      process.env.META_WHATSAPP_TEMPLATE_LANGUAGE || process.env.META_WHATSAPP_TEMPLATE_LANGUAGE_CODE || 'fr',
+    graphApiVersion: process.env.META_WHATSAPP_GRAPH_API_VERSION || 'v20.0'
   },
   termii: {
     apiKey: process.env.TERMII_API_KEY || '',

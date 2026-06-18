@@ -26,6 +26,8 @@ const MessageSchema = new Schema<IMessage>(
     provider: { type: String, enum: Object.values(MessageProvider), required: true, index: true },
     status: { type: String, enum: Object.values(MessageStatus), default: MessageStatus.QUEUED, index: true },
     templateName: { type: String, trim: true },
+    templateLanguage: { type: String, trim: true },
+    buttonPayload: { type: String, trim: true, index: true },
     attemptCount: { type: Number, default: 0, min: 0 },
     providerMessageId: { type: String, trim: true, index: true },
     providerResponse: { type: Schema.Types.Mixed },
@@ -56,6 +58,8 @@ export interface IMessage extends Document {
   provider: MessageProvider;
   status: MessageStatus;
   templateName?: string;
+  templateLanguage?: string;
+  buttonPayload?: string;
   attemptCount: number;
   providerMessageId?: string;
   providerResponse?: unknown;
