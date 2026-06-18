@@ -10,6 +10,15 @@ export enum NotificationStatus {
   PARTIALLY_SENT = 'partially_sent'
 }
 
+export enum CustomerConfirmationStatus {
+  PENDING = 'pending',
+  CONFIRMED = 'confirmed',
+  NEEDS_ATTENTION = 'needs_attention',
+  EXPIRED = 'expired',
+  CANCELLED = 'cancelled',
+  SMS_ONLY = 'sms_only'
+}
+
 const OrderLineItemSchema = new Schema<IOrderLineItem>(
   {
     shopifyLineItemId: { type: String, trim: true },
@@ -63,6 +72,12 @@ const OrderSchema = new Schema<IOrder>(
       enum: Object.values(NotificationStatus),
       default: NotificationStatus.PENDING,
       index: true
+    },
+    customerConfirmationStatus: {
+      type: String,
+      enum: Object.values(CustomerConfirmationStatus),
+      default: CustomerConfirmationStatus.PENDING,
+      index: true
     }
   },
   {
@@ -111,6 +126,7 @@ export interface IOrder extends Document {
   financialStatus?: string;
   fulfillmentStatus?: string;
   notificationStatus: NotificationStatus;
+  customerConfirmationStatus: CustomerConfirmationStatus;
   createdAt: Date;
   updatedAt: Date;
 }

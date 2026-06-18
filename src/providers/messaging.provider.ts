@@ -22,8 +22,18 @@ export interface ProviderResult {
   response: unknown;
 }
 
+export interface SmsInput {
+  orderId: string;
+  to: string;
+  text: string;
+}
+
 export interface MessagingProvider {
   sendOrderConfirmation(input: OrderConfirmationInput): Promise<ProviderResult>;
+}
+
+export interface SmsProvider {
+  sendSms(input: SmsInput): Promise<ProviderResult>;
 }
 
 export class ProviderError extends Error {

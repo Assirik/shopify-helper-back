@@ -1,13 +1,15 @@
 import { Job, Worker } from 'bullmq';
 import { Customer, ICustomer } from '../models/Customer';
-import { Message, MessageStatus } from '../models/Message';
-import { IOrder, NotificationStatus, Order } from '../models/Order';
+import { Message, MessageChannel, MessageProvider, MessageStatus } from '../models/Message';
+import { CustomerConfirmationStatus, IOrder, NotificationStatus, Order } from '../models/Order';
 import { createOrderConfirmationButtonPayload, MetaWhatsAppProvider } from '../providers/metaWhatsApp.provider';
 import { OrderConfirmationInput, ProviderError } from '../providers/messaging.provider';
+import { buildOrderConfirmationSmsText, TermiiSmsProvider } from '../providers/termiiSms.provider';
 import {
   NOTIFICATION_QUEUE_NAME,
   SEND_ORDER_CONFIRMATION_JOB,
   SendOrderConfirmationJobData,
+  enqueueOrderConfirmation,
   getRedisConnection
 } from '../queues/notification.queue';
 import config from '../utilities/config/env.config';
@@ -15,6 +17,7 @@ import log from '../utilities/logger/logger';
 
 let notificationWorker: Worker<SendOrderConfirmationJobData> | null = null;
 const metaWhatsAppProvider = new MetaWhatsAppProvider();
+const termiiSmsProvider = new TermiiSmsProvider();
 
 const getPrimaryItemName = (order: IOrder) => {
   const firstItem = order.lineItems[0];
@@ -112,6 +115,44 @@ const markMessageAsSending = async (job: Job<SendOrderConfirmationJobData>, inpu
   return message;
 };
 
+const markSmsMessageAsSending = async (job: Job<SendOrderConfirmationJobData>, text: string) => {
+  const { orderId, messageId, channel } = job.data;
+
+  const message = await Message.findByIdAndUpdate(
+    messageId,
+    {
+      $set: {
+        status: MessageStatus.SENDING,
+        providerResponse: {
+          text
+        }
+      },
+      $inc: {
+        attemptCount: 1
+      }
+    },
+    { new: true }
+  );
+
+  if (!message) {
+    throw new Error(`Message ${messageId} not found for SMS notification job`);
+  }
+
+  log.info(
+    {
+      jobId: job.id,
+      orderId,
+      messageId,
+      channel,
+      attempt: job.attemptsMade + 1,
+      messageAttemptCount: message.attemptCount
+    },
+    'SMS fallback job picked by worker'
+  );
+
+  return message;
+};
+
 const processOrderConfirmation = async (job: Job<SendOrderConfirmationJobData>) => {
   const order = await Order.findById(job.data.orderId);
 
@@ -165,6 +206,110 @@ const processOrderConfirmation = async (job: Job<SendOrderConfirmationJobData>) 
   return result;
 };
 
+const processSmsFallback = async (job: Job<SendOrderConfirmationJobData>) => {
+  const order = await Order.findById(job.data.orderId);
+
+  if (!order) {
+    throw new Error(`Order ${job.data.orderId} not found for SMS fallback job`);
+  }
+
+  if (!order.customerPhoneE164) {
+    throw new Error(`Order ${order._id.toString()} has no SMS recipient phone`);
+  }
+
+  const existingMessage = await Message.findById(job.data.messageId);
+
+  if (existingMessage?.status === MessageStatus.SENT) {
+    log.info(
+      {
+        jobId: job.id,
+        orderId: order._id,
+        messageId: job.data.messageId
+      },
+      'SMS fallback already sent, skipping duplicate notification job'
+    );
+    return;
+  }
+
+  const text = buildOrderConfirmationSmsText({
+    customerName: order.customerName,
+    orderName: order.shopifyOrderName,
+    totalPrice: order.totalPrice,
+    currency: order.currency
+  });
+
+  await markSmsMessageAsSending(job, text);
+
+  const result = await termiiSmsProvider.sendSms({
+    orderId: order._id.toString(),
+    to: order.customerPhoneE164,
+    text
+  });
+
+  await Message.findByIdAndUpdate(job.data.messageId, {
+    $set: {
+      status: MessageStatus.SENT,
+      providerMessageId: result.providerMessageId,
+      providerResponse: result.response
+    }
+  });
+
+  await Order.findByIdAndUpdate(order._id, {
+    $set: {
+      notificationStatus: NotificationStatus.PARTIALLY_SENT,
+      customerConfirmationStatus: CustomerConfirmationStatus.SMS_ONLY
+    }
+  });
+
+  log.info(
+    {
+      jobId: job.id,
+      orderId: order._id,
+      messageId: job.data.messageId,
+      providerMessageId: result.providerMessageId
+    },
+    'Order notification sent through Termii SMS fallback'
+  );
+
+  return result;
+};
+
+const enqueueSmsFallback = async (job: Job<SendOrderConfirmationJobData>) => {
+  const order = await Order.findById(job.data.orderId);
+
+  if (!order) {
+    throw new Error(`Order ${job.data.orderId} not found while creating SMS fallback`);
+  }
+
+  if (!order.customerPhoneE164) {
+    throw new Error(`Order ${order._id.toString()} has no phone for SMS fallback`);
+  }
+
+  const smsMessage = await Message.create({
+    orderId: order._id,
+    channel: MessageChannel.SMS,
+    provider: MessageProvider.TERMII,
+    status: MessageStatus.QUEUED,
+    fallbackOfMessageId: job.data.messageId
+  });
+
+  const fallbackJob = await enqueueOrderConfirmation({
+    orderId: order._id.toString(),
+    messageId: smsMessage._id.toString(),
+    channel: MessageChannel.SMS
+  });
+
+  log.info(
+    {
+      orderId: order._id,
+      whatsappMessageId: job.data.messageId,
+      smsMessageId: smsMessage._id,
+      fallbackJobId: fallbackJob.id
+    },
+    'Enqueued Termii SMS fallback after WhatsApp failure'
+  );
+};
+
 const handleJobFailure = async (
   job: Job<SendOrderConfirmationJobData> | undefined,
   err: Error,
@@ -202,6 +347,18 @@ const handleJobFailure = async (
     }
   });
 
+  if (channel === MessageChannel.WHATSAPP) {
+    try {
+      await enqueueSmsFallback(job);
+      return;
+    } catch (fallbackErr) {
+      log.error(
+        { err: fallbackErr, jobId: job.id, orderId, messageId },
+        'Failed to enqueue SMS fallback after WhatsApp failure'
+      );
+    }
+  }
+
   await Order.findByIdAndUpdate(orderId, {
     $set: {
       notificationStatus: NotificationStatus.FAILED
@@ -219,6 +376,10 @@ export const startNotificationWorker = () => {
     async job => {
       if (job.name !== SEND_ORDER_CONFIRMATION_JOB) {
         throw new Error(`Unsupported notification job: ${job.name}`);
+      }
+
+      if (job.data.channel === MessageChannel.SMS) {
+        return processSmsFallback(job);
       }
 
       return processOrderConfirmation(job);
