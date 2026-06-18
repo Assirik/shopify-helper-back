@@ -15,6 +15,10 @@ const toPositiveInteger = (value: unknown, fallback: number) => {
   return parsed;
 };
 
+const escapeRegExp = (value: string) => {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+};
+
 export class CustomerController {
   public static async list(req: Request, res: Response) {
     const page = toPositiveInteger(req.query.page, 1);
@@ -31,7 +35,10 @@ export class CustomerController {
     }
 
     if (phone) {
-      filters.$or = [{ phoneE164: phone }, { phoneRaw: phone }];
+      filters.$or = [
+        { phoneE164: { $regex: escapeRegExp(phone), $options: 'i' } },
+        { phoneRaw: { $regex: escapeRegExp(phone), $options: 'i' } }
+      ];
     }
 
     if (email) {
