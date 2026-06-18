@@ -19,6 +19,16 @@ export enum CustomerConfirmationStatus {
   SMS_ONLY = 'sms_only'
 }
 
+export enum ConfirmationSource {
+  WHATSAPP_BUTTON = 'whatsapp_button',
+  ADMIN = 'admin'
+}
+
+export enum ReminderSource {
+  ADMIN = 'admin',
+  AUTO = 'auto'
+}
+
 const OrderLineItemSchema = new Schema<IOrderLineItem>(
   {
     shopifyLineItemId: { type: String, trim: true },
@@ -78,7 +88,19 @@ const OrderSchema = new Schema<IOrder>(
       enum: Object.values(CustomerConfirmationStatus),
       default: CustomerConfirmationStatus.PENDING,
       index: true
-    }
+    },
+    confirmationSource: { type: String, enum: Object.values(ConfirmationSource) },
+    confirmedAt: { type: Date },
+    confirmationCancelledAt: { type: Date },
+    expiredAt: { type: Date },
+    confirmationCancelReason: { type: String, trim: true },
+    lastCustomerMessageAt: { type: Date },
+    lastCustomerMessageText: { type: String, trim: true },
+    reminderCount: { type: Number, default: 0, min: 0 },
+    lastReminderAt: { type: Date },
+    lastReminderSource: { type: String, enum: Object.values(ReminderSource) },
+    confirmationPayload: { type: Schema.Types.Mixed },
+    attentionReason: { type: String, trim: true }
   },
   {
     timestamps: true
@@ -87,6 +109,7 @@ const OrderSchema = new Schema<IOrder>(
 
 OrderSchema.index({ createdAt: -1 });
 OrderSchema.index({ notificationStatus: 1, createdAt: -1 });
+OrderSchema.index({ customerConfirmationStatus: 1, createdAt: -1 });
 OrderSchema.index({ isCashOnDelivery: 1, createdAt: -1 });
 OrderSchema.index({ shopifyOrderName: 'text', customerPhoneE164: 'text', customerPhoneRaw: 'text' });
 
@@ -127,6 +150,18 @@ export interface IOrder extends Document {
   fulfillmentStatus?: string;
   notificationStatus: NotificationStatus;
   customerConfirmationStatus: CustomerConfirmationStatus;
+  confirmationSource?: ConfirmationSource;
+  confirmedAt?: Date;
+  confirmationCancelledAt?: Date;
+  expiredAt?: Date;
+  confirmationCancelReason?: string;
+  lastCustomerMessageAt?: Date;
+  lastCustomerMessageText?: string;
+  reminderCount: number;
+  lastReminderAt?: Date;
+  lastReminderSource?: ReminderSource;
+  confirmationPayload?: unknown;
+  attentionReason?: string;
   createdAt: Date;
   updatedAt: Date;
 }

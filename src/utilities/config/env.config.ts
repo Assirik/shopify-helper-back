@@ -25,6 +25,8 @@ export default {
     accessToken: process.env.META_WHATSAPP_ACCESS_TOKEN || '',
     phoneNumberId: process.env.META_WHATSAPP_PHONE_NUMBER_ID || '',
     templateName: process.env.META_WHATSAPP_TEMPLATE_NAME || '',
+    confirmedTemplateName: process.env.META_WHATSAPP_CONFIRMED_TEMPLATE_NAME || 'order_confirmed',
+    webhookVerifyToken: process.env.META_WHATSAPP_WEBHOOK_VERIFY_TOKEN || '',
     templateLanguage:
       process.env.META_WHATSAPP_TEMPLATE_LANGUAGE || process.env.META_WHATSAPP_TEMPLATE_LANGUAGE_CODE || 'fr',
     graphApiVersion: process.env.META_WHATSAPP_GRAPH_API_VERSION || 'v20.0'

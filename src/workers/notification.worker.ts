@@ -1,6 +1,6 @@
 import { Job, Worker } from 'bullmq';
 import { Customer, ICustomer } from '../models/Customer';
-import { Message, MessageChannel, MessageProvider, MessageStatus } from '../models/Message';
+import { Message, MessageChannel, MessageProvider, MessageStatus, TemplatePurpose } from '../models/Message';
 import { CustomerConfirmationStatus, IOrder, NotificationStatus, Order } from '../models/Order';
 import { createOrderConfirmationButtonPayload, MetaWhatsAppProvider } from '../providers/metaWhatsApp.provider';
 import { OrderConfirmationInput, ProviderError } from '../providers/messaging.provider';
@@ -87,6 +87,7 @@ const markMessageAsSending = async (job: Job<SendOrderConfirmationJobData>, inpu
         status: MessageStatus.SENDING,
         templateName: input.templateName,
         templateLanguage: input.templateLanguage,
+        templatePurpose: TemplatePurpose.ORDER_CONFIRMATION_REQUEST,
         buttonPayload: input.buttonPayload
       },
       $inc: {
@@ -123,6 +124,7 @@ const markSmsMessageAsSending = async (job: Job<SendOrderConfirmationJobData>, t
     {
       $set: {
         status: MessageStatus.SENDING,
+        templatePurpose: TemplatePurpose.SMS_FALLBACK,
         providerResponse: {
           text
         }
@@ -316,6 +318,7 @@ const enqueueSmsFallback = async (job: Job<SendOrderConfirmationJobData>) => {
     channel: MessageChannel.SMS,
     provider: MessageProvider.TERMII,
     status: MessageStatus.QUEUED,
+    templatePurpose: TemplatePurpose.SMS_FALLBACK,
     fallbackOfMessageId: job.data.messageId
   });
 

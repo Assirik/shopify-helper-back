@@ -16,7 +16,16 @@ export enum MessageStatus {
   QUEUED = 'queued',
   SENDING = 'sending',
   SENT = 'sent',
+  DELIVERED = 'delivered',
+  READ = 'read',
   FAILED = 'failed'
+}
+
+export enum TemplatePurpose {
+  ORDER_CONFIRMATION_REQUEST = 'order_confirmation_request',
+  ORDER_CONFIRMED = 'order_confirmed',
+  REMINDER = 'reminder',
+  SMS_FALLBACK = 'sms_fallback'
 }
 
 const MessageAttemptSchema = new Schema<IMessageAttempt>(
@@ -40,6 +49,7 @@ const MessageSchema = new Schema<IMessage>(
     status: { type: String, enum: Object.values(MessageStatus), default: MessageStatus.QUEUED, index: true },
     templateName: { type: String, trim: true },
     templateLanguage: { type: String, trim: true },
+    templatePurpose: { type: String, enum: Object.values(TemplatePurpose), index: true },
     buttonPayload: { type: String, trim: true, index: true },
     attemptCount: { type: Number, default: 0, min: 0 },
     providerMessageId: { type: String, trim: true, index: true },
@@ -83,6 +93,7 @@ export interface IMessage extends Document {
   status: MessageStatus;
   templateName?: string;
   templateLanguage?: string;
+  templatePurpose?: TemplatePurpose;
   buttonPayload?: string;
   attemptCount: number;
   providerMessageId?: string;

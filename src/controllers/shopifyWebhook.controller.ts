@@ -3,7 +3,7 @@ import { Request, Response } from 'express';
 import config from '../utilities/config/env.config';
 import { PhoneNormalizationService } from '../utilities/services/phoneNormalization.service';
 import { Customer } from '../models/Customer';
-import { Message, MessageChannel, MessageProvider, MessageStatus } from '../models/Message';
+import { Message, MessageChannel, MessageProvider, MessageStatus, TemplatePurpose } from '../models/Message';
 import { NotificationStatus, Order } from '../models/Order';
 import { Product } from '../models/Product';
 import { WebhookEvent, WebhookEventStatus } from '../models/WebhookEvent';
@@ -623,6 +623,7 @@ export class ShopifyWebhookController {
         provider: MessageProvider.META,
         status: MessageStatus.FAILED,
         templateName: config.metaWhatsApp.templateName,
+        templatePurpose: TemplatePurpose.ORDER_CONFIRMATION_REQUEST,
         errorCode: phone.isValid ? 'NOTIFICATION_SKIPPED' : 'INVALID_PHONE',
         errorMessage: phone.errorReason || skipNotificationReason || undefined
       });
@@ -657,7 +658,8 @@ export class ShopifyWebhookController {
       channel: MessageChannel.WHATSAPP,
       provider: MessageProvider.META,
       status: MessageStatus.QUEUED,
-      templateName: config.metaWhatsApp.templateName
+      templateName: config.metaWhatsApp.templateName,
+      templatePurpose: TemplatePurpose.ORDER_CONFIRMATION_REQUEST
     });
 
     log.info(
