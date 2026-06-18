@@ -1,7 +1,7 @@
 # Plan D’implémentation Granulaire MVP
 
 ## Objectif
-Livrer un backend MVP deployable qui reçoit `orders/create` Shopify, valide le webhook, crée une commande, envoie une confirmation WhatsApp Meta via job BullMQ, bascule vers SMS Termii si WhatsApp échoue, trace tout dans MongoDB Atlas, puis expose une API dashboard protégée pour lecture et retry.
+Livrer un backend MVP deployable qui reçoit `orders/create` Shopify, valide le webhook, crée une commande, envoie un template WhatsApp Meta avec bouton Confirmer via job BullMQ, bascule vers SMS Termii si WhatsApp échoue, reçoit les réponses WhatsApp clients, trace tout dans MongoDB Atlas, puis expose une API dashboard protégée pour lecture, retry, relance et confirmation manuelle.
 
 Le déploiement cible du MVP utilise Docker Compose pour l’API Node.js et Redis. MongoDB n’est pas déployé en container: `MONGODB_URI` pointe directement vers MongoDB Atlas pour éviter de perdre du temps sur l’administration MongoDB locale/prod.
 
@@ -222,17 +222,26 @@ Critère d’acceptation:
 - Envoyer un template Meta:
   - `templateName` depuis env
   - `language` = `fr`
-  - variables: nom client, numéro commande, total formaté.
+  - variables: greeting, nom client, numéro commande, article, montant, quantité, adresse, note de livraison, mode de paiement.
+- Ajouter le payload dynamique au bouton Quick Reply:
+  - composant `button`
+  - `sub_type=quick_reply`
+  - `index=0`
+  - payload `CONFIRM_ORDER:{orderId}`
+- Stocker ce payload dans le `Message` associé pour audit et debug.
 - Sauvegarder:
   - provider response
   - provider message id si disponible
   - statut `sent` ou `failed`.
 - Mettre à jour `Order.notificationStatus`.
+- Garder la confirmation client en `pending` après envoi WhatsApp réussi.
 
 Critère d’acceptation:
 - En succès Meta, le message passe à `sent`.
 - La commande passe à `sent`.
 - Les réponses Meta sont persistées.
+- Le message WhatsApp contient le payload bouton `CONFIRM_ORDER:{orderId}`.
+- La commande n’est pas marquée `confirmed` tant que le webhook bouton n’est pas reçu.
 
 ## Étape 8: Fallback SMS Termii
 - Implémenter `TermiiSmsProvider`.
@@ -244,6 +253,7 @@ Critère d’acceptation:
   - enqueue ou traiter le SMS via worker.
 - Si SMS réussit:
   - commande `partially_sent` ou `sent` selon convention retenue.
+  - confirmation client `sms_only`, car le SMS MVP ne confirme pas automatiquement.
 - Si SMS échoue:
   - commande `failed`.
 
@@ -251,6 +261,7 @@ Critère d’acceptation:
 - Échec WhatsApp déclenche automatiquement SMS.
 - L’historique garde les deux messages.
 - Le dashboard peut voir la chaîne WhatsApp échoué puis SMS envoyé.
+- Une commande passée par SMS fallback apparaît comme confirmation manuelle requise.
 
 ## Étape 9: API Dashboard Orders
 - Ajouter routes protégées:
@@ -265,6 +276,7 @@ Critère d’acceptation:
 - Supporter:
   - pagination `page`, `limit`
   - filtre `status`
+  - filtre `customerConfirmationStatus`
   - recherche `orderName`
   - recherche `phone`
 - Retourner un format stable:
@@ -299,30 +311,143 @@ Critère d’acceptation:
 - Un message sent ne peut pas être relancé.
 - La relance est visible dans MongoDB.
 
-## Étape 11: Swagger MVP
+## Étape 11: Extension Modèles & Config Confirmation Client
+- Étendre `env.config.ts` avec les variables nécessaires au nouveau flux:
+  - `metaWhatsApp.confirmedTemplateName`
+  - `metaWhatsApp.webhookVerifyToken`
+- Ajouter dans `.env.example`:
+  - `META_WHATSAPP_CONFIRMED_TEMPLATE_NAME=order_confirmed`
+  - `META_WHATSAPP_WEBHOOK_VERIFY_TOKEN=...`
+- Étendre `Order` avec:
+  - `customerConfirmationStatus`: `pending | confirmed | needs_attention | expired | cancelled | sms_only`
+  - `confirmationSource`: `whatsapp_button | admin`
+  - `confirmedAt`, `cancelledAt`, `expiredAt`
+  - `lastCustomerMessageAt`, `lastCustomerMessageText`
+  - `reminderCount`, `lastReminderAt`, `lastReminderSource`
+  - `confirmationPayload`, `attentionReason`
+- Étendre `Message` avec:
+  - statuts provider `delivered` et `read`
+  - `templatePurpose`: `order_confirmation_request | order_confirmed | reminder | sms_fallback`
+  - `buttonPayload`
+- Ajouter `InboundWhatsAppEvent`:
+  - `waMessageId`, `from`, `type`, `text`
+  - `buttonPayload`, `buttonText`
+  - `orderId`
+  - `rawPayload`
+  - `processedStatus`
+
+Critère d’acceptation:
+- Le modèle peut distinguer notification envoyée et confirmation client.
+- Le payload `CONFIRM_ORDER:{orderId}` est persistable.
+- Les réponses WhatsApp entrantes sont auditables sans écraser les messages sortants.
+
+## Étape 12: Webhook WhatsApp Entrant
+- Ajouter:
+  - `GET /api/webhooks/whatsapp`
+  - `POST /api/webhooks/whatsapp`
+- `GET`:
+  - lire `hub.mode`, `hub.verify_token`, `hub.challenge`
+  - comparer avec `META_WHATSAPP_WEBHOOK_VERIFY_TOKEN`
+  - retourner le challenge si valide, sinon `403`
+- `POST`:
+  - recevoir les événements Meta WhatsApp
+  - extraire les messages entrants
+  - extraire les statuts `sent`, `delivered`, `read`, `failed`
+  - stocker le payload brut dans `InboundWhatsAppEvent`
+- Pour un clic bouton:
+  - lire `button.payload`
+  - accepter uniquement le format `CONFIRM_ORDER:{orderId}`
+  - retrouver la commande par `orderId`
+  - ignorer/idempotenter si déjà `confirmed`
+  - passer en `needs_attention` si la commande est `expired` ou `cancelled`
+- Pour un message libre:
+  - stocker le texte
+  - passer la commande en `needs_attention`
+  - définir `lastCustomerMessageAt`, `lastCustomerMessageText`, `attentionReason`
+- Pour les statuts Meta:
+  - retrouver le `Message` par `providerMessageId`/`wamid` si possible
+  - mettre à jour `sent`, `delivered`, `read` ou `failed`
+
+Critère d’acceptation:
+- Meta peut vérifier le webhook WhatsApp.
+- Un clic bouton valide confirme la bonne commande.
+- Une réponse libre ne confirme jamais automatiquement.
+- Les statuts de livraison Meta enrichissent l’historique message.
+
+## Étape 13: Workflow Confirmation, Relances & Admin
+- Créer un service métier `orderConfirmation.service.ts`.
+- Confirmation automatique par bouton:
+  - `pending -> confirmed`
+  - `confirmedAt = now`
+  - `confirmationSource = whatsapp_button`
+  - enqueue `sendOrderConfirmed`
+- Confirmation manuelle admin:
+  - endpoint `POST /api/orders/:id/confirm`
+  - autorisé depuis `pending`, `needs_attention`, `sms_only`, éventuellement `expired`
+  - `confirmationSource = admin`
+  - enqueue `sendOrderConfirmed`
+- Annulation manuelle admin:
+  - endpoint `POST /api/orders/:id/cancel`
+  - passer `customerConfirmationStatus=cancelled`
+  - définir `cancelledAt`
+  - ne plus relancer automatiquement
+- Relance manuelle:
+  - endpoint `POST /api/orders/:id/remind`
+  - autorisé seulement si `customerConfirmationStatus=pending`
+  - incrémenter `reminderCount`
+  - définir `lastReminderAt` et `lastReminderSource=admin`
+  - enqueue `sendConfirmationReminder`
+- Relance automatique:
+  - prévoir un job BullMQ repeatable ou une tâche planifiée simple
+  - première relance après 24h sans confirmation
+  - deuxième relance après 48h sans confirmation
+  - après 2 relances sans réponse: `expired`, `expiredAt=now`
+- Template `order_confirmed`:
+  - envoyé après confirmation bouton ou admin
+  - ne pas l’envoyer au moment de création Shopify
+  - message attendu: “Commande confirmée, nous préparons votre commande...”
+
+Critère d’acceptation:
+- Une confirmation bouton et une confirmation admin déclenchent la même suite métier.
+- Une commande `needs_attention` attend une décision admin.
+- Une commande `expired` n’est pas confirmée automatiquement par clic tardif.
+- Les relances ne partent pas en double.
+- `order_confirmed` part seulement après confirmation.
+
+## Étape 14: Swagger MVP
 - Mettre à jour Swagger avec:
   - Auth
   - Shopify webhook
+  - WhatsApp webhook
   - Orders
   - Messages
 - Documenter les headers Shopify nécessaires.
 - Documenter le Bearer token pour dashboard.
+- Documenter la vérification webhook WhatsApp Meta.
+- Documenter les endpoints admin `confirm`, `cancel`, `remind`.
 - Ajouter exemples de payload/réponse MVP.
 
 Critère d’acceptation:
 - `/api/docs` décrit toutes les routes MVP.
 - Les routes dashboard affichent leur besoin d’auth JWT.
 
-## Étape 12: Tests Prioritaires
+## Étape 15: Tests Prioritaires
 - Ajouter tests unitaires sur:
   - normalisation téléphone
   - HMAC Shopify
+  - parsing payload bouton `CONFIRM_ORDER:{orderId}`
 - Ajouter tests API Supertest sur:
   - webhook signature invalide
   - webhook signature valide
   - payload direct Shopify et payload enveloppé `{ payload: ... }`
   - extraction client depuis `note_attributes`
   - skip des commandes test/annulées/voided
+  - vérification `GET /api/webhooks/whatsapp`
+  - clic bouton WhatsApp confirme la commande
+  - message libre WhatsApp passe en `needs_attention`
+  - confirmation admin déclenche `order_confirmed`
+  - annulation admin passe en `cancelled`
+  - relance admin incrémente `reminderCount`
   - endpoints dashboard sans JWT
   - retry message non failed refusé.
 - Mocker Meta, Termii, Redis si nécessaire pour éviter dépendance externe forte.
@@ -332,7 +457,7 @@ Critère d’acceptation:
 - Les tests critiques passent localement.
 - `npm run tsc -- --noEmit` passe.
 
-## Étape 13: Docker Compose, Atlas & Vérification Fonctionnelle Locale
+## Étape 16: Docker Compose, Atlas & Vérification Fonctionnelle Locale
 - Vérifier que MongoDB Atlas est prêt:
   - cluster créé
   - utilisateur DB créé
@@ -354,12 +479,15 @@ Critère d’acceptation:
 - Vérifier logs worker.
 - Tester lecture dashboard avec Bearer token.
 - Tester retry sur message failed.
+- Tester webhook WhatsApp bouton avec payload `CONFIRM_ORDER:{orderId}`.
+- Tester webhook WhatsApp message libre.
+- Tester confirmation admin et envoi du template `order_confirmed`.
 
 Critère d’acceptation:
 - Le flux complet webhook -> queue -> WhatsApp ou fallback SMS -> tracking fonctionne.
 - Aucune étape ne nécessite un MongoDB local.
 
-## Étape 14: Préparation Docker Compose MVP
+## Étape 17: Préparation Docker Compose MVP
 - Créer un `docker-compose.yml` minimal:
   - `api`: build local, `env_file: .env`, port API exposé.
   - `redis`: `redis:7.2-alpine`, mot de passe, AOF, volume persistant.
@@ -388,13 +516,15 @@ Critère d’acceptation:
 - Redis n’est pas exposé publiquement.
 - Atlas est la seule base MongoDB utilisée.
 
-## Étape 15: Préparation Déploiement MVP
+## Étape 18: Préparation Déploiement MVP
 - Documenter les variables d’environnement obligatoires.
 - Ajouter une section README “Run local”.
 - Ajouter une section README “Run with Docker Compose”.
 - Ajouter une section README “MongoDB Atlas setup”.
 - Ajouter une section README “Webhook Shopify setup”.
 - Ajouter une section README “Meta WhatsApp template”.
+- Ajouter une section README “WhatsApp inbound webhook setup”.
+- Ajouter une section README “Confirmation workflow”.
 - Ajouter une section README “Redis required”.
 - Ajouter une section README “Deployment target: VPS + Coolify”.
 - Vérifier que l’app fail clairement si une variable critique manque en production.
@@ -416,10 +546,13 @@ Critère d’acceptation:
 9. Termii fallback.
 10. API dashboard orders/messages.
 11. Retry.
-12. Swagger.
-13. Tests ciblés.
-14. Docker Compose + Atlas + vérification locale.
-15. Documentation déploiement.
+12. Extension modèles/config confirmation client.
+13. Webhook WhatsApp entrant.
+14. Workflow confirmation, relances et admin.
+15. Swagger.
+16. Tests ciblés.
+17. Docker Compose + Atlas + vérification locale.
+18. Documentation déploiement.
 
 ## Assumptions
 - Le MVP reste backend-only.
@@ -430,4 +563,8 @@ Critère d’acceptation:
 - La cible prod recommandée est VPS + Coolify + Docker Compose + Atlas.
 - Render reste une alternative possible, mais demande une configuration Render dédiée plutôt qu’un Compose direct.
 - Termii est uniquement fallback SMS, pas canal principal.
+- Le bouton WhatsApp Confirmer utilise un payload dynamique `CONFIRM_ORDER:{orderId}` ajouté à l’envoi du template via Cloud API.
+- Le template `order_confirmed` est envoyé uniquement après confirmation bouton ou confirmation admin.
+- Toute réponse libre du client passe en `needs_attention`, jamais en confirmation automatique.
+- Le fallback SMS met la commande en `sms_only`, donc confirmation manuelle requise.
 - Les tests automatisés sont utiles mais ne doivent pas retarder excessivement un premier MVP fonctionnel.

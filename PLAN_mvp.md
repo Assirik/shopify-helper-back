@@ -1,7 +1,7 @@
 # Plan MVP: Shopify WhatsApp & SMS Notification Service
 
 ## Summary
-Construire un MVP backend deployable qui reçoit les webhooks `orders/create` Shopify, valide leur signature HMAC, normalise les numéros sénégalais, envoie une confirmation WhatsApp via Meta Cloud API, bascule vers SMS Termii en cas d’échec, trace tout dans MongoDB Atlas, et expose une API dashboard sécurisée pour lecture + retry.
+Construire un MVP backend deployable qui reçoit les webhooks `orders/create` Shopify, valide leur signature HMAC, normalise les numéros sénégalais, envoie un template WhatsApp avec bouton Confirmer via Meta Cloud API, bascule vers SMS Termii en cas d’échec WhatsApp, trace tout dans MongoDB Atlas, reçoit les réponses WhatsApp des clients, et expose une API dashboard sécurisée pour lecture, retry, relance et confirmation manuelle.
 
 Base actuelle: starter Express/TypeScript/MongoDB avec auth, health, Swagger et Pino. Le projet compile déjà avec `tsc --noEmit`.
 
@@ -17,7 +17,9 @@ Déploiement cible MVP: Docker Compose pour orchestrer l’API Node.js et Redis.
   - `META_WHATSAPP_ACCESS_TOKEN`
   - `META_WHATSAPP_PHONE_NUMBER_ID`
   - `META_WHATSAPP_TEMPLATE_NAME`
+  - `META_WHATSAPP_CONFIRMED_TEMPLATE_NAME`
   - `META_WHATSAPP_TEMPLATE_LANGUAGE=fr`
+  - `META_WHATSAPP_WEBHOOK_VERIFY_TOKEN`
   - `TERMII_API_KEY`
   - `TERMII_SENDER_ID`
   - `MONGODB_URI` pointant vers MongoDB Atlas
@@ -59,6 +61,12 @@ Déploiement cible MVP: Docker Compose pour orchestrer l’API Node.js et Redis.
   - `isTest`, `cancelledAt`, `cancelReason`
   - `financialStatus`, `fulfillmentStatus`
   - `notificationStatus`: `pending | sent | failed | skipped | partially_sent`
+  - `customerConfirmationStatus`: `pending | confirmed | needs_attention | expired | cancelled | sms_only`
+  - `confirmationSource`: `whatsapp_button | admin`
+  - `confirmedAt`, `cancelledAt`, `expiredAt`
+  - `lastCustomerMessageAt`, `lastCustomerMessageText`
+  - `reminderCount`, `lastReminderAt`, `lastReminderSource`
+  - `confirmationPayload`, `attentionReason`
   - timestamps
 - Ajouter `Customer`:
   - `shopifyCustomerId`, `shopifyCustomerGraphqlId`
@@ -75,8 +83,10 @@ Déploiement cible MVP: Docker Compose pour orchestrer l’API Node.js et Redis.
   - `orderId`
   - `channel`: `whatsapp | sms`
   - `provider`: `meta | termii`
-  - `status`: `queued | sending | sent | failed`
+  - `status`: `queued | sending | sent | delivered | read | failed`
   - `templateName`
+  - `templatePurpose`: `order_confirmation_request | order_confirmed | reminder | sms_fallback`
+  - payload bouton envoyé, ex: `CONFIRM_ORDER:{orderId}`
   - `attemptCount`
   - `providerMessageId`
   - `providerResponse`
@@ -85,6 +95,11 @@ Déploiement cible MVP: Docker Compose pour orchestrer l’API Node.js et Redis.
   - timestamps
 - Ajouter éventuellement `WebhookEvent` pour audit/idempotence:
   - `webhookId`, `topic`, `shopDomain`, `status`, `payloadHash`, `orderId`.
+- Ajouter `InboundWhatsAppEvent` pour tracer les réponses clients:
+  - `messageId`, `waMessageId`, `from`, `type`, `text`
+  - `buttonPayload`, `buttonText`
+  - `orderId`, `rawPayload`
+  - `processedStatus`: `processed | ignored | needs_attention | failed`
 
 ### Normalisation téléphone Sénégal
 - Créer un service dédié qui accepte:
@@ -99,7 +114,10 @@ Déploiement cible MVP: Docker Compose pour orchestrer l’API Node.js et Redis.
 - Ajouter BullMQ + Redis pour traiter les notifications après ack webhook.
 - Redis tourne en container Docker Compose, sur un réseau privé, avec volume persistant et mot de passe.
 - Créer une queue `notifications`.
-- Job principal: `sendOrderConfirmation`.
+- Jobs principaux:
+  - `sendOrderConfirmation`
+  - `sendOrderConfirmed`
+  - `sendConfirmationReminder`
 - Backoff/retry:
   - 3 tentatives pour WhatsApp Meta.
   - Si WhatsApp échoue définitivement, créer puis envoyer un SMS Termii.
@@ -114,16 +132,57 @@ Déploiement cible MVP: Docker Compose pour orchestrer l’API Node.js et Redis.
   - `MetaWhatsAppProvider`
   - `TermiiSmsProvider`
 - WhatsApp:
-  - utiliser un template Meta configurable par env
+  - utiliser le template initial configurable par env pour demander la confirmation client
   - langue par défaut `fr`
-  - variables: nom client, numéro commande, total, devise
+  - variables: greeting, name, order number, item, amount, quantity, address, shipping note, payment method
+  - ajouter au bouton Quick Reply un payload technique dynamique: `CONFIRM_ORDER:{orderId}`
+  - ne jamais confirmer automatiquement une commande sans payload fiable
+  - envoyer le template `order_confirmed` après confirmation client ou admin
 - SMS:
   - texte français simple configurable dans le service:
     - confirmation commande
     - numéro commande
     - montant
     - signature boutique
+- Si WhatsApp échoue et que le fallback SMS part, passer la commande en `customerConfirmationStatus=sms_only`, car le SMS MVP informe le client mais ne permet pas de confirmation automatique.
 - Ne pas bloquer le webhook si Meta/Termii est indisponible: l’échec est traité par job + retry.
+
+### Webhook WhatsApp entrant & confirmation client
+- Ajouter:
+  - `GET /api/webhooks/whatsapp` pour la vérification Meta avec `META_WHATSAPP_WEBHOOK_VERIFY_TOKEN`
+  - `POST /api/webhooks/whatsapp` pour recevoir les messages entrants, clics bouton et statuts Meta
+- Quand le client clique sur le bouton Confirmer:
+  - lire `button.payload`
+  - parser `CONFIRM_ORDER:{orderId}`
+  - retrouver la commande
+  - si la commande est encore confirmable, passer `customerConfirmationStatus=confirmed`
+  - définir `confirmedAt` et `confirmationSource=whatsapp_button`
+  - enqueue le job `sendOrderConfirmed`
+- Si le client répond un message libre:
+  - stocker le message
+  - passer la commande en `needs_attention`
+  - ne pas confirmer automatiquement
+- Si le client confirme après expiration ou annulation:
+  - ne pas confirmer automatiquement
+  - passer ou garder la commande en `needs_attention`
+- Les statuts Meta `sent/delivered/read/failed` mettent à jour les `Message` correspondants quand le `wamid` est connu.
+
+### Relances & prise en charge admin
+- Relance automatique ou manuelle:
+  - commande `pending`
+  - première relance après 24h sans confirmation
+  - deuxième relance après 48h sans confirmation
+  - après 2 relances sans réponse, passer `customerConfirmationStatus=expired`
+- Empêcher les doublons de relance avec `lastReminderAt`, `reminderCount` et `lastReminderSource`.
+- Si `needs_attention`, l’admin décide manuellement:
+  - confirmer: passer `confirmed`, `confirmationSource=admin`, puis envoyer `order_confirmed`
+  - annuler: passer `cancelled`
+- Cas à traiter manuellement:
+  - numéro invalide ou absent
+  - SMS fallback uniquement
+  - réponse libre du client
+  - confirmation tardive après expiration
+  - demande de modification après confirmation
 
 ### API Dashboard / Helpdesk MVP
 - Protéger avec JWT.
@@ -134,9 +193,13 @@ Déploiement cible MVP: Docker Compose pour orchestrer l’API Node.js et Redis.
   - `GET /api/messages`
   - `GET /api/messages/:id`
   - `POST /api/messages/:id/retry`
+  - `POST /api/orders/:id/confirm`
+  - `POST /api/orders/:id/cancel`
+  - `POST /api/orders/:id/remind`
 - Filtres MVP:
   - clients: `search`, `phone`, `email`, pagination
   - `status`
+  - `customerConfirmationStatus`
   - `channel`
   - `provider`
   - `orderName`
@@ -152,6 +215,7 @@ Déploiement cible MVP: Docker Compose pour orchestrer l’API Node.js et Redis.
   - Health
   - Auth
   - Shopify Webhooks
+  - WhatsApp Webhooks
   - Orders
   - Messages
 - Garder une structure simple:
@@ -185,7 +249,13 @@ Déploiement cible MVP: Docker Compose pour orchestrer l’API Node.js et Redis.
   - webhook crée une commande et enqueue un job
   - webhook dupliqué ne crée pas deux commandes/messages
   - provider WhatsApp mocké en succès
+  - template WhatsApp envoyé avec payload bouton `CONFIRM_ORDER:{orderId}`
+  - webhook WhatsApp bouton Confirmer passe la commande en `confirmed`
+  - webhook WhatsApp texte libre passe la commande en `needs_attention`
+  - confirmation admin déclenche le template `order_confirmed`
+  - relances incrémentent `reminderCount` et expirent après 2 relances sans réponse
   - échec WhatsApp déclenche fallback SMS
+  - fallback SMS passe la confirmation client en `sms_only`
   - `POST /api/messages/:id/retry` refuse les messages non failed
   - endpoints dashboard refusent les requêtes sans JWT
 - Vérifications manuelles:
@@ -206,6 +276,9 @@ Déploiement cible MVP: Docker Compose pour orchestrer l’API Node.js et Redis.
 - Auth: durcissement minimal, pas refonte complète.
 - Frontend non inclus dans ce plan; l’API sera prête pour un dashboard futur.
 - Les templates WhatsApp devront être créés/validés côté Meta avant usage production.
+- Le bouton du template initial reste un Quick Reply avec payload dynamique `CONFIRM_ORDER:{orderId}` ajouté lors de l’envoi Cloud API.
+- Le template `order_confirmed` est envoyé uniquement après confirmation client ou admin.
+- Toute réponse libre du client est traitée comme `needs_attention` pour intervention admin.
 
 ## Perspectives
 - Ajouter d’autres webhooks Shopify: `orders/updated`, `fulfillments/create`, `refunds/create`.
