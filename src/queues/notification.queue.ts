@@ -3,6 +3,13 @@ import config from '../utilities/config/env.config';
 
 export const NOTIFICATION_QUEUE_NAME = 'notifications';
 export const SEND_ORDER_CONFIRMATION_JOB = 'sendOrderConfirmation';
+export const SEND_ORDER_CONFIRMED_JOB = 'sendOrderConfirmed';
+export const SEND_ORDER_CANCELLED_JOB = 'sendOrderCancelled';
+export const SEND_CONFIRMATION_REMINDER_JOB = 'sendConfirmationReminder';
+
+export const MAINTENANCE_QUEUE_NAME = 'confirmation-maintenance';
+export const CONFIRMATION_SWEEP_JOB = 'confirmationSweep';
+const CONFIRMATION_SWEEP_REPEAT_KEY = 'confirmation-sweep-tick';
 
 export interface SendOrderConfirmationJobData {
   orderId: string;
@@ -37,4 +44,33 @@ const defaultJobOptions: JobsOptions = {
 
 export const enqueueOrderConfirmation = async (data: SendOrderConfirmationJobData) => {
   return notificationQueue.add(SEND_ORDER_CONFIRMATION_JOB, data, defaultJobOptions);
+};
+
+export const enqueueOrderConfirmed = async (data: SendOrderConfirmationJobData) => {
+  return notificationQueue.add(SEND_ORDER_CONFIRMED_JOB, data, defaultJobOptions);
+};
+
+export const enqueueOrderCancelled = async (data: SendOrderConfirmationJobData) => {
+  return notificationQueue.add(SEND_ORDER_CANCELLED_JOB, data, defaultJobOptions);
+};
+
+export const enqueueConfirmationReminder = async (data: SendOrderConfirmationJobData) => {
+  return notificationQueue.add(SEND_CONFIRMATION_REMINDER_JOB, data, defaultJobOptions);
+};
+
+export const maintenanceQueue = new Queue(MAINTENANCE_QUEUE_NAME, {
+  connection: getRedisConnection()
+});
+
+// Schedule (idempotently) the repeatable sweep that drives automatic reminders and expiration.
+export const scheduleConfirmationSweep = async (intervalMinutes: number) => {
+  return maintenanceQueue.add(
+    CONFIRMATION_SWEEP_JOB,
+    {},
+    {
+      repeat: { every: Math.max(1, intervalMinutes) * 60 * 1000, key: CONFIRMATION_SWEEP_REPEAT_KEY },
+      removeOnComplete: 50,
+      removeOnFail: 100
+    }
+  );
 };

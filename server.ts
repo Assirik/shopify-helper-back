@@ -4,7 +4,13 @@ import app from './src/app';
 import config from './src/utilities/config/env.config';
 import log from './src/utilities/logger/logger';
 import { DatabaseService } from './src/utilities/services/database.service';
-import { startNotificationWorker, stopNotificationWorker } from './src/workers/notification.worker';
+import { scheduleConfirmationSweep } from './src/queues/notification.queue';
+import {
+  startMaintenanceWorker,
+  startNotificationWorker,
+  stopMaintenanceWorker,
+  stopNotificationWorker
+} from './src/workers/notification.worker';
 
 const port = config.port;
 app.set('port', port);
@@ -57,12 +63,21 @@ server.listen(port, async () => {
 
   await DatabaseService.connectWithRetry();
   startNotificationWorker();
+  startMaintenanceWorker();
+
+  try {
+    await scheduleConfirmationSweep(config.confirmation.sweepIntervalMinutes);
+    log.info({ intervalMinutes: config.confirmation.sweepIntervalMinutes }, 'Confirmation sweep scheduled');
+  } catch (err) {
+    log.error({ err }, 'Failed to schedule confirmation sweep');
+  }
 });
 
 const shutdown = async (signal: string) => {
   log.info({ signal }, 'Shutting down server');
 
   await stopNotificationWorker();
+  await stopMaintenanceWorker();
   server.close(() => {
     log.info('HTTP server closed');
     process.exit(0);

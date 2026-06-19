@@ -2,9 +2,10 @@ import { Request, Response } from 'express';
 import { Types } from 'mongoose';
 import { InboundWhatsAppEvent, InboundWhatsAppEventStatus } from '../models/InboundWhatsAppEvent';
 import { Message, MessageStatus } from '../models/Message';
-import { ConfirmationSource, CustomerConfirmationStatus, Order } from '../models/Order';
+import { CustomerConfirmationStatus, Order } from '../models/Order';
 import config from '../utilities/config/env.config';
 import log from '../utilities/logger/logger';
+import { OrderConfirmationService } from '../utilities/services/orderConfirmation.service';
 import { PhoneNormalizationService } from '../utilities/services/phoneNormalization.service';
 
 interface MetaWhatsAppButtonPayload {
@@ -188,7 +189,13 @@ const handleConfirmButton = async (
     });
   }
 
-  if (order.customerConfirmationStatus === CustomerConfirmationStatus.CONFIRMED) {
+  const result = await OrderConfirmationService.confirmByWhatsAppButton(order._id.toString(), {
+    buttonPayload,
+    buttonText,
+    waMessageId: message.id
+  });
+
+  if (result.alreadyConfirmed) {
     return InboundWhatsAppEvent.create({
       waMessageId: message.id,
       from: message.from,
@@ -201,22 +208,7 @@ const handleConfirmButton = async (
     });
   }
 
-  const isLateOrCancelled =
-    order.customerConfirmationStatus === CustomerConfirmationStatus.EXPIRED ||
-    order.customerConfirmationStatus === CustomerConfirmationStatus.CANCELLED;
-
-  if (isLateOrCancelled) {
-    await Order.findByIdAndUpdate(order._id, {
-      $set: {
-        customerConfirmationStatus: CustomerConfirmationStatus.NEEDS_ATTENTION,
-        needsHelpdeskAttention: true,
-        lastCustomerMessageAt: new Date(),
-        lastCustomerMessageText: buttonText || buttonPayload,
-        confirmationPayload: { buttonPayload, waMessageId: message.id },
-        attentionReason: 'Confirmation received after expiration or cancellation'
-      }
-    });
-
+  if (result.needsAttention) {
     return InboundWhatsAppEvent.create({
       waMessageId: message.id,
       from: message.from,
@@ -228,21 +220,6 @@ const handleConfirmButton = async (
       processedStatus: InboundWhatsAppEventStatus.NEEDS_ATTENTION
     });
   }
-
-  await Order.findByIdAndUpdate(order._id, {
-    $set: {
-      customerConfirmationStatus: CustomerConfirmationStatus.CONFIRMED,
-      confirmationSource: ConfirmationSource.WHATSAPP_BUTTON,
-      confirmedAt: new Date(),
-      lastCustomerMessageAt: new Date(),
-      lastCustomerMessageText: buttonText || buttonPayload,
-      confirmationPayload: { buttonPayload, waMessageId: message.id },
-      needsHelpdeskAttention: false
-    },
-    $unset: {
-      attentionReason: ''
-    }
-  });
 
   return InboundWhatsAppEvent.create({
     waMessageId: message.id,

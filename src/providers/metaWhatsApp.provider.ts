@@ -8,7 +8,9 @@ interface MetaWhatsAppMessageResponse {
   }>;
 }
 
-type TemplateParameter = { type: 'text'; text: string } | { type: 'payload'; payload: string };
+type TemplateParameter =
+  | { type: 'text'; parameter_name: string; text: string }
+  | { type: 'payload'; payload: string };
 
 interface MetaTemplateComponent {
   type: 'body' | 'button';
@@ -20,27 +22,23 @@ interface MetaTemplateComponent {
 export const createOrderConfirmationButtonPayload = (orderId: string) => `CONFIRM_ORDER:${orderId}`;
 
 export const buildMetaOrderConfirmationPayload = (input: OrderConfirmationInput) => {
-  const bodyParameters: TemplateParameter[] = [
-    input.variables.greeting,
-    input.variables.customerName,
-    input.variables.orderName,
-    input.variables.itemName,
-    input.variables.amount,
-    input.variables.quantity,
-    input.variables.address,
-    input.variables.shippingNote,
-    input.variables.paymentMethod
-  ].map(text => ({
+  const bodyParameters: TemplateParameter[] = input.variables.map(variable => ({
     type: 'text',
-    text
+    parameter_name: variable.name,
+    text: variable.value
   }));
 
-  const components: MetaTemplateComponent[] = [
-    {
+  const components: MetaTemplateComponent[] = [];
+
+  if (bodyParameters.length > 0) {
+    components.push({
       type: 'body',
       parameters: bodyParameters
-    },
-    {
+    });
+  }
+
+  if (input.buttonPayload) {
+    components.push({
       type: 'button',
       sub_type: 'quick_reply',
       index: '0',
@@ -50,8 +48,8 @@ export const buildMetaOrderConfirmationPayload = (input: OrderConfirmationInput)
           payload: input.buttonPayload
         }
       ]
-    }
-  ];
+    });
+  }
 
   return {
     messaging_product: 'whatsapp',
@@ -95,6 +93,45 @@ export class MetaWhatsAppProvider implements MessagingProvider {
         throw new ProviderError(
           code,
           `Meta WhatsApp request failed: ${status || 'NO_STATUS'} ${JSON.stringify(err.response?.data || err.message)}`
+        );
+      }
+
+      throw err;
+    }
+  }
+
+  // Lists the message templates of the WhatsApp Business Account so the helpdesk can
+  // map placeholders (or, later, create templates) against the real Meta catalogue.
+  public async fetchMessageTemplates(params?: { limit?: number; after?: string }): Promise<unknown> {
+    if (!config.metaWhatsApp.accessToken || !config.metaWhatsApp.businessAccountId) {
+      throw new ProviderError(
+        'PROVIDER_NOT_CONFIGURED',
+        'Meta WhatsApp access token or business account id is missing'
+      );
+    }
+
+    const url = `https://graph.facebook.com/${config.metaWhatsApp.graphApiVersion}/${config.metaWhatsApp.businessAccountId}/message_templates`;
+
+    try {
+      const response = await axios.get(url, {
+        headers: {
+          Authorization: `Bearer ${config.metaWhatsApp.accessToken}`
+        },
+        params: {
+          fields: 'name,status,category,language,components',
+          limit: params?.limit || 100,
+          ...(params?.after ? { after: params.after } : {})
+        }
+      });
+
+      return response.data;
+    } catch (err) {
+      if (axios.isAxiosError(err)) {
+        const status = err.response?.status;
+        const code = status ? `META_HTTP_${status}` : 'META_NETWORK_ERROR';
+        throw new ProviderError(
+          code,
+          `Meta WhatsApp templates request failed: ${status || 'NO_STATUS'} ${JSON.stringify(err.response?.data || err.message)}`
         );
       }
 

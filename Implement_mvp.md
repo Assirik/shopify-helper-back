@@ -36,6 +36,7 @@ Critère d’acceptation:
   - `metaWhatsApp.accessToken`
   - `metaWhatsApp.appSecret`
   - `metaWhatsApp.phoneNumberId`
+  - `metaWhatsApp.businessAccountId`
   - `metaWhatsApp.templateName`
   - `metaWhatsApp.templateLanguage`
   - `termii.apiKey`
@@ -323,10 +324,21 @@ Critère d’acceptation:
   - `metaWhatsApp.confirmedTemplateName`
   - `metaWhatsApp.webhookVerifyToken`
   - `metaWhatsApp.appSecret`
+  - `metaWhatsApp.businessAccountId`
+  - `metaWhatsApp.cancelledTemplateName`
+  - `confirmation.firstReminderHours`
+  - `confirmation.secondReminderHours`
+  - `confirmation.expireHours`
+  - `confirmation.maxReminders`
+  - `confirmation.reminderCooldownMinutes`
+  - `confirmation.sweepIntervalMinutes`
 - Ajouter dans `.env.example`:
   - `META_WHATSAPP_APP_SECRET=...`
+  - `META_WHATSAPP_BUSINESS_ACCOUNT_ID=...`
   - `META_WHATSAPP_CONFIRMED_TEMPLATE_NAME=order_confirmed`
+  - `META_WHATSAPP_CANCELLED_TEMPLATE_NAME=order_canceled_by_admin`
   - `META_WHATSAPP_WEBHOOK_VERIFY_TOKEN=...`
+  - les variables `CONFIRMATION_*`
 - Étendre `Order` avec:
   - `customerConfirmationStatus`: `pending | confirmed | needs_attention | expired | cancelled | sms_only`
   - `confirmationSource`: `whatsapp_button | admin`
@@ -400,9 +412,11 @@ Critère d’acceptation:
   - enqueue `sendOrderConfirmed`
 - Annulation manuelle admin:
   - endpoint `POST /api/orders/:id/cancel`
+  - demander une raison d'annulation obligatoire (`reason`)
   - passer `customerConfirmationStatus=cancelled`
   - définir `confirmationCancelledAt`
   - ne plus relancer automatiquement
+  - envoyer le template d'annulation si `META_WHATSAPP_CANCELLED_TEMPLATE_NAME` est configuré
 - Relance manuelle:
   - endpoint `POST /api/orders/:id/remind`
   - autorisé seulement si `customerConfirmationStatus=pending`
@@ -425,6 +439,18 @@ Critère d’acceptation:
 - Une commande `expired` n’est pas confirmée automatiquement par clic tardif.
 - Les relances ne partent pas en double.
 - `order_confirmed` part seulement après confirmation.
+- Le fallback SMS générique part seulement après l'échec définitif du template initial `sendOrderConfirmation`.
+- Les templates `order_confirmed`, annulation et relance échoués ne déclenchent pas le fallback SMS “commande reçue”.
+
+## Étape 13 bis: Templates WhatsApp Dashboard
+- Ajouter une route protégée:
+  - `GET /api/whatsapp/templates`
+- Utiliser `META_WHATSAPP_BUSINESS_ACCOUNT_ID` pour lister les templates Meta configurés.
+- Permettre au dashboard/helpdesk de vérifier les noms, langues, statuts et variables des templates réellement validés chez Meta.
+
+Critère d’acceptation:
+- Sans JWT: `401`.
+- Avec JWT et configuration Meta complète: la route retourne la liste des templates du WABA.
 
 ## Étape 14: Swagger MVP
 - Mettre à jour Swagger avec:

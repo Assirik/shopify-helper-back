@@ -2,6 +2,7 @@ import { Request, Response } from 'express';
 import { Types } from 'mongoose';
 import { Message } from '../models/Message';
 import { CustomerConfirmationStatus, NotificationStatus, Order } from '../models/Order';
+import { OrderConfirmationError, OrderConfirmationService } from '../utilities/services/orderConfirmation.service';
 import log from '../utilities/logger/logger';
 
 const DEFAULT_LIMIT = 20;
@@ -144,5 +145,103 @@ export class OrderController {
         messageSummary
       }
     });
+  }
+
+  public static async confirm(req: Request, res: Response) {
+    const id = typeof req.params.id === 'string' ? req.params.id : '';
+
+    try {
+      const result = await OrderConfirmationService.confirmByAdmin(id);
+
+      log.info(
+        {
+          orderId: result.order._id,
+          messageId: result.message._id,
+          jobId: result.job.id
+        },
+        'Admin confirmed order'
+      );
+
+      return res.status(202).json({
+        data: {
+          order: result.order,
+          message: result.message,
+          jobId: result.job.id,
+          queueName: result.job.queueName
+        }
+      });
+    } catch (err) {
+      if (err instanceof OrderConfirmationError) {
+        return res.status(err.status).json({ error: err.code });
+      }
+
+      throw err;
+    }
+  }
+
+  public static async cancel(req: Request, res: Response) {
+    const id = typeof req.params.id === 'string' ? req.params.id : '';
+    const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim() : undefined;
+
+    try {
+      const result = await OrderConfirmationService.cancelByAdmin(id, reason);
+
+      log.info(
+        {
+          orderId: result.order._id,
+          reason,
+          notifiedCustomer: Boolean(result.notification)
+        },
+        'Admin cancelled order confirmation'
+      );
+
+      return res.status(200).json({
+        data: {
+          order: result.order,
+          message: result.notification?.message,
+          jobId: result.notification?.job.id,
+          queueName: result.notification?.job.queueName
+        }
+      });
+    } catch (err) {
+      if (err instanceof OrderConfirmationError) {
+        return res.status(err.status).json({ error: err.code });
+      }
+
+      throw err;
+    }
+  }
+
+  public static async remind(req: Request, res: Response) {
+    const id = typeof req.params.id === 'string' ? req.params.id : '';
+
+    try {
+      const result = await OrderConfirmationService.remindByAdmin(id);
+
+      log.info(
+        {
+          orderId: result.order._id,
+          messageId: result.message._id,
+          jobId: result.job.id,
+          reminderCount: result.order.reminderCount
+        },
+        'Admin reminded order confirmation'
+      );
+
+      return res.status(202).json({
+        data: {
+          order: result.order,
+          message: result.message,
+          jobId: result.job.id,
+          queueName: result.job.queueName
+        }
+      });
+    } catch (err) {
+      if (err instanceof OrderConfirmationError) {
+        return res.status(err.status).json({ error: err.code });
+      }
+
+      throw err;
+    }
   }
 }

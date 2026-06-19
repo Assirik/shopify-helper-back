@@ -1,20 +1,16 @@
+export interface TemplateVariable {
+  name: string;
+  value: string;
+}
+
 export interface OrderConfirmationInput {
   orderId: string;
   to: string;
   templateName: string;
   templateLanguage: string;
-  buttonPayload: string;
-  variables: {
-    greeting: string;
-    customerName: string;
-    orderName: string;
-    itemName: string;
-    amount: string;
-    quantity: string;
-    address: string;
-    shippingNote: string;
-    paymentMethod: string;
-  };
+  buttonPayload?: string;
+  // Named template variables, in template order. Each maps to a Meta `{{name}}` placeholder.
+  variables: TemplateVariable[];
 }
 
 export interface ProviderResult {

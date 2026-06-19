@@ -10,17 +10,10 @@ describe('buildMetaOrderConfirmationPayload', () => {
       templateName: 'order_confirm_auto_schedule',
       templateLanguage: 'fr_FR',
       buttonPayload,
-      variables: {
-        greeting: 'Bonjour',
-        customerName: 'Awa Diop',
-        orderName: '#1001',
-        itemName: 'Sac cuir',
-        amount: '25000 XOF',
-        quantity: '1',
-        address: 'Dakar',
-        shippingNote: 'Livraison standard',
-        paymentMethod: 'Paiement à la livraison'
-      }
+      variables: [
+        { name: 'greeting', value: 'Bonjour' },
+        { name: 'order_no', value: '#1001' }
+      ]
     });
 
     expect(payload).toMatchObject({
@@ -33,6 +26,13 @@ describe('buildMetaOrderConfirmationPayload', () => {
           code: 'fr_FR'
         }
       }
+    });
+    expect(payload.template.components[0]).toEqual({
+      type: 'body',
+      parameters: [
+        { type: 'text', parameter_name: 'greeting', text: 'Bonjour' },
+        { type: 'text', parameter_name: 'order_no', text: '#1001' }
+      ]
     });
     expect(payload.template.components[1]).toEqual({
       type: 'button',

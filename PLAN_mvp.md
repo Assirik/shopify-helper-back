@@ -17,14 +17,22 @@ Déploiement cible MVP: Docker Compose pour orchestrer l’API Node.js et Redis.
   - `META_WHATSAPP_ACCESS_TOKEN`
   - `META_WHATSAPP_APP_SECRET`
   - `META_WHATSAPP_PHONE_NUMBER_ID`
+  - `META_WHATSAPP_BUSINESS_ACCOUNT_ID`
   - `META_WHATSAPP_TEMPLATE_NAME`
   - `META_WHATSAPP_CONFIRMED_TEMPLATE_NAME`
+  - `META_WHATSAPP_CANCELLED_TEMPLATE_NAME`
   - `META_WHATSAPP_TEMPLATE_LANGUAGE=fr`
   - `META_WHATSAPP_WEBHOOK_VERIFY_TOKEN`
   - `TERMII_API_KEY`
   - `TERMII_SENDER_ID`
   - `MONGODB_URI` pointant vers MongoDB Atlas
   - `REDIS_URL`
+  - `CONFIRMATION_FIRST_REMINDER_HOURS`
+  - `CONFIRMATION_SECOND_REMINDER_HOURS`
+  - `CONFIRMATION_EXPIRE_HOURS`
+  - `CONFIRMATION_MAX_REMINDERS`
+  - `CONFIRMATION_REMINDER_COOLDOWN_MINUTES`
+  - `CONFIRMATION_SWEEP_INTERVAL_MINUTES`
 - Mettre à jour `.env.example` avec toutes les variables attendues.
 - Ne pas ajouter de service MongoDB dans Docker Compose: Atlas est la source de données unique.
 - Remplacer le secret JWT hardcodé dans `auth.controller.ts`.
@@ -146,6 +154,8 @@ Notes importantes:
   - ajouter au bouton Quick Reply un payload technique dynamique: `CONFIRM_ORDER:{orderId}`
   - ne jamais confirmer automatiquement une commande sans payload fiable
   - envoyer le template `order_confirmed` après confirmation client ou admin
+  - envoyer le template `order_canceled_by_admin` après annulation admin si `META_WHATSAPP_CANCELLED_TEMPLATE_NAME` est configuré
+  - le fallback SMS générique ne s'applique qu'à l'échec définitif du template initial de demande de confirmation, jamais aux templates `order_confirmed`, annulation ou relance.
 - SMS:
   - texte français simple configurable dans le service:
     - confirmation commande
@@ -187,7 +197,8 @@ Notes importantes:
 - Empêcher les doublons de relance avec `lastReminderAt`, `reminderCount` et `lastReminderSource`.
 - Si `needs_attention`, l’admin décide manuellement:
   - confirmer: passer `confirmed`, `confirmationSource=admin`, puis envoyer `order_confirmed`
-  - annuler: passer `cancelled`
+  - annuler: passer `cancelled`, avec une raison obligatoire, puis envoyer le template d'annulation si configuré
+- Planifier un job BullMQ repeatable `confirmationSweep` pour déclencher les relances automatiques et l'expiration.
 - Cas à traiter manuellement:
   - numéro invalide ou absent
   - SMS fallback uniquement
@@ -207,6 +218,7 @@ Notes importantes:
   - `POST /api/orders/:id/confirm`
   - `POST /api/orders/:id/cancel`
   - `POST /api/orders/:id/remind`
+  - `GET /api/whatsapp/templates`
 - Filtres MVP:
   - clients: `search`, `phone`, `email`, pagination
   - `status`

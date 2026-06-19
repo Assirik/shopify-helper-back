@@ -25,8 +25,10 @@ export default {
     accessToken: process.env.META_WHATSAPP_ACCESS_TOKEN || '',
     appSecret: process.env.META_WHATSAPP_APP_SECRET || process.env.META_APP_SECRET || '',
     phoneNumberId: process.env.META_WHATSAPP_PHONE_NUMBER_ID || '',
+    businessAccountId: process.env.META_WHATSAPP_BUSINESS_ACCOUNT_ID || '',
     templateName: process.env.META_WHATSAPP_TEMPLATE_NAME || '',
     confirmedTemplateName: process.env.META_WHATSAPP_CONFIRMED_TEMPLATE_NAME || 'order_confirmed',
+    cancelledTemplateName: process.env.META_WHATSAPP_CANCELLED_TEMPLATE_NAME || '',
     webhookVerifyToken: process.env.META_WHATSAPP_WEBHOOK_VERIFY_TOKEN || '',
     templateLanguage:
       process.env.META_WHATSAPP_TEMPLATE_LANGUAGE || process.env.META_WHATSAPP_TEMPLATE_LANGUAGE_CODE || 'fr',
@@ -36,5 +38,13 @@ export default {
     apiKey: process.env.TERMII_API_KEY || '',
     senderId: process.env.TERMII_SENDER_ID || '',
     baseUrl: process.env.TERMII_BASE_URL || 'https://v3.api.termii.com'
+  },
+  confirmation: {
+    firstReminderHours: Number(process.env.CONFIRMATION_FIRST_REMINDER_HOURS) || 24,
+    secondReminderHours: Number(process.env.CONFIRMATION_SECOND_REMINDER_HOURS) || 48,
+    expireHours: Number(process.env.CONFIRMATION_EXPIRE_HOURS) || 72,
+    maxReminders: Number(process.env.CONFIRMATION_MAX_REMINDERS) || 2,
+    reminderCooldownMinutes: Number(process.env.CONFIRMATION_REMINDER_COOLDOWN_MINUTES) || 60,
+    sweepIntervalMinutes: Number(process.env.CONFIRMATION_SWEEP_INTERVAL_MINUTES) || 30
   }
 };

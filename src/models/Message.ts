@@ -24,6 +24,7 @@ export enum MessageStatus {
 export enum TemplatePurpose {
   ORDER_CONFIRMATION_REQUEST = 'order_confirmation_request',
   ORDER_CONFIRMED = 'order_confirmed',
+  ORDER_CANCELLED = 'order_cancelled',
   REMINDER = 'reminder',
   SMS_FALLBACK = 'sms_fallback'
 }
