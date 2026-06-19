@@ -442,7 +442,7 @@ Critère d’acceptation:
 - Le fallback SMS générique part seulement après l'échec définitif du template initial `sendOrderConfirmation`.
 - Les templates `order_confirmed`, annulation et relance échoués ne déclenchent pas le fallback SMS “commande reçue”.
 
-## Étape 13 bis: Templates WhatsApp Dashboard
+## Étape 14: Templates WhatsApp Dashboard
 - Ajouter une route protégée:
   - `GET /api/whatsapp/templates`
 - Utiliser `META_WHATSAPP_BUSINESS_ACCOUNT_ID` pour lister les templates Meta configurés.
@@ -452,7 +452,63 @@ Critère d’acceptation:
 - Sans JWT: `401`.
 - Avec JWT et configuration Meta complète: la route retourne la liste des templates du WABA.
 
-## Étape 14: Swagger MVP
+## Étape 15: Configuration Régionale Shipping Note & Payment Method
+- Créer un modèle global `MessageVariableConfig` avec:
+  - `shippingNote.dakar`
+  - `shippingNote.nonDakar`
+  - `paymentMethod.dakar`
+  - `paymentMethod.nonDakar`
+  - timestamps
+  - `updatedBy` pour auditer l’administrateur ayant effectué la dernière modification
+- Ajouter un service `messageVariableConfig.service.ts` chargé de:
+  - lire la configuration globale
+  - appliquer une mise à jour partielle
+  - reset une valeur avec `null` ou une chaîne vide
+  - normaliser et classifier la région de livraison
+  - retourner les deux variables résolues pour une commande
+- Définir une classification régionale sûre:
+  - reconnaître explicitement `Dakar` et ses alias métier autorisés
+  - ne pas utiliser une simple recherche `includes('dakar')`, afin que `Hors Dakar` et `Non Dakar` restent hors Dakar
+  - ne pas considérer une région absente comme hors Dakar par défaut
+- Sauvegarder la région de livraison sur `Order` lors de l’ingestion Shopify afin que les relances utilisent la région de la commande, même si l’adresse du client change ensuite.
+- Ajouter un validateur runtime pour le body de configuration:
+  - objet JSON obligatoire
+  - seuls `shippingNote` et `paymentMethod` sont acceptés
+  - seules les variantes `dakar` et `nonDakar` sont acceptées
+  - valeur chaîne, `null` ou champ absent uniquement
+  - texte non vide après trim, sauf reset explicite
+  - longueur maximale 200 caractères
+  - aucun saut de ligne, tabulation ou groupe de plus de 4 espaces
+- Ajouter les routes helpdesk:
+  - `GET /api/whatsapp/message-config`
+  - `PUT /api/whatsapp/message-config`
+- Protéger la lecture avec JWT et réserver la modification au rôle `ADMIN`.
+- Interdire au signup public de choisir ou injecter un rôle administrateur.
+- Dans le worker, résoudre les overrides uniquement pour:
+  - `ORDER_CONFIRMATION_REQUEST`
+  - `REMINDER`
+- Conserver les fallbacks actuels quand une variante n’est pas configurée:
+  - `shipping_note = order.shippingTitle || 'Livraison standard'`
+  - `payment_method = moyen de paiement réel de la commande`
+- Ne pas appliquer un texte COD configuré aux commandes non-COD; conserver leur moyen de paiement réel ou prévoir une règle explicitement compatible.
+- Ajouter des tests unitaires et API couvrant:
+  - Dakar, Région de Dakar, Hors Dakar, Non Dakar, Thiès et région absente
+  - configuration complète et mises à jour partielles
+  - reset par `null`/chaîne vide
+  - rejet des nombres, tableaux, champs inconnus et variantes inconnues
+  - accès USER refusé et ADMIN autorisé
+  - résolution worker Dakar/hors Dakar et fallback sans configuration
+  - stabilité d’une ancienne commande après changement de région du client
+
+Critère d’acceptation:
+- Le helpdesk peut modifier indépendamment les quatre textes régionaux.
+- Une commande Dakar et une commande hors Dakar reçoivent chacune les valeurs attendues.
+- Une région absente ou ambiguë n’entraîne pas l’envoi d’une mauvaise consigne régionale.
+- Les payloads invalides retournent `400` sans erreur serveur.
+- Seul un administrateur peut modifier cette configuration globale.
+- Les templates confirmé et annulé restent inchangés.
+
+## Étape 16: Swagger MVP
 - Mettre à jour Swagger avec:
   - Auth
   - Shopify webhook
@@ -463,13 +519,14 @@ Critère d’acceptation:
 - Documenter le Bearer token pour dashboard.
 - Documenter la vérification webhook WhatsApp Meta.
 - Documenter les endpoints admin `confirm`, `cancel`, `remind`.
+- Documenter `GET/PUT /api/whatsapp/message-config`, son schéma et ses erreurs de validation.
 - Ajouter exemples de payload/réponse MVP.
 
 Critère d’acceptation:
 - `/api/docs` décrit toutes les routes MVP.
 - Les routes dashboard affichent leur besoin d’auth JWT.
 
-## Étape 15: Tests Prioritaires
+## Étape 17: Tests Prioritaires
 - Ajouter tests unitaires sur:
   - normalisation téléphone
   - HMAC Shopify
@@ -495,7 +552,7 @@ Critère d’acceptation:
 - Les tests critiques passent localement.
 - `npm run tsc -- --noEmit` passe.
 
-## Étape 16: Docker Compose, Atlas & Vérification Fonctionnelle Locale
+## Étape 18: Docker Compose, Atlas & Vérification Fonctionnelle Locale
 - Vérifier que MongoDB Atlas est prêt:
   - cluster créé
   - utilisateur DB créé
@@ -520,12 +577,13 @@ Critère d’acceptation:
 - Tester webhook WhatsApp bouton avec payload `CONFIRM_ORDER:{orderId}`.
 - Tester webhook WhatsApp message libre.
 - Tester confirmation admin et envoi du template `order_confirmed`.
+- Tester les variantes `shipping_note` et `payment_method` pour Dakar et hors Dakar.
 
 Critère d’acceptation:
 - Le flux complet webhook -> queue -> WhatsApp ou fallback SMS -> tracking fonctionne.
 - Aucune étape ne nécessite un MongoDB local.
 
-## Étape 17: Préparation Docker Compose MVP
+## Étape 19: Préparation Docker Compose MVP
 - Créer un `docker-compose.yml` minimal:
   - `api`: build local, `env_file: .env`, port API exposé.
   - `redis`: `redis:7.2-alpine`, mot de passe, AOF, volume persistant.
@@ -554,7 +612,7 @@ Critère d’acceptation:
 - Redis n’est pas exposé publiquement.
 - Atlas est la seule base MongoDB utilisée.
 
-## Étape 18: Préparation Déploiement MVP
+## Étape 20: Préparation Déploiement MVP
 - Documenter les variables d’environnement obligatoires.
 - Ajouter une section README “Run local”.
 - Ajouter une section README “Run with Docker Compose”.
@@ -563,6 +621,7 @@ Critère d’acceptation:
 - Ajouter une section README “Meta WhatsApp template”.
 - Ajouter une section README “WhatsApp inbound webhook setup”.
 - Ajouter une section README “Confirmation workflow”.
+- Ajouter une section README “Message variables configuration”.
 - Ajouter une section README “Redis required”.
 - Ajouter une section README “Deployment target: VPS + Coolify”.
 - Vérifier que l’app fail clairement si une variable critique manque en production.
@@ -579,18 +638,20 @@ Critère d’acceptation:
 4. HMAC Shopify.
 5. Webhook ingestion + idempotence + clients/produits/logs.
 6. BullMQ/Redis.
-7. Worker.
-8. Meta WhatsApp.
-9. Termii fallback.
-10. API dashboard orders/messages.
-11. Retry.
-12. Extension modèles/config confirmation client.
-13. Webhook WhatsApp entrant.
-14. Workflow confirmation, relances et admin.
-15. Swagger.
-16. Tests ciblés.
-17. Docker Compose + Atlas + vérification locale.
-18. Documentation déploiement.
+7. Provider et worker Meta WhatsApp.
+8. Termii fallback.
+9. API dashboard orders.
+10. API dashboard messages et retry.
+11. Extension modèles/config confirmation client.
+12. Webhook WhatsApp entrant.
+13. Workflow confirmation, relances et admin.
+14. Catalogue des templates WhatsApp dans le dashboard.
+15. Configuration régionale `shipping_note` et `payment_method`.
+16. Swagger.
+17. Tests ciblés.
+18. Docker Compose + Atlas + vérification locale.
+19. Préparation Docker Compose MVP.
+20. Documentation déploiement.
 
 ## Assumptions
 - Le MVP reste backend-only.
@@ -605,4 +666,5 @@ Critère d’acceptation:
 - Le template `order_confirmed` est envoyé uniquement après confirmation bouton ou confirmation admin.
 - Toute réponse libre du client passe en `needs_attention`, jamais en confirmation automatique.
 - Le fallback SMS met la commande en `sms_only`, donc confirmation manuelle requise.
+- `shipping_note` et `payment_method` disposent de variantes Dakar/hors Dakar configurables depuis le helpdesk.
 - Les tests automatisés sont utiles mais ne doivent pas retarder excessivement un premier MVP fonctionnel.

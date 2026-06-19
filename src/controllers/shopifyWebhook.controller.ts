@@ -553,6 +553,7 @@ export class ShopifyWebhookController {
       totalDiscounts: payload.total_discounts,
       shippingPrice: payload.total_shipping_price_set?.shop_money?.amount || shippingLine?.price || undefined,
       shippingTitle: shippingLine?.title || undefined,
+      shippingRegion: customerAddress.region,
       currency: payload.currency,
       paymentGatewayNames: payload.payment_gateway_names || [],
       isCashOnDelivery: cod,

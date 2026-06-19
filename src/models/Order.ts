@@ -65,6 +65,7 @@ const OrderSchema = new Schema<IOrder>(
     totalDiscounts: { type: String, trim: true },
     shippingPrice: { type: String, trim: true },
     shippingTitle: { type: String, trim: true },
+    shippingRegion: { type: String, trim: true, index: true },
     currency: { type: String, required: true, trim: true, uppercase: true },
     paymentGatewayNames: { type: [String], default: [] },
     isCashOnDelivery: { type: Boolean, default: false, index: true },
@@ -137,6 +138,7 @@ export interface IOrder extends Document {
   totalDiscounts?: string;
   shippingPrice?: string;
   shippingTitle?: string;
+  shippingRegion?: string;
   currency: string;
   paymentGatewayNames: string[];
   isCashOnDelivery: boolean;

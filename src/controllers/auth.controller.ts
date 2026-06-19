@@ -1,13 +1,17 @@
 import { NextFunction, Request, Response } from 'express';
-import { User, IUser } from '../models/User';
+import { User, IUser, Role } from '../models/User';
 import jwt from 'jsonwebtoken';
 import config from '../utilities/config/env.config';
 
 export class AuthController {
   public static async signup(req: Request, res: Response) {
     const passwd = req.body.password;
-    delete req.body.password;
-    const user = new User(req.body);
+    const user = new User({
+      userName: req.body.userName,
+      email: req.body.email,
+      phone: req.body.phone,
+      role: Role.USER
+    });
     await user.setPassword(passwd);
     User.create(user)
       .then(() => res.status(201).json({ message: 'Successful' }))

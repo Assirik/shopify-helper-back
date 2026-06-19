@@ -20,6 +20,10 @@ import {
 import config from '../utilities/config/env.config';
 import log from '../utilities/logger/logger';
 import { OrderConfirmationService } from '../utilities/services/orderConfirmation.service';
+import {
+  MessageVariableConfigService,
+  ResolvedMessageVariables
+} from '../utilities/services/messageVariableConfig.service';
 
 let notificationWorker: Worker<SendOrderConfirmationJobData> | null = null;
 const metaWhatsAppProvider = new MetaWhatsAppProvider();
@@ -73,7 +77,8 @@ const getGreeting = () => {
 const buildTemplateVariables = (
   order: IOrder,
   customer: ICustomer | null,
-  templatePurpose: TemplatePurpose
+  templatePurpose: TemplatePurpose,
+  overrides: ResolvedMessageVariables = {}
 ): TemplateVariable[] => {
   const greeting = getGreeting();
   const orderNo = order.shopifyOrderName;
@@ -105,8 +110,11 @@ const buildTemplateVariables = (
     { name: 'amount', value: formatAmount(order.totalPrice) },
     { name: 'qty', value: getTotalQuantity(order) },
     { name: 'address', value: getCustomerAddress(customer) },
-    { name: 'shipping_note', value: order.shippingTitle || 'Livraison standard' },
-    { name: 'payment_method', value: getPaymentMethod(order) }
+    { name: 'shipping_note', value: overrides.shippingNote || order.shippingTitle || 'Livraison standard' },
+    {
+      name: 'payment_method',
+      value: order.isCashOnDelivery && overrides.paymentMethod ? overrides.paymentMethod : getPaymentMethod(order)
+    }
   ];
 };
 
@@ -115,7 +123,8 @@ const buildOrderConfirmationInput = (
   customer: ICustomer | null,
   templateName: string,
   templatePurpose: TemplatePurpose,
-  buttonPayload?: string
+  buttonPayload?: string,
+  overrides: ResolvedMessageVariables = {}
 ): OrderConfirmationInput => {
   if (!order.customerPhoneE164) {
     throw new Error(`Order ${order._id.toString()} has no WhatsApp recipient phone`);
@@ -127,9 +136,15 @@ const buildOrderConfirmationInput = (
     templateName,
     templateLanguage: config.metaWhatsApp.templateLanguage,
     buttonPayload,
-    variables: buildTemplateVariables(order, customer, templatePurpose)
+    variables: buildTemplateVariables(order, customer, templatePurpose, overrides)
   };
 };
+
+// Only the confirmation request and reminder templates use shipping_note / payment_method.
+const PURPOSES_WITH_REGION_VARIANTS: TemplatePurpose[] = [
+  TemplatePurpose.ORDER_CONFIRMATION_REQUEST,
+  TemplatePurpose.REMINDER
+];
 
 const markMessageAsSending = async (
   job: Job<SendOrderConfirmationJobData>,
@@ -242,7 +257,10 @@ const sendMetaTemplate = async (
   }
 
   const customer = order.customerId ? await Customer.findById(order.customerId) : null;
-  const input = buildOrderConfirmationInput(order, customer, templateName, templatePurpose, buttonPayload);
+  const overrides = PURPOSES_WITH_REGION_VARIANTS.includes(templatePurpose)
+    ? await MessageVariableConfigService.resolveForRegion(order.shippingRegion)
+    : {};
+  const input = buildOrderConfirmationInput(order, customer, templateName, templatePurpose, buttonPayload, overrides);
   const message = await markMessageAsSending(job, input, templatePurpose);
   const result = await metaWhatsAppProvider.sendOrderConfirmation(input);
 
