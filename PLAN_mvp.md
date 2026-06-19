@@ -165,6 +165,33 @@ Notes importantes:
 - Si WhatsApp échoue et que le fallback SMS part, passer la commande en `customerConfirmationStatus=sms_only`, car le SMS MVP informe le client mais ne permet pas de confirmation automatique.
 - Ne pas bloquer le webhook si Meta/Termii est indisponible: l’échec est traité par job + retry.
 
+### Configuration régionale des variables de message
+- Permettre au helpdesk de configurer librement les variables WhatsApp `shipping_note` et `payment_method`, sans permettre l’édition complète des templates Meta dans le MVP.
+- Pour chaque variable, stocker deux variantes:
+  - `dakar`: texte utilisé quand la région de livraison est Dakar
+  - `nonDakar`: texte utilisé pour les autres régions
+- Ajouter un document MongoDB global `MessageVariableConfig` contenant:
+  - `shippingNote.dakar`, `shippingNote.nonDakar`
+  - `paymentMethod.dakar`, `paymentMethod.nonDakar`
+  - timestamps et `updatedBy` pour identifier l’administrateur ayant effectué la dernière modification
+- Ajouter une API helpdesk protégée:
+  - `GET /api/whatsapp/message-config`
+  - `PUT /api/whatsapp/message-config`
+- Supporter les mises à jour partielles et le reset d’une variante avec `null` ou une chaîne vide.
+- Valider strictement chaque texte avant persistance:
+  - type chaîne obligatoire
+  - longueur maximale contrôlée
+  - aucun saut de ligne ou tabulation
+  - aucun espacement excessif
+  - rejet des champs et variantes inconnus
+- Résoudre la variante au moment de l’envoi des templates `order_confirmation_request` et `reminder` uniquement.
+- Utiliser la région de livraison propre à la commande; ne pas dépendre uniquement de la dernière région mutable du client.
+- Ne pas classer une région absente ou ambiguë comme hors Dakar automatiquement; utiliser les valeurs métier par défaut et signaler le cas si nécessaire.
+- Si aucune configuration n’existe, conserver les valeurs calculées actuelles:
+  - `shipping_note`: titre de livraison Shopify ou `Livraison standard`
+  - `payment_method`: moyen de paiement réel de la commande
+- Réserver la modification de cette configuration aux administrateurs et journaliser l’auteur de chaque changement.
+
 ### Webhook WhatsApp entrant & confirmation client
 - Ajouter:
   - `GET /api/webhooks/whatsapp` pour la vérification Meta avec `META_WHATSAPP_WEBHOOK_VERIFY_TOKEN`
@@ -219,6 +246,8 @@ Notes importantes:
   - `POST /api/orders/:id/cancel`
   - `POST /api/orders/:id/remind`
   - `GET /api/whatsapp/templates`
+  - `GET /api/whatsapp/message-config`
+  - `PUT /api/whatsapp/message-config`
 - Filtres MVP:
   - clients: `search`, `phone`, `email`, pagination
   - `status`
@@ -279,6 +308,10 @@ Notes importantes:
   - relances incrémentent `reminderCount` et expirent après 2 relances sans réponse
   - échec WhatsApp déclenche fallback SMS
   - fallback SMS passe la confirmation client en `sms_only`
+  - configuration régionale sélectionne la variante Dakar ou hors Dakar attendue
+  - région absente/ambiguë utilise le fallback métier sans envoyer une consigne incorrecte
+  - payload de configuration invalide retourne `400`, jamais `500`
+  - utilisateur non administrateur ne peut pas modifier la configuration globale
   - `POST /api/messages/:id/retry` refuse les messages non failed
   - endpoints dashboard refusent les requêtes sans JWT
 - Vérifications manuelles:
@@ -302,6 +335,7 @@ Notes importantes:
 - Le bouton du template initial reste un Quick Reply avec payload dynamique `CONFIRM_ORDER:{orderId}` ajouté lors de l’envoi Cloud API.
 - Le template `order_confirmed` est envoyé uniquement après confirmation client ou admin.
 - Toute réponse libre du client est traitée comme `needs_attention` pour intervention admin.
+- `shipping_note` et `payment_method` sont configurables par région depuis le helpdesk, indépendamment de la future édition complète des templates Meta.
 
 ## Perspectives
 - Ajouter d’autres webhooks Shopify: `orders/updated`, `fulfillments/create`, `refunds/create`.
