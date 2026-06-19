@@ -77,6 +77,7 @@ Notes importantes:
   - indicateurs `isTest`, `shopifyCancelledAt`, `shopifyCancelReason`
   - statuts Shopify
   - `notificationStatus`, avec `skipped` pour les commandes persistées mais non notifiées
+  - complément prévu à l’étape 16: instantané livraison `deliveryRegion`, `deliveryRegionCode`, `deliveryPreferredMoment`, `deliveryAddress`, GPS, IP et locale client
 - Créer `Customer` pour avoir une liste clients exploitable:
   - identifiants Shopify
   - nom, téléphone brut/normalisé, email
@@ -165,6 +166,7 @@ Critère d’acceptation:
   - `test`, `cancelled_at`, `cancel_reason`
   - `financial_status`
   - `fulfillment_status`
+  - complément correctif prévu à l’étape 16: région canonique, moment préféré, adresse réelle de livraison, GPS, `browser_ip`, `customer_locale` et parsing corrigé du nom complet
 - Choisir le premier téléphone disponible dans l’ordre:
   - `shipping_address.phone`
   - `billing_address.phone`
@@ -508,128 +510,270 @@ Critère d’acceptation:
 - Seul un administrateur peut modifier cette configuration globale.
 - Les templates confirmé et annulé restent inchangés.
 
-## Étape 16: Swagger MVP
-- Mettre à jour Swagger avec:
-  - Auth
-  - Shopify webhook
-  - WhatsApp webhook
-  - Orders
-  - Messages
-- Documenter les headers Shopify nécessaires.
-- Documenter le Bearer token pour dashboard.
-- Documenter la vérification webhook WhatsApp Meta.
-- Documenter les endpoints admin `confirm`, `cancel`, `remind`.
-- Documenter `GET/PUT /api/whatsapp/message-config`, son schéma et ses erreurs de validation.
-- Ajouter exemples de payload/réponse MVP.
+## Étape 16: Enrichissement Ingestion & Robustesse Config Variables
+- Appliquer les nouvelles directives détaillées dans [fait-moi-un-plan-concurrent-wind.md](fait-moi-un-plan-concurrent-wind.md):
+  - contexte, décisions retenues et ordre interne: lignes 3 à 20, à l’exception de la décision JWT simple de la ligne 13
+  - fichiers concernés: lignes 24 à 31
+  - enrichissement ingestion et instantané livraison: lignes 35 à 78
+  - robustesse config et résolution région immuable: lignes 82 à 110
+  - vérification end-to-end: lignes 124 à 130
+- Conserver le durcissement déjà implémenté à l’étape 15:
+  - `PUT /api/whatsapp/message-config` réservé au rôle `ADMIN`
+  - signup public incapable d’injecter un rôle administrateur
+  - `updatedBy` renseigné depuis `req.userId`
+- Créer le référentiel fermé des 14 régions sénégalaises avec codes `SN_*`, alias et indicateur `isHomeDeliveryZone`.
+- Ajouter le parsing du nom complet selon la convention retenue: dernier mot comme nom de famille, mots précédents comme prénom(s).
+- Étendre `Order` avec un instantané immuable de livraison:
+  - `deliveryRegion`, `deliveryRegionCode`
+  - `deliveryPreferredMoment`, capturé seulement pour stockage et helpdesk
+  - `deliveryAddress`, `deliveryLatitude`, `deliveryLongitude`
+  - `browserIp`, `customerLocale`
+- Enrichir l’ingestion Shopify/Easysell depuis les adresses, `note_attributes`, GPS, IP et locale, sans scheduling par créneau.
+- Résoudre les variantes de message depuis `order.deliveryRegionCode`/`order.deliveryRegion`, jamais depuis la région mutable du client.
+- Remplacer le matching `includes('dakar')` par le référentiel canonique des régions.
+- Appliquer l’override `payment_method` uniquement aux commandes COD; conserver le moyen de paiement calculé et créer une version pour configurer le `payment_method` pour les commandes non-COD.
+- Durcir `updateConfig` pour retourner une erreur `400` structurée sur les mauvais types, sans exception serveur.
+- Garder les fallbacks existants lorsqu’une donnée enrichie ou une configuration régionale manque.
 
 Critère d’acceptation:
-- `/api/docs` décrit toutes les routes MVP.
-- Les routes dashboard affichent leur besoin d’auth JWT.
+- Les critères détaillés aux lignes 75 à 78 et 106 à 110 du fichier de directive sont satisfaits, hors assouplissement JWT explicitement ignoré.
+- `shopify_payload6.json` produit une commande avec région canonique, moment préféré, adresse de livraison, GPS et IP.
+- Une ancienne commande conserve sa propre région pour les relances, même si le client commande ensuite dans une autre région.
+- Une commande non-COD ne reçoit jamais le texte `payment_method` réservé au COD.
+- Un payload de configuration mal typé retourne `400`, la modification reste ADMIN-only et stocke `updatedBy`.
 
-## Étape 17: Tests Prioritaires
-- Ajouter tests unitaires sur:
+## Étape 17: Swagger MVP
+- Remplacer les métadonnées starter de `swagger.config.ts` par:
+  - titre et description du service Shopify WhatsApp/SMS
+  - version API du MVP
+  - serveurs local, ngrok/dev et production via configuration
+  - tags `Health`, `Auth`, `Customers`, `Orders`, `Messages`, `Shopify Webhooks`, `WhatsApp Webhooks`, `WhatsApp Templates`, `Message Config`
+- Ajouter `components.securitySchemes.bearerAuth` et l’appliquer à toutes les routes helpdesk protégées.
+- Définir des schémas réutilisables:
+  - `ApiError`, `ValidationError`, `Pagination`
+  - `User`, `Customer`, `Order`, `OrderLineItem`
+  - `Message`, `MessageAttempt`
+  - `WebhookEvent`, `InboundWhatsAppEvent`
+  - `MessageVariableConfig`, `RegionVariant`
+  - réponses de job BullMQ pour confirm/cancel/remind/retry
+- Documenter toutes les routes réellement montées:
+  - `POST /api/auth/signup`, `POST /api/auth/login`, `GET /api/auth/me`
+  - `GET /api/customers`
+  - `GET /api/orders`, `GET /api/orders/{id}`
+  - `POST /api/orders/{id}/confirm`, `/cancel`, `/remind`
+  - `GET /api/messages`, `GET /api/messages/{id}`, `POST /api/messages/{id}/retry`
+  - `POST /api/webhooks/shopify/orders-create`
+  - `GET/POST /api/webhooks/whatsapp`
+  - `GET /api/whatsapp/templates`
+  - `GET/PUT /api/whatsapp/message-config`
+  - `GET /api/health`
+- Pour les listes, documenter pagination, limites et filtres disponibles:
+  - clients: `search`, `phone`, `email`, `page`, `limit`
+  - commandes: `status`, `customerConfirmationStatus`, `orderName`, `phone`, `page`, `limit`
+  - messages: `status`, `channel`, `provider`, `page`, `limit`
+- Pour Shopify, documenter les headers HMAC, topic, shop domain et webhook id, ainsi que les réponses idempotentes `202`.
+- Pour Meta, documenter les query params de vérification, `X-Hub-Signature-256`, les événements bouton/texte/statut et l’ack rapide.
+- Documenter les enums réels des modèles, y compris les statuts confirmation, notification, message, template purpose et traitement inbound.
+- Inclure les nouveaux champs de livraison de l’étape 16 dans `Order`.
+- Documenter les droits:
+  - Bearer JWT pour le helpdesk
+  - rôle `ADMIN` obligatoire pour `PUT /api/whatsapp/message-config`
+  - webhooks publics protégés par leurs signatures respectives
+- Décrire les réponses `200`, `201`, `202`, `400`, `401`, `403`, `404`, `409`, `500` et `502` réellement utilisées.
+- Ajouter des exemples anonymisés et ne jamais exposer de token, secret, payload client réel, IP réelle ou URI Atlas.
+- Valider automatiquement `/api/docs.json` avec un parseur OpenAPI dans les tests ou un script dédié.
+
+Critère d’acceptation:
+- `/api/docs` et `/api/docs.json` représentent toutes les routes montées dans `routes.ts`.
+- Chaque route protégée affiche correctement Bearer JWT et, pour la configuration, la restriction ADMIN.
+- Les schémas et exemples correspondent aux réponses actuelles des contrôleurs.
+- La spécification OpenAPI est valide et ne contient plus de métadonnées “starter”.
+
+## Étape 18: Tests Prioritaires
+- Conserver les suites existantes comme baseline:
   - normalisation téléphone
-  - HMAC Shopify
-  - parsing payload bouton `CONFIRM_ORDER:{orderId}`
-- Ajouter tests API Supertest sur:
-  - webhook signature invalide
-  - webhook signature valide
-  - payload direct Shopify et payload enveloppé `{ payload: ... }`
-  - extraction client depuis `note_attributes`
-  - skip des commandes test/annulées/voided
-  - vérification `GET /api/webhooks/whatsapp`
-  - clic bouton WhatsApp confirme la commande
-  - message libre WhatsApp passe en `needs_attention`
-  - confirmation admin déclenche `order_confirmed`
-  - annulation admin passe en `cancelled`
-  - relance admin incrémente `reminderCount`
-  - endpoints dashboard sans JWT
-  - retry message non failed refusé.
-- Mocker Meta, Termii, Redis si nécessaire pour éviter dépendance externe forte.
-- Garder les tests comme filet minimal, pas comme blocage du MVP si une intégration externe manque.
+  - validation texte template
+  - signature Shopify
+  - providers Meta et Termii mockés
+  - middleware `requireAdmin`
+  - service `MessageVariableConfig`
+- Compléter les tests unitaires:
+  - référentiel `senegalRegions`: codes, libellés, alias, suffixe Region, inconnu, Dakar/hors Dakar/vide
+  - `nameParser`: vide, un/deux/trois mots, espaces multiples et limite des noms composés documentée
+  - parsing du payload `CONFIRM_ORDER:{orderId}`
+  - transitions et erreurs de `OrderConfirmationService`
+  - calcul des échéances de relance, cooldown, expiration et idempotence du sweep
+  - validation complète de `MessageVariableConfig`: champs inconnus, variantes inconnues, mauvais types, reset et `updatedBy`
+- Ajouter des tests d’ingestion avec les fixtures Shopify réelles:
+  - payload direct et payload enveloppé
+  - idempotence par webhook id et order id
+  - commandes test/annulées/voided persistées mais non enqueued
+  - extraction Customer/Product/Order et `note_attributes` Easysell
+  - `shopify_payload6.json`: région canonique, moment, adresse, GPS, IP, locale et nom corrigé
+  - snapshot régional d’une commande préservé après mise à jour du client
+- Ajouter des tests API Supertest:
+  - signup/login/me et rejet des tokens invalides
+  - lecture clients/commandes/messages avec pagination et filtres
+  - détails `404`, retry `409`, confirm/cancel/remind et raisons obligatoires
+  - `GET/PUT message-config`: `401`, `403`, succès ADMIN et validation `400`
+  - catalogue templates Meta: credentials absents, succès mocké, erreur provider `502`
+  - vérification et signature des deux familles de webhooks
+- Ajouter des tests WhatsApp inbound:
+  - clic bouton valide, doublon, payload inconnu, commande expirée/annulée
+  - message libre ou média passant en `needs_attention`
+  - statuts `sent/delivered/read/failed` et progression monotone
+  - événement inconnu acké sans casser le webhook
+- Ajouter des tests queue/worker avec Redis et providers mockés:
+  - envoi initial et payload bouton
+  - retry/backoff et fallback SMS seulement après échec définitif initial
+  - aucun fallback générique pour confirmé, annulé ou reminder
+  - variante régionale depuis l’Order immuable
+  - `payment_method` configuré seulement pour COD
+  - jobs dupliqués idempotents et arrêt propre des workers
+- Ajouter des scripts séparés si utile: `test:unit`, `test:integration`, `test:coverage`.
+- Utiliser une base de test dédiée (`TEST_MONGODB_URI` ou Mongo éphémère), jamais la base Atlas de production.
+- Valider également la spécification Swagger générée.
 
 Critère d’acceptation:
-- Les tests critiques passent localement.
-- `npm run tsc -- --noEmit` passe.
+- `npm run tsc -- --noEmit`, les tests unitaires et les tests d’intégration passent sans open handles.
+- Les scénarios critiques webhook -> queue -> provider -> base sont couverts sans appel externe réel.
+- Les régressions Dakar/hors Dakar, non-COD, idempotence et permissions ADMIN ont chacune un test dédié.
+- Un rapport de couverture est disponible, sans imposer artificiellement 100% au MVP.
 
-## Étape 18: Docker Compose, Atlas & Vérification Fonctionnelle Locale
-- Vérifier que MongoDB Atlas est prêt:
-  - cluster créé
-  - utilisateur DB créé
-  - IP autorisée ou accès réseau configuré
-  - `MONGODB_URI` renseigné dans `.env`.
-- Lancer Redis et l’API via Docker Compose:
-  - `docker compose up --build`
-- En alternative dev hors Docker:
-  - lancer Redis via Compose
-  - lancer l’API avec `npm run dev`
-  - garder `MONGODB_URI` vers Atlas.
-- Créer un utilisateur via `/api/auth/signup`.
-- Se connecter via `/api/auth/login`.
-- Envoyer un payload Shopify simulé avec HMAC valide.
-- Vérifier dans MongoDB:
-  - `WebhookEvent`
-  - `Order`
-  - `Message`
-- Vérifier logs worker.
-- Tester lecture dashboard avec Bearer token.
-- Tester retry sur message failed.
-- Tester webhook WhatsApp bouton avec payload `CONFIRM_ORDER:{orderId}`.
-- Tester webhook WhatsApp message libre.
-- Tester confirmation admin et envoi du template `order_confirmed`.
-- Tester les variantes `shipping_note` et `payment_method` pour Dakar et hors Dakar.
-
-Critère d’acceptation:
-- Le flux complet webhook -> queue -> WhatsApp ou fallback SMS -> tracking fonctionne.
-- Aucune étape ne nécessite un MongoDB local.
-
-## Étape 19: Préparation Docker Compose MVP
-- Créer un `docker-compose.yml` minimal:
-  - `api`: build local, `env_file: .env`, port API exposé.
-  - `redis`: `redis:7.2-alpine`, mot de passe, AOF, volume persistant.
-  - réseau Docker privé par défaut.
-- Créer un `docker-compose.dev.yml` avec:
-  - bind mount `.:/app`
-  - pas de volume anonyme sur `node_modules`
-  - commande `npm run live-dev`
-  - dépendances installées localement visibles dans le conteneur.
-- Config dev/ngrok:
-  - exposer seulement le port API, par exemple `3600:3600`.
-  - `API_ENDPOINT=https://<fixed-domain-ngrok>`.
-  - Shopify pointe vers `https://<fixed-domain-ngrok>/api/webhooks/shopify/orders-create`.
-- Config prod recommandée:
-  - VPS + Coolify + Docker Compose.
-  - MongoDB Atlas externe.
-  - Redis privé au réseau Docker.
-  - API exposée via proxy HTTPS Coolify.
-- Render:
-  - possible comme alternative.
-  - nécessite une adaptation en services Render/`render.yaml`.
-  - ne doit pas être considéré comme cible principale pour déployer le `docker-compose.yml` tel quel.
+## Étape 19: Docker Compose, Atlas & Vérification Fonctionnelle Locale
+- Préparer un environnement de recette isolé:
+  - base Atlas dédiée au dev/test avec utilisateur à privilèges minimaux
+  - Redis Docker persistant
+  - domaine ngrok fixe pour Shopify et Meta
+  - numéro Meta de test et templates approuvés
+  - credentials Termii de test ou appels explicitement mockés
+- Vérifier toutes les variables `.env.example`, notamment JWT, Shopify, WABA, Meta app secret, templates, Termii, Redis et délais de confirmation.
+- Démarrer avec `docker compose up --build` et vérifier:
+  - connexion Atlas
+  - connexion Redis
+  - démarrage API, notification worker, maintenance worker et repeatable job
+  - arrêt SIGTERM/SIGINT sans job perdu ni processus bloqué
+- Créer explicitement un utilisateur ADMIN de recette sans permettre l’escalade de rôle via signup public.
+- Exécuter le parcours nominal complet:
+  - webhook Shopify HMAC valide
+  - persistance WebhookEvent/Customer/Product/Order/Message
+  - job BullMQ puis template Meta avec payload Confirmer
+  - webhook Meta bouton
+  - commande `confirmed`, template `order_confirmed`, statuts delivered/read
+- Exécuter les parcours alternatifs:
+  - signature Shopify ou Meta invalide
+  - webhook Shopify dupliqué
+  - numéro invalide
+  - échec WhatsApp initial puis fallback Termii
+  - réponse libre -> `needs_attention`
+  - annulation et confirmation admin
+  - relance manuelle, cooldown, relances automatiques et expiration
+  - template Meta absent/rejeté et credentials provider invalides
+- Tester la configuration régionale:
+  - USER refusé, ADMIN autorisé et `updatedBy` enregistré
+  - Dakar et Ziguinchor utilisent les variantes attendues
+  - région absente utilise le fallback
+  - non-COD conserve son moyen de paiement réel
+- Rejouer `shopify_payload6.json` et contrôler région/code, moment, adresse, GPS, IP, locale et parsing du nom.
+- Vérifier toutes les listes/filtres/détails/retry via l’API helpdesk et comparer les réponses à Swagger.
+- Nettoyer les données et jobs de recette identifiables après validation.
 
 Critère d’acceptation:
-- `docker compose up --build` lance l’API et Redis.
-- Redis n’est pas exposé publiquement.
-- Atlas est la seule base MongoDB utilisée.
+- Tous les parcours nominaux et alternatifs ont une preuve dans les logs et MongoDB.
+- Les webhooks publics fonctionnent via HTTPS/ngrok avec signatures valides.
+- Le service redémarre sans perdre les jobs Redis persistés et sans dupliquer les notifications déjà envoyées.
+- Aucune étape ne nécessite un MongoDB local et aucune donnée de recette n’atteint la production.
 
-## Étape 20: Préparation Déploiement MVP
-- Documenter les variables d’environnement obligatoires.
-- Ajouter une section README “Run local”.
-- Ajouter une section README “Run with Docker Compose”.
-- Ajouter une section README “MongoDB Atlas setup”.
-- Ajouter une section README “Webhook Shopify setup”.
-- Ajouter une section README “Meta WhatsApp template”.
-- Ajouter une section README “WhatsApp inbound webhook setup”.
-- Ajouter une section README “Confirmation workflow”.
-- Ajouter une section README “Message variables configuration”.
-- Ajouter une section README “Redis required”.
-- Ajouter une section README “Deployment target: VPS + Coolify”.
-- Vérifier que l’app fail clairement si une variable critique manque en production.
-- Garder les secrets hors repo.
+## Étape 20: Préparation Docker Compose MVP
+- Remplacer le Dockerfile de développement actuel par un Dockerfile multi-stage:
+  - étape dépendances avec `npm ci`
+  - étape build TypeScript
+  - image runtime minimale contenant `build/` et les dépendances de production
+  - `NODE_ENV=production`, commande `npm start`, utilisateur non-root
+- Garder un target ou Dockerfile dev séparé avec `live-dev` et bind mount.
+- Clarifier les responsabilités Compose:
+  - `docker-compose.yml`: configuration production/simple sans bind mount
+  - `docker-compose.dev.yml`: override développement avec source locale et hot reload
+  - MongoDB reste Atlas et n’apparaît dans aucun Compose
+- Pour `api`:
+  - exposer uniquement le port HTTP nécessaire
+  - injecter les secrets au runtime, jamais pendant le build
+  - ajouter un healthcheck HTTP
+  - conserver API et workers dans le même container pour le MVP, en documentant cette décision
+- Pour Redis:
+  - conserver `redis:7.2-alpine`, mot de passe, AOF et volume nommé
+  - ne publier aucun port sur l’hôte en production
+  - ajouter healthcheck `redis-cli` authentifié
+  - faire dépendre l’API de l’état healthy de Redis
+- Ajouter `.dockerignore` complet: `.git`, `node_modules`, `build`, logs, tests lourds, `.env*` hors exemple, captures et payloads sensibles.
+- Compléter le shutdown:
+  - arrêter workers et schedulers
+  - fermer connexions BullMQ/Redis et MongoDB
+  - imposer un timeout de sortie avant `SIGKILL`
+- Vérifier que le logger est adapté à la production sans transport pretty obligatoire.
+- Ajouter des limites raisonnables CPU/mémoire ou les documenter pour Coolify.
+- Construire et tester l’image de production indépendamment du bind mount local.
 
 Critère d’acceptation:
-- Un déploiement peut être configuré sans lire le code.
-- Les prérequis Atlas/Redis/providers sont explicites.
+- `docker compose -f docker-compose.yml up --build` démarre une image compilée, sans `ts-node-dev` ni bind mount.
+- Le dev conserve le hot reload via l’override dédié.
+- Les healthchecks API/Redis deviennent healthy et Atlas reste la seule base MongoDB.
+- Redis n’est pas exposé publiquement et les données de queue persistent après redémarrage.
+- L’arrêt du container ferme proprement HTTP, workers, Redis/BullMQ et MongoDB.
+
+## Étape 21: Préparation Déploiement MVP
+- Réécrire le README pour refléter l’état réel:
+  - Atlas obligatoire et Redis/BullMQ obligatoires
+  - Meta Cloud API + Termii comme providers MVP réellement supportés
+  - workflows confirmation, annulation, relance, fallback et helpdesk
+  - champs régionaux et configuration `shipping_note`/`payment_method`
+  - commandes local, tests, Docker dev et Docker production
+- Documenter toutes les variables d’environnement par groupe, caractère obligatoire et exemple non secret.
+- Définir la cible VPS + Coolify + Docker Compose:
+  - domaine API et certificat HTTPS
+  - déploiement depuis Git/image Docker
+  - réseau privé Redis
+  - volume Redis persistant
+  - healthcheck et politique de restart
+- Configurer Atlas:
+  - utilisateur dédié à privilèges minimaux
+  - allowlist de l’IP fixe du serveur
+  - base production séparée
+  - backups/PITR selon le niveau Atlas choisi
+- Configurer Shopify:
+  - URL `orders/create`
+  - secret HMAC
+  - procédure de test et rotation du secret
+- Configurer Meta:
+  - WABA, phone number id, app secret, verify token et token long-lived/system user
+  - URLs GET/POST webhook et abonnement aux champs nécessaires
+  - templates approuvés et correspondance exacte de leurs variables
+  - procédure de renouvellement/rotation et diagnostic des statuts provider
+- Configurer Termii et documenter le sender id, les restrictions et le test du fallback.
+- Prévoir une procédure sécurisée de création du premier ADMIN; le signup public ne peut jamais choisir son rôle.
+- Ajouter un runbook opérateur:
+  - lire les logs par order/message/job id
+  - relancer un message failed
+  - traiter `needs_attention` et `sms_only`
+  - diagnostiquer Redis, Atlas, Meta et Termii
+  - gérer un template rejeté/pausé et une queue bloquée
+- Ajouter la checklist de release:
+  - build, TypeScript, tests, validation Swagger
+  - vérification env/secrets
+  - déploiement, healthchecks et smoke test
+  - rollback vers l’image précédente
+- Ajouter monitoring/alertes minimum:
+  - erreurs HTTP/webhooks
+  - échecs provider et fallback
+  - jobs BullMQ failed/stalled
+  - indisponibilité Redis/Atlas
+- Faire échouer rapidement le démarrage en production si une variable critique manque, sans logger sa valeur.
+
+Critère d’acceptation:
+- Un serveur vierge peut être configuré et déployé en suivant uniquement README et runbook.
+- Les prérequis Atlas, Redis, Shopify, Meta et Termii sont explicites et testables.
+- Le déploiement est HTTPS, les secrets restent hors image/repo et Redis reste privé.
+- Une procédure de smoke test et de rollback est disponible.
 
 ## Ordre Recommandé De Livraison
 1. Config/auth/env.
@@ -647,11 +791,12 @@ Critère d’acceptation:
 13. Workflow confirmation, relances et admin.
 14. Catalogue des templates WhatsApp dans le dashboard.
 15. Configuration régionale `shipping_note` et `payment_method`.
-16. Swagger.
-17. Tests ciblés.
-18. Docker Compose + Atlas + vérification locale.
-19. Préparation Docker Compose MVP.
-20. Documentation déploiement.
+16. Enrichissement ingestion et robustesse config variables.
+17. Swagger.
+18. Tests ciblés.
+19. Docker Compose + Atlas + vérification locale.
+20. Préparation Docker Compose MVP.
+21. Documentation déploiement.
 
 ## Assumptions
 - Le MVP reste backend-only.
@@ -667,4 +812,9 @@ Critère d’acceptation:
 - Toute réponse libre du client passe en `needs_attention`, jamais en confirmation automatique.
 - Le fallback SMS met la commande en `sms_only`, donc confirmation manuelle requise.
 - `shipping_note` et `payment_method` disposent de variantes Dakar/hors Dakar configurables depuis le helpdesk.
+- Les régions Easysell forment un référentiel fermé de 14 régions sénégalaises; la zone de livraison à domicile est déterminée par code canonique.
+- La région et les informations de livraison sont figées sur chaque `Order` et ne dépendent pas des futures modifications du client.
+- Pour le parsing d’un nom complet, le dernier mot est traité comme nom de famille et les mots précédents comme prénom(s), avec la limite connue des noms composés.
+- Le moment de livraison préféré est stocké pour le helpdesk uniquement; il ne planifie aucun envoi dans le MVP.
+- Le durcissement de l’étape 15 reste actif: modification de la configuration réservée aux ADMIN et auditée via `updatedBy`.
 - Les tests automatisés sont utiles mais ne doivent pas retarder excessivement un premier MVP fonctionnel.

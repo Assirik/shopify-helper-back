@@ -54,6 +54,9 @@ Déploiement cible MVP: Docker Compose pour orchestrer l’API Node.js et Redis.
   - mode de paiement, notamment Cash on Delivery
   - tags, source, URL de statut commande
   - champs Easysell dans `note_attributes`: `Nom complet`, `Téléphone`, `Adresse`, `Région`, `country`, `full_url`.
+  - moment de livraison préféré, adresse réelle de livraison, coordonnées GPS, IP navigateur et locale client
+- Canonicaliser la région depuis le référentiel fermé des 14 régions sénégalaises et figer cette valeur sur la commande.
+- Corriger le parsing des noms complets Easysell: dernier mot comme nom de famille, mots précédents comme prénom(s), sans modifier le nom complet affiché.
 - Ne pas enqueue de notification pour les commandes `test`, annulées (`cancelled_at`) ou `financial_status=voided`; les persister quand même avec statut `skipped`.
 - Ajouter des logs Pino structurés à chaque étape importante: réception webhook, idempotence, extraction client/commande, création client, création commande, création produit, audit webhook, message, enqueue ou skip.
 
@@ -71,6 +74,10 @@ Notes importantes:
   - `lineItems` avec produit, variante, quantité, prix, SKU, vendor
   - `totalPrice`, `subtotalPrice`, `currentTotalPrice`, `totalOutstanding`, `totalDiscounts`, `currency`
   - `shippingPrice`, `shippingTitle`
+  - `deliveryRegion`, `deliveryRegionCode`
+  - `deliveryPreferredMoment`, `deliveryAddress`
+  - `deliveryLatitude`, `deliveryLongitude`
+  - `browserIp`, `customerLocale`
   - `paymentGatewayNames`, `isCashOnDelivery`
   - `tags`, `sourceName`, `orderStatusUrl`, `noteAttributes`
   - `isTest`, `shopifyCancelledAt`, `shopifyCancelReason`
@@ -90,6 +97,7 @@ Notes importantes:
   - `phoneRaw`, `phoneE164`, `email`
   - adresse, ville/région/pays
   - `orderCount`, `lastOrderId`, `lastOrderName`, `lastOrderAt`
+  - `firstName`/`lastName` dérivés du nom complet selon la convention retenue pour les noms sénégalais
 - Ajouter `Product` pour préparer le futur module stock:
   - `shopifyProductId`, `title`, `vendor`, `productExists`
   - variantes avec `shopifyVariantId`, `title`, `sku`, `lastKnownPrice`, `inventoryManagement`
@@ -185,12 +193,23 @@ Notes importantes:
   - aucun espacement excessif
   - rejet des champs et variantes inconnus
 - Résoudre la variante au moment de l’envoi des templates `order_confirmation_request` et `reminder` uniquement.
-- Utiliser la région de livraison propre à la commande; ne pas dépendre uniquement de la dernière région mutable du client.
+- Utiliser `deliveryRegionCode`/`deliveryRegion`, instantané propre à la commande; ne jamais dépendre de la dernière région mutable du client.
+- Résoudre Dakar/hors Dakar via le référentiel canonique des 14 régions, sans recherche de sous-chaîne susceptible de classer `Hors Dakar` comme Dakar.
 - Ne pas classer une région absente ou ambiguë comme hors Dakar automatiquement; utiliser les valeurs métier par défaut et signaler le cas si nécessaire.
+- Appliquer l’override régional `payment_method` uniquement aux commandes COD; les commandes non-COD conservent leur moyen de paiement calculé.
 - Si aucune configuration n’existe, conserver les valeurs calculées actuelles:
   - `shipping_note`: titre de livraison Shopify ou `Livraison standard`
   - `payment_method`: moyen de paiement réel de la commande
 - Réserver la modification de cette configuration aux administrateurs et journaliser l’auteur de chaque changement.
+
+### Enrichissement ingestion & robustesse métier
+- La directive détaillée [fait-moi-un-plan-concurrent-wind.md](fait-moi-un-plan-concurrent-wind.md) est la référence d’implémentation pour ce lot:
+  - référentiel régions et parsing du nom: lignes 35 à 47
+  - instantané livraison et extraction Shopify/Easysell: lignes 49 à 68
+  - robustesse config/worker: lignes 82 à 110
+  - vérification end-to-end: lignes 124 à 130
+- Le moment de livraison préféré est stocké et affichable dans le helpdesk, mais ne déclenche aucun scheduling dans le MVP.
+- Le durcissement déjà implémenté prévaut sur la ligne 13 de cette directive: l’écriture de la configuration reste réservée au rôle `ADMIN`, avec `updatedBy`.
 
 ### Webhook WhatsApp entrant & confirmation client
 - Ajouter:
@@ -312,6 +331,12 @@ Notes importantes:
   - région absente/ambiguë utilise le fallback métier sans envoyer une consigne incorrecte
   - payload de configuration invalide retourne `400`, jamais `500`
   - utilisateur non administrateur ne peut pas modifier la configuration globale
+  - référentiel des 14 régions résout correctement codes, libellés, alias et valeurs inconnues
+  - `Hors Dakar`, `Non Dakar` et une région vide ne sont jamais classés comme Dakar
+  - parsing des noms couvre un, deux, trois mots, espaces multiples et valeur vide
+  - ingestion de `shopify_payload6.json` persiste région canonique, moment préféré, adresse, GPS, IP et nom corrigé
+  - relance d’une ancienne commande utilise son instantané régional, pas la région actuelle du client
+  - commande non-COD conserve son moyen de paiement calculé
   - `POST /api/messages/:id/retry` refuse les messages non failed
   - endpoints dashboard refusent les requêtes sans JWT
 - Vérifications manuelles:
@@ -336,6 +361,11 @@ Notes importantes:
 - Le template `order_confirmed` est envoyé uniquement après confirmation client ou admin.
 - Toute réponse libre du client est traitée comme `needs_attention` pour intervention admin.
 - `shipping_note` et `payment_method` sont configurables par région depuis le helpdesk, indépendamment de la future édition complète des templates Meta.
+- Les régions Easysell sont traitées comme un ensemble fermé de 14 régions sénégalaises avec codes canoniques `SN_*`.
+- Les données de livraison sont figées sur chaque commande; `Customer.region` ne pilote pas les relances historiques.
+- Le dernier mot d’un nom complet est traité comme nom de famille et les mots précédents comme prénom(s), avec une limite connue pour les noms composés.
+- Le moment de livraison préféré reste informatif dans le MVP et n’influence pas la planification des messages.
+- L’écriture de la configuration régionale reste réservée aux administrateurs malgré la directive initiale proposant JWT simple.
 
 ## Perspectives
 - Ajouter d’autres webhooks Shopify: `orders/updated`, `fulfillments/create`, `refunds/create`.
@@ -345,3 +375,6 @@ Notes importantes:
 - Ajouter multi-boutique Shopify si plusieurs shops doivent utiliser le même backend.
 - Ajouter rate limiting, audit admin, refresh tokens et rôles plus stricts.
 - Ajouter healthchecks Redis/API, monitoring, alerting et backups opérationnels Atlas/Redis.
+- Exploiter le moment de livraison préféré pour planifier les opérations ou relances après validation métier.
+- Ajouter un lien Maps et des signaux anti-fraude à partir du GPS et de l’IP.
+- Utiliser `customerLocale` pour sélectionner dynamiquement la langue du template.

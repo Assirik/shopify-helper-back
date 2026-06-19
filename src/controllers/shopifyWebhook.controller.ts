@@ -334,6 +334,8 @@ export class ShopifyWebhookController {
   public static async ordersCreate(req: Request, res: Response) {
     // 1. Normalisation minimale du contexte webhook.
     // A ce stade la signature HMAC a déjà été vérifiée par verifyShopifyWebhook.
+    // log.info('------------------------------------------------------');
+    // log.info({ body: req.body }, 'Received Shopify orders/create webhook request');
     const payload = getShopifyPayload(req.body as ShopifyOrderPayload | ShopifyWebhookBody);
     const shopifyOrderId = payload.id?.toString();
     const topic = req.get('X-Shopify-Topic') || 'orders/create';
