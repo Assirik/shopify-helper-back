@@ -4,6 +4,8 @@ dotenv.config({ quiet: true });
 
 const port = Number(process.env.PORT) || 3600;
 const apiEndpoint = process.env.API_ENDPOINT || `http://localhost:${port}`;
+const ngrokEndpoint = process.env.NGROK_ENDPOINT || '';
+const productionApiEndpoint = process.env.PRODUCTION_API_ENDPOINT || '';
 const allowedOrigins = process.env.ALLOWED_ORIGINS
   ? process.env.ALLOWED_ORIGINS.split(',').map(origin => origin.trim())
   : '*';
@@ -12,6 +14,8 @@ const jwtSecret = process.env.JWT_SECRET || 'change-me-in-env';
 export default {
   port,
   apiEndpoint,
+  ngrokEndpoint,
+  productionApiEndpoint,
   environment: process.env.NODE_ENV || 'development',
   mongodbUri: process.env.MONGODB_URI || 'mongodb://localhost:27017/starter-kit',
   redisUrl: process.env.REDIS_URL || 'redis://localhost:6379',

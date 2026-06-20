@@ -4,11 +4,29 @@ import { MetaWhatsAppProvider } from '../providers/metaWhatsApp.provider';
 import log from '../utilities/logger/logger';
 
 const metaWhatsAppProvider = new MetaWhatsAppProvider();
+const MAX_TEMPLATE_LIMIT = 100;
+
+export const parseTemplateLimit = (value: unknown): number | undefined => {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  if (typeof value !== 'string' || value.trim() === '') {
+    return undefined;
+  }
+
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed >= 1 && parsed <= MAX_TEMPLATE_LIMIT ? parsed : undefined;
+};
 
 export class WhatsAppTemplateController {
   public static async list(req: Request, res: Response) {
-    const limit = Number(req.query.limit) || undefined;
+    const limit = parseTemplateLimit(req.query.limit);
     const after = typeof req.query.after === 'string' ? req.query.after : undefined;
+
+    if (req.query.limit !== undefined && limit === undefined) {
+      return res.status(400).json({ error: 'InvalidTemplateLimit' });
+    }
 
     try {
       const data = await metaWhatsAppProvider.fetchMessageTemplates({ limit, after });

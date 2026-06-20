@@ -2,24 +2,20 @@
  * @openapi
  * /api/health:
  *   get:
- *     tags:
- *       - Health
- *     summary: Check API status
+ *     tags: [Health]
+ *     operationId: getHealth
+ *     summary: Vérifier l’état de l’API
  *     responses:
  *       200:
- *         description: API is running
+ *         description: Le processus API fonctionne.
  *         content:
  *           application/json:
  *             schema:
  *               type: object
+ *               required: [status, uptime, timestamp]
  *               properties:
- *                 status:
- *                   type: string
- *                   example: ok
- *                 uptime:
- *                   type: number
- *                   example: 12.34
- *                 timestamp:
- *                   type: string
- *                   format: date-time
+ *                 status: { type: string, enum: [ok] }
+ *                 uptime: { type: number, minimum: 0, example: 42.5 }
+ *                 timestamp: { type: string, format: date-time }
  */
+export const healthDocs = true;

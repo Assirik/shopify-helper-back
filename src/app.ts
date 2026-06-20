@@ -5,6 +5,7 @@ import { IncomingMessage, ServerResponse } from 'http';
 import { swaggerSpec } from './docs/swagger.config';
 import router from './routes/routes';
 import config from './utilities/config/env.config';
+import { errorHandler } from './middlewares/errorHandler';
 
 const app = express();
 
@@ -25,5 +26,6 @@ app.get('/api/docs.json', (req, res) => {
 });
 
 app.use(router);
+app.use(errorHandler);
 
 export default app;
