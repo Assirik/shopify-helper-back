@@ -74,7 +74,7 @@ const getGreeting = () => {
 };
 
 // Each template purpose maps to the exact named variables of its Meta template.
-const buildTemplateVariables = (
+export const buildTemplateVariables = (
   order: IOrder,
   customer: ICustomer | null,
   templatePurpose: TemplatePurpose,
@@ -145,6 +145,10 @@ const PURPOSES_WITH_REGION_VARIANTS: TemplatePurpose[] = [
   TemplatePurpose.ORDER_CONFIRMATION_REQUEST,
   TemplatePurpose.REMINDER
 ];
+
+export const getOrderDeliveryRegion = (
+  order: Pick<IOrder, 'deliveryRegionCode' | 'deliveryRegion' | 'shippingRegion'>
+) => order.deliveryRegionCode || order.deliveryRegion || order.shippingRegion;
 
 const markMessageAsSending = async (
   job: Job<SendOrderConfirmationJobData>,
@@ -258,7 +262,7 @@ const sendMetaTemplate = async (
 
   const customer = order.customerId ? await Customer.findById(order.customerId) : null;
   const overrides = PURPOSES_WITH_REGION_VARIANTS.includes(templatePurpose)
-    ? await MessageVariableConfigService.resolveForRegion(order.shippingRegion)
+    ? await MessageVariableConfigService.resolveForRegion(getOrderDeliveryRegion(order))
     : {};
   const input = buildOrderConfirmationInput(order, customer, templateName, templatePurpose, buttonPayload, overrides);
   const message = await markMessageAsSending(job, input, templatePurpose);

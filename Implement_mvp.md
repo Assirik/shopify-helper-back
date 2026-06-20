@@ -531,7 +531,7 @@ Critère d’acceptation:
 - Enrichir l’ingestion Shopify/Easysell depuis les adresses, `note_attributes`, GPS, IP et locale, sans scheduling par créneau.
 - Résoudre les variantes de message depuis `order.deliveryRegionCode`/`order.deliveryRegion`, jamais depuis la région mutable du client.
 - Remplacer le matching `includes('dakar')` par le référentiel canonique des régions.
-- Appliquer l’override `payment_method` uniquement aux commandes COD; conserver le moyen de paiement calculé et créer une version pour configurer le `payment_method` pour les commandes non-COD.
+- Appliquer l’override `payment_method` uniquement aux commandes COD; les commandes non-COD conservent toujours leur moyen de paiement calculé.
 - Durcir `updateConfig` pour retourner une erreur `400` structurée sur les mauvais types, sans exception serveur.
 - Garder les fallbacks existants lorsqu’une donnée enrichie ou une configuration régionale manque.
 

@@ -8,7 +8,9 @@ import { NotificationStatus, Order } from '../models/Order';
 import { Product } from '../models/Product';
 import { WebhookEvent, WebhookEventStatus } from '../models/WebhookEvent';
 import { enqueueOrderConfirmation } from '../queues/notification.queue';
+import { resolveRegion } from '../utilities/reference/senegalRegions';
 import log from '../utilities/logger/logger';
+import { splitFullName } from '../utilities/services/nameParser';
 
 /**
  * Types locaux pour les champs Shopify utilisés par le MVP.
@@ -28,6 +30,8 @@ interface ShopifyAddressPayload {
   country?: string | null;
   country_code?: string | null;
   phone?: string | null;
+  latitude?: number | string | null;
+  longitude?: number | string | null;
 }
 
 interface ShopifyCustomerPayload {
@@ -99,6 +103,8 @@ interface ShopifyOrderPayload {
   test?: boolean;
   financial_status?: string | null;
   fulfillment_status?: string | null;
+  browser_ip?: string | null;
+  customer_locale?: string | null;
 }
 
 interface ShopifyWebhookBody {
@@ -180,6 +186,56 @@ const getCustomerAddress = (payload: ShopifyOrderPayload) => {
     region: getFirstString(address?.province, getNoteAttribute(payload, 'Région', 'Region')),
     country: getFirstString(address?.country),
     countryCode: getFirstString(address?.country_code, getNoteAttribute(payload, 'country'))
+  };
+};
+
+const toFiniteNumber = (value?: number | string | null) => {
+  if (value === null || value === undefined || value === '') {
+    return undefined;
+  }
+
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+};
+
+// Comparaison tolérante aux accents/casse/tirets: on stocke toujours la valeur
+// Easysell telle quelle, mais on ne loggue un avertissement que si elle ne
+// correspond à aucun créneau connu, même écrit légèrement différemment
+// (ex. "Après-midi" vs "Après Midi").
+export const normalizeDeliveryMoment = (value: string) =>
+  value
+    .normalize('NFD')
+    .replace(/[̀-ͯ]/g, '')
+    .toLowerCase()
+    .replace(/-/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+const KNOWN_DELIVERY_MOMENTS = new Set(
+  ['Toute la journée', 'Matinée', 'Après Midi', 'Soir (avant 20h)'].map(normalizeDeliveryMoment)
+);
+
+export const extractDeliverySnapshot = (payload: ShopifyOrderPayload) => {
+  const rawRegion = getFirstString(
+    payload.shipping_address?.province,
+    getNoteAttribute(payload, 'Région', 'Region')
+  );
+  const canonicalRegion = resolveRegion(rawRegion);
+
+  return {
+    deliveryRegion: canonicalRegion?.label || rawRegion,
+    deliveryRegionCode: canonicalRegion?.code,
+    deliveryPreferredMoment: getFirstString(
+      getNoteAttribute(payload, 'Moment de livraison préféré')
+    ),
+    deliveryAddress: getFirstString(
+      payload.shipping_address?.address2,
+      getNoteAttribute(payload, 'Adresse de livraison')
+    ),
+    deliveryLatitude: toFiniteNumber(payload.shipping_address?.latitude),
+    deliveryLongitude: toFiniteNumber(payload.shipping_address?.longitude),
+    browserIp: getFirstString(payload.browser_ip, getNoteAttribute(payload, 'IP Address')),
+    customerLocale: getFirstString(payload.customer_locale)
   };
 };
 
@@ -441,9 +497,11 @@ export class ShopifyWebhookController {
     // Les payloads observés mettent parfois les mêmes données dans customer,
     // adresses, order.phone et note_attributes.
     const customerName = getCustomerName(payload);
+    const parsedCustomerName = splitFullName(customerName);
     const customerPhoneRaw = getCustomerPhone(payload);
     const customerEmail = getCustomerEmail(payload);
     const customerAddress = getCustomerAddress(payload);
+    const deliverySnapshot = extractDeliverySnapshot(payload);
     const phone = PhoneNormalizationService.normalizeSenegalPhone(customerPhoneRaw);
     const lineItems = getLineItems(payload);
     const tags = getTags(payload);
@@ -456,6 +514,19 @@ export class ShopifyWebhookController {
         ? NotificationStatus.SKIPPED
         : NotificationStatus.PENDING;
     const cod = isCashOnDelivery(payload);
+
+    if (
+      deliverySnapshot.deliveryPreferredMoment &&
+      !KNOWN_DELIVERY_MOMENTS.has(normalizeDeliveryMoment(deliverySnapshot.deliveryPreferredMoment))
+    ) {
+      log.warn(
+        {
+          shopifyOrderId,
+          deliveryPreferredMoment: deliverySnapshot.deliveryPreferredMoment
+        },
+        'Stored unknown Easysell preferred delivery moment'
+      );
+    }
 
     // Log de diagnostic après extraction: utile pour vérifier quel champ source
     // a réellement été retenu sans exposer tout le payload.
@@ -494,12 +565,13 @@ export class ShopifyWebhookController {
       shopifyCustomerId: payload.customer?.id?.toString(),
       shopifyCustomerGraphqlId: payload.customer?.admin_graphql_api_id || undefined,
       fullName: customerName,
-      firstName: getFirstString(payload.customer?.first_name, payload.shipping_address?.first_name, payload.billing_address?.first_name),
-      lastName: getFirstString(payload.customer?.last_name, payload.shipping_address?.last_name, payload.billing_address?.last_name),
+      firstName: parsedCustomerName.firstName,
+      lastName: parsedCustomerName.lastName,
       phoneRaw: customerPhoneRaw,
       phoneE164: phone.e164,
       email: customerEmail,
       ...customerAddress,
+      region: deliverySnapshot.deliveryRegion || customerAddress.region,
       lastOrderName: payload.name,
       lastOrderAt: payload.created_at ? new Date(payload.created_at) : new Date()
     };
@@ -555,7 +627,8 @@ export class ShopifyWebhookController {
       totalDiscounts: payload.total_discounts,
       shippingPrice: payload.total_shipping_price_set?.shop_money?.amount || shippingLine?.price || undefined,
       shippingTitle: shippingLine?.title || undefined,
-      shippingRegion: customerAddress.region,
+      shippingRegion: deliverySnapshot.deliveryRegion || customerAddress.region,
+      ...deliverySnapshot,
       currency: payload.currency,
       paymentGatewayNames: payload.payment_gateway_names || [],
       isCashOnDelivery: cod,
