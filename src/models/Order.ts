@@ -66,6 +66,14 @@ const OrderSchema = new Schema<IOrder>(
     shippingPrice: { type: String, trim: true },
     shippingTitle: { type: String, trim: true },
     shippingRegion: { type: String, trim: true, index: true },
+    deliveryRegion: { type: String, trim: true },
+    deliveryRegionCode: { type: String, trim: true, index: true },
+    deliveryPreferredMoment: { type: String, trim: true },
+    deliveryAddress: { type: String, trim: true },
+    deliveryLatitude: { type: Number },
+    deliveryLongitude: { type: Number },
+    browserIp: { type: String, trim: true },
+    customerLocale: { type: String, trim: true },
     currency: { type: String, required: true, trim: true, uppercase: true },
     paymentGatewayNames: { type: [String], default: [] },
     isCashOnDelivery: { type: Boolean, default: false, index: true },
@@ -139,6 +147,14 @@ export interface IOrder extends Document {
   shippingPrice?: string;
   shippingTitle?: string;
   shippingRegion?: string;
+  deliveryRegion?: string;
+  deliveryRegionCode?: string;
+  deliveryPreferredMoment?: string;
+  deliveryAddress?: string;
+  deliveryLatitude?: number;
+  deliveryLongitude?: number;
+  browserIp?: string;
+  customerLocale?: string;
   currency: string;
   paymentGatewayNames: string[];
   isCashOnDelivery: boolean;

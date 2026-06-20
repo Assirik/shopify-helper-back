@@ -4,6 +4,7 @@ import {
   MESSAGE_VARIABLE_CONFIG_KEY,
   MessageVariableConfig
 } from '../../models/MessageVariableConfig';
+import { normalizeRegion, resolveRegion } from '../reference/senegalRegions';
 import { validateTemplateText } from '../validation/templateText';
 
 const CONFIGURABLE_FIELDS = ['shippingNote', 'paymentMethod'] as const;
@@ -21,32 +22,7 @@ export interface ResolvedMessageVariables {
 
 type ValidatedUpdate = { update: MessageVariableUpdate } | { errors: Record<string, string> };
 
-const normalizeRegion = (region?: string) =>
-  (region || '')
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .trim()
-    .toLowerCase()
-    .replace(/[-_]/g, ' ')
-    .replace(/\s+/g, ' ');
-
-const DAKAR_ALIASES = new Set(['dakar', 'region de dakar', 'ville de dakar', 'dakar region']);
 const EXPLICIT_NON_DAKAR_ALIASES = new Set(['hors dakar', 'non dakar', 'en dehors de dakar']);
-const NON_DAKAR_REGIONS = new Set([
-  'thies',
-  'diourbel',
-  'fatick',
-  'kaffrine',
-  'kaolack',
-  'kedougou',
-  'kolda',
-  'louga',
-  'matam',
-  'saint louis',
-  'sedhiou',
-  'tambacounda',
-  'ziguinchor'
-]);
 
 const isPlainObject = (value: unknown): value is Record<string, unknown> => {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -63,12 +39,13 @@ export const classifyDeliveryRegion = (region?: string): DeliveryRegionClassific
     return 'nonDakar';
   }
 
-  if (DAKAR_ALIASES.has(normalized)) {
-    return 'dakar';
+  const canonicalRegion = resolveRegion(region);
+
+  if (!canonicalRegion) {
+    return 'unknown';
   }
 
-  const withoutRegionPrefix = normalized.replace(/^region de /, '');
-  return NON_DAKAR_REGIONS.has(withoutRegionPrefix) ? 'nonDakar' : 'unknown';
+  return canonicalRegion.isHomeDeliveryZone ? 'dakar' : 'nonDakar';
 };
 
 export const isDakarRegion = (region?: string) => classifyDeliveryRegion(region) === 'dakar';
