@@ -8,6 +8,8 @@
     "build": "tsc",
     "test": "jest --runInBand --passWithNoTests",
     "test:watch": "jest --watch",
+    "attention:backfill": "ts-node --files ./src/scripts/backfillAttentionQueue.ts",
+    "attention:backfill:prod": "node build/src/scripts/backfillAttentionQueue.js",
     "live-dev": "ts-node-dev --files server.ts",
     "lint": "eslint . --ext .ts",
     "lint-and-fix": "eslint . --ext .ts --fix",
