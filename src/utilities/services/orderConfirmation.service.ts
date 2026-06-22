@@ -1,6 +1,13 @@
 import { Types } from 'mongoose';
 import { Message, MessageChannel, MessageProvider, MessageStatus, TemplatePurpose } from '../../models/Message';
-import { ConfirmationSource, CustomerConfirmationStatus, IOrder, Order, ReminderSource } from '../../models/Order';
+import {
+  AttentionReasonCode,
+  ConfirmationSource,
+  CustomerConfirmationStatus,
+  IOrder,
+  Order,
+  ReminderSource
+} from '../../models/Order';
 import {
   enqueueConfirmationReminder,
   enqueueOrderCancelled,
@@ -149,7 +156,7 @@ export class OrderConfirmationService {
           confirmationPayload: payload,
           needsHelpdeskAttention: false
         },
-        $unset: { attentionReason: '' }
+        $unset: { attentionReason: '', attentionReasonCode: '', attentionRequiredAt: '' }
       },
       { new: true }
     );
@@ -172,6 +179,8 @@ export class OrderConfirmationService {
     order.lastCustomerMessageText = lastCustomerMessageText;
     order.confirmationPayload = payload;
     order.attentionReason = 'Confirmation received after expiration or cancellation';
+    order.attentionReasonCode = AttentionReasonCode.LATE_CONFIRM;
+    order.attentionRequiredAt = now;
     await order.save();
 
     return { order, message: undefined, job: undefined, alreadyConfirmed: false, needsAttention: true };
@@ -189,7 +198,7 @@ export class OrderConfirmationService {
           confirmedAt: new Date(),
           needsHelpdeskAttention: false
         },
-        $unset: { attentionReason: '' }
+        $unset: { attentionReason: '', attentionReasonCode: '', attentionRequiredAt: '' }
       },
       { new: true }
     );
@@ -225,6 +234,9 @@ export class OrderConfirmationService {
     order.confirmationCancelledAt = new Date();
     order.confirmationCancelReason = trimmedReason;
     order.needsHelpdeskAttention = false;
+    order.attentionReason = undefined;
+    order.attentionReasonCode = undefined;
+    order.attentionRequiredAt = undefined;
     await order.save();
 
     // Inform the customer explicitly when a cancellation template is configured at Meta.
