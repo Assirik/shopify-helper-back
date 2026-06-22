@@ -19,6 +19,9 @@ const EXPECTED_OPERATIONS: Record<string, HttpMethod[]> = {
   '/api/auth/users/{userId}/status': ['patch'],
   '/api/customers': ['get'],
   '/api/orders': ['get'],
+  '/api/orders/attention': ['get'],
+  '/api/orders/bulk/confirm': ['post'],
+  '/api/orders/bulk/remind': ['post'],
   '/api/orders/{id}': ['get'],
   '/api/orders/{id}/confirm': ['post'],
   '/api/orders/{id}/cancel': ['post'],
@@ -43,6 +46,9 @@ const PROTECTED_OPERATIONS: Array<[string, HttpMethod]> = [
   ['/api/auth/users/{userId}/status', 'patch'],
   ['/api/customers', 'get'],
   ['/api/orders', 'get'],
+  ['/api/orders/attention', 'get'],
+  ['/api/orders/bulk/confirm', 'post'],
+  ['/api/orders/bulk/remind', 'post'],
   ['/api/orders/{id}', 'get'],
   ['/api/orders/{id}/confirm', 'post'],
   ['/api/orders/{id}/cancel', 'post'],
@@ -117,5 +123,16 @@ describe('Swagger MVP specification', () => {
   it('documents strict message variants and template limit errors', () => {
     expect(document.components.schemas.RegionVariant.additionalProperties).toBe(false);
     expect(paths['/api/whatsapp/templates'].get.responses).toHaveProperty('400');
+  });
+
+  it('documents the real attention queue and bounded bulk inputs', () => {
+    expect(document.components.schemas.AttentionOrder.properties.reason.enum).toEqual([
+      'free_text',
+      'sms_only',
+      'invalid_number',
+      'late_confirm'
+    ]);
+    expect(document.components.schemas.BulkOrderInput.properties.orderIds.maxItems).toBe(100);
+    expect(paths['/api/orders/bulk/confirm'].post.responses).toHaveProperty('207');
   });
 });

@@ -55,6 +55,81 @@
  *       401: { $ref: '#/components/responses/Unauthorized' }
  *       500: { $ref: '#/components/responses/InternalError' }
  *
+ * /api/orders/attention:
+ *   get:
+ *     tags: [Orders]
+ *     operationId: listAttentionOrders
+ *     summary: Lister la file de décisions humaines
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { in: query, name: reason, schema: { type: string, enum: [free_text, sms_only, invalid_number, late_confirm] } }
+ *       - { in: query, name: page, schema: { type: integer, minimum: 1, default: 1 } }
+ *       - { in: query, name: limit, schema: { type: integer, minimum: 1, maximum: 100, default: 20 } }
+ *     responses:
+ *       200:
+ *         description: Page de commandes à traiter et compteurs globaux.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 data: { type: array, items: { $ref: '#/components/schemas/AttentionOrder' } }
+ *                 counts: { $ref: '#/components/schemas/AttentionCounts' }
+ *                 pagination: { $ref: '#/components/schemas/Pagination' }
+ *       400:
+ *         description: Raison de file invalide.
+ *         content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } }
+ *       401: { $ref: '#/components/responses/Unauthorized' }
+ *       500: { $ref: '#/components/responses/InternalError' }
+ *
+ * /api/orders/bulk/confirm:
+ *   post:
+ *     tags: [Orders]
+ *     operationId: bulkConfirmOrders
+ *     summary: Confirmer plusieurs commandes éligibles
+ *     security: [{ bearerAuth: [] }]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema: { $ref: '#/components/schemas/BulkOrderInput' }
+ *     responses:
+ *       200:
+ *         description: Toutes les commandes ont été confirmées.
+ *         content: { application/json: { schema: { $ref: '#/components/schemas/BulkOrderResult' } } }
+ *       207:
+ *         description: Résultat partiel avec une erreur détaillée par commande.
+ *         content: { application/json: { schema: { $ref: '#/components/schemas/BulkOrderResult' } } }
+ *       400:
+ *         description: Liste d'identifiants invalide.
+ *         content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } }
+ *       401: { $ref: '#/components/responses/Unauthorized' }
+ *       500: { $ref: '#/components/responses/InternalError' }
+ *
+ * /api/orders/bulk/remind:
+ *   post:
+ *     tags: [Orders]
+ *     operationId: bulkRemindOrders
+ *     summary: Relancer plusieurs commandes éligibles
+ *     security: [{ bearerAuth: [] }]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema: { $ref: '#/components/schemas/BulkOrderInput' }
+ *     responses:
+ *       200:
+ *         description: Toutes les relances ont été mises en file.
+ *         content: { application/json: { schema: { $ref: '#/components/schemas/BulkOrderResult' } } }
+ *       207:
+ *         description: Résultat partiel avec une erreur détaillée par commande.
+ *         content: { application/json: { schema: { $ref: '#/components/schemas/BulkOrderResult' } } }
+ *       400:
+ *         description: Liste d'identifiants invalide.
+ *         content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } }
+ *       401: { $ref: '#/components/responses/Unauthorized' }
+ *       500: { $ref: '#/components/responses/InternalError' }
+ *
  * /api/orders/{id}:
  *   get:
  *     tags: [Orders]
@@ -133,7 +208,7 @@
  *             type: object
  *             required: [reason]
  *             properties:
- *               reason: { type: string, minLength: 1, example: Demande du client }
+ *               reason: { type: string, minLength: 1, maxLength: 500, example: Demande du client }
  *     responses:
  *       200:
  *         description: Commande annulée; la notification est optionnelle selon la configuration Meta.

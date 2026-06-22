@@ -264,9 +264,110 @@ const swaggerOptions: swaggerJSDoc.Options = {
             lastReminderSource: { type: 'string', enum: ['admin', 'auto'] },
             confirmationPayload: { type: 'object', additionalProperties: true },
             attentionReason: { type: 'string' },
+            attentionReasonCode: {
+              type: 'string',
+              enum: ['free_text', 'sms_only', 'invalid_number', 'late_confirm']
+            },
+            attentionRequiredAt: dateTime,
             needsHelpdeskAttention: { type: 'boolean' },
             createdAt: dateTime,
             updatedAt: dateTime
+          }
+        },
+        OrderActionCapabilities: {
+          type: 'object',
+          required: ['canConfirm', 'canRemind', 'canCancel'],
+          properties: {
+            canConfirm: { type: 'boolean' },
+            canRemind: { type: 'boolean' },
+            canCancel: { type: 'boolean' }
+          }
+        },
+        AttentionOrder: {
+          type: 'object',
+          required: ['id', 'orderName', 'customerName', 'customerPhone', 'region', 'amount', 'isCashOnDelivery', 'reason', 'receivedAt', 'customerConfirmationStatus', 'capabilities'],
+          properties: {
+            id: objectId,
+            orderName: { type: 'string', example: '#10428' },
+            customerName: { type: 'string', example: 'Awa Diop' },
+            customerPhone: { type: 'string', example: '+221774128890' },
+            region: { type: 'string', example: 'Dakar' },
+            amount: {
+              type: 'object',
+              required: ['value', 'currency'],
+              properties: {
+                value: { type: 'string', example: '18500' },
+                currency: { type: 'string', example: 'XOF' }
+              }
+            },
+            isCashOnDelivery: { type: 'boolean' },
+            reason: { type: 'string', enum: ['free_text', 'sms_only', 'invalid_number', 'late_confirm'] },
+            lastCustomerMessage: { type: 'string' },
+            receivedAt: dateTime,
+            customerConfirmationStatus: { type: 'string', enum: ['pending', 'confirmed', 'needs_attention', 'expired', 'cancelled', 'sms_only'] },
+            capabilities: { $ref: '#/components/schemas/OrderActionCapabilities' }
+          }
+        },
+        AttentionCounts: {
+          type: 'object',
+          required: ['all', 'free_text', 'sms_only', 'invalid_number', 'late_confirm'],
+          properties: {
+            all: { type: 'integer', minimum: 0 },
+            free_text: { type: 'integer', minimum: 0 },
+            sms_only: { type: 'integer', minimum: 0 },
+            invalid_number: { type: 'integer', minimum: 0 },
+            late_confirm: { type: 'integer', minimum: 0 }
+          }
+        },
+        BulkOrderInput: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['orderIds'],
+          properties: {
+            orderIds: {
+              type: 'array',
+              minItems: 1,
+              maxItems: 100,
+              uniqueItems: true,
+              items: objectId
+            }
+          }
+        },
+        BulkOrderResult: {
+          type: 'object',
+          properties: {
+            data: {
+              type: 'object',
+              required: ['requested', 'succeeded', 'failed', 'summary'],
+              properties: {
+                requested: { type: 'integer', minimum: 1 },
+                succeeded: {
+                  type: 'array',
+                  items: {
+                    type: 'object',
+                    properties: { orderId: objectId }
+                  }
+                },
+                failed: {
+                  type: 'array',
+                  items: {
+                    type: 'object',
+                    properties: {
+                      orderId: objectId,
+                      error: { type: 'string' },
+                      status: { type: 'integer' }
+                    }
+                  }
+                },
+                summary: {
+                  type: 'object',
+                  properties: {
+                    succeeded: { type: 'integer', minimum: 0 },
+                    failed: { type: 'integer', minimum: 0 }
+                  }
+                }
+              }
+            }
           }
         },
         MessageAttempt: {
