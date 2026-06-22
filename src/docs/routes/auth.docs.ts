@@ -50,9 +50,12 @@
  *         application/json:
  *           schema:
  *             type: object
- *             required: [userName, password]
+ *             required: [identifier, password]
  *             properties:
- *               userName: { type: string, example: helpdesk.agent }
+ *               identifier:
+ *                 type: string
+ *                 example: helpdesk.agent
+ *                 description: Nom d'utilisateur ou adresse email. Le champ historique userName reste temporairement accepté.
  *               password: { type: string, format: password, writeOnly: true }
  *     responses:
  *       200:
