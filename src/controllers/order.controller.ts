@@ -1,8 +1,12 @@
 import { Request, Response } from 'express';
 import { Types } from 'mongoose';
 import { Message } from '../models/Message';
-import { CustomerConfirmationStatus, NotificationStatus, Order } from '../models/Order';
-import { OrderConfirmationError, OrderConfirmationService } from '../utilities/services/orderConfirmation.service';
+import { AttentionReasonCode, CustomerConfirmationStatus, IOrder, NotificationStatus, Order } from '../models/Order';
+import {
+  getOrderActionCapabilities,
+  OrderConfirmationError,
+  OrderConfirmationService
+} from '../utilities/services/orderConfirmation.service';
 import log from '../utilities/logger/logger';
 
 const DEFAULT_LIMIT = 20;
@@ -54,7 +58,79 @@ const buildMessageSummary = (messages: Array<{ channel: string; provider: string
   );
 };
 
+export const toAttentionOrder = (order: IOrder) => ({
+  id: order._id.toString(),
+  orderName: order.shopifyOrderName,
+  customerName: order.customerName || 'Client non renseigné',
+  customerPhone: order.customerPhoneE164 || order.customerPhoneRaw || '',
+  region: order.deliveryRegion || order.shippingRegion || 'Non renseignée',
+  amount: {
+    value: order.totalPrice,
+    currency: order.currency
+  },
+  isCashOnDelivery: order.isCashOnDelivery,
+  reason: order.attentionReasonCode,
+  lastCustomerMessage: order.lastCustomerMessageText || '',
+  receivedAt: order.attentionRequiredAt || order.lastCustomerMessageAt || order.updatedAt || order.createdAt,
+  customerConfirmationStatus: order.customerConfirmationStatus,
+  capabilities: getOrderActionCapabilities(order)
+});
+
 export class OrderController {
+  public static async attentionQueue(req: Request, res: Response) {
+    const page = toPositiveInteger(req.query.page, 1);
+    const limit = Math.min(toPositiveInteger(req.query.limit, DEFAULT_LIMIT), MAX_LIMIT);
+    const reason = toStringFilter(req.query.reason);
+
+    if (reason && !Object.values(AttentionReasonCode).includes(reason as AttentionReasonCode)) {
+      return res.status(400).json({ error: 'InvalidAttentionReason' });
+    }
+
+    const filters: Record<string, unknown> = {
+      needsHelpdeskAttention: true,
+      attentionReasonCode: reason ? reason : { $in: Object.values(AttentionReasonCode) }
+    };
+
+    const [orders, total, groupedCounts] = await Promise.all([
+      Order.find(filters)
+        .sort({ attentionRequiredAt: -1, createdAt: -1 })
+        .skip((page - 1) * limit)
+        .limit(limit),
+      Order.countDocuments(filters),
+      Order.aggregate<{ _id: AttentionReasonCode; count: number }>([
+        {
+          $match: {
+            needsHelpdeskAttention: true,
+            attentionReasonCode: { $in: Object.values(AttentionReasonCode) }
+          }
+        },
+        { $group: { _id: '$attentionReasonCode', count: { $sum: 1 } } }
+      ])
+    ]);
+
+    const counts = Object.values(AttentionReasonCode).reduce(
+      (result, code) => {
+        result[code] = groupedCounts.find(item => item._id === code)?.count || 0;
+        return result;
+      },
+      {
+        all: groupedCounts.reduce((sum, item) => sum + item.count, 0),
+        free_text: 0,
+        sms_only: 0,
+        invalid_number: 0,
+        late_confirm: 0
+      } as Record<'all' | AttentionReasonCode, number>
+    );
+
+    log.info({ page, limit, reason: reason || 'all', total, returned: orders.length }, 'Listed attention queue');
+
+    return res.status(200).json({
+      data: orders.map(toAttentionOrder),
+      counts,
+      pagination: createPagination(page, limit, total)
+    });
+  }
+
   public static async list(req: Request, res: Response) {
     const page = toPositiveInteger(req.query.page, 1);
     const limit = Math.min(toPositiveInteger(req.query.limit, DEFAULT_LIMIT), MAX_LIMIT);
