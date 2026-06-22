@@ -1,9 +1,38 @@
-import { describe, expect, it } from '@jest/globals';
+import { afterEach, describe, expect, it, jest } from '@jest/globals';
 import express from 'express';
 import request from 'supertest';
-import { AuthController, isValidSignupPassword } from './auth.controller';
+import { User } from '../models/User';
+import { AuthController, buildLoginLookup, isValidSignupPassword } from './auth.controller';
+
+afterEach(() => {
+  jest.restoreAllMocks();
+});
 
 describe('authentication validation', () => {
+  it('builds a username lookup without changing its value', () => {
+    expect(buildLoginLookup(' helpdesk.agent ')).toEqual({ userName: 'helpdesk.agent' });
+  });
+
+  it('builds a normalized email lookup while preserving username compatibility', () => {
+    expect(buildLoginLookup(' Admin@Example.COM ')).toEqual({
+      $or: [{ userName: 'Admin@Example.COM' }, { email: 'admin@example.com' }]
+    });
+  });
+
+  it('accepts the legacy userName login field', async () => {
+    const select = jest.fn<() => Promise<null>>().mockResolvedValue(null);
+    const findOne = jest.spyOn(User, 'findOne').mockReturnValue({ select } as never);
+    const app = express();
+    app.use(express.json());
+    app.post('/login', AuthController.login);
+
+    const response = await request(app).post('/login').send({ userName: 'helpdesk.agent', password: 'wrong' });
+
+    expect(response.status).toBe(401);
+    expect(response.body).toEqual({ error: 'InvalidCredentials' });
+    expect(findOne.mock.calls[0]?.[0] as unknown).toEqual({ userName: 'helpdesk.agent' });
+  });
+
   it.each([
     [undefined, false],
     ['', false],
