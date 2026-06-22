@@ -34,6 +34,8 @@ export interface WhatsAppButtonConfirmation {
   waMessageId?: string;
 }
 
+export const MAX_CANCELLATION_REASON_LENGTH = 500;
+
 const ensureObjectId = (orderId: string) => {
   if (!Types.ObjectId.isValid(orderId)) {
     throw new OrderConfirmationError('OrderNotFound', 'Order not found', 404);
@@ -252,6 +254,14 @@ export class OrderConfirmationService {
 
     if (!trimmedReason) {
       throw new OrderConfirmationError('OrderCancelReasonRequired', 'A cancellation reason is required', 400);
+    }
+
+    if (trimmedReason.length > MAX_CANCELLATION_REASON_LENGTH) {
+      throw new OrderConfirmationError(
+        'OrderCancelReasonTooLong',
+        `Cancellation reason must not exceed ${MAX_CANCELLATION_REASON_LENGTH} characters`,
+        400
+      );
     }
 
     if (!getOrderActionCapabilities(order).canCancel) {
