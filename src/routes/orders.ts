@@ -8,6 +8,7 @@ const router = Router();
 router.get('/', requireAuth, asyncHandler(OrderController.list));
 router.get('/attention', requireAuth, asyncHandler(OrderController.attentionQueue));
 router.post('/bulk/confirm', requireAuth, asyncHandler(OrderController.bulkConfirm));
+router.post('/bulk/remind', requireAuth, asyncHandler(OrderController.bulkRemind));
 router.post('/:id/confirm', requireAuth, asyncHandler(OrderController.confirm));
 router.post('/:id/cancel', requireAuth, asyncHandler(OrderController.cancel));
 router.post('/:id/remind', requireAuth, asyncHandler(OrderController.remind));
