@@ -109,3 +109,24 @@ Frontend (future) :
                     │
                     ▼
          Dashboard / Helpdesk
+```
+
+## Créer le premier administrateur
+
+Le premier administrateur peut être créé avec Postman via `POST /api/auth/bootstrap`. Définir temporairement un secret d'au moins 32 caractères :
+
+```env
+INITIAL_ADMIN_BOOTSTRAP_SECRET=replace-with-a-random-secret-of-at-least-32-characters
+```
+
+Envoyer ce secret dans le header `X-Bootstrap-Secret`, avec le corps JSON :
+
+```json
+{
+  "userName": "admin",
+  "email": "admin@example.com",
+  "password": "replace-with-a-strong-secret"
+}
+```
+
+L'endpoint refuse tout nouvel appel dès qu'un administrateur existe. Retirer ensuite `INITIAL_ADMIN_BOOTSTRAP_SECRET` et redémarrer le service pour désactiver complètement le bootstrap.

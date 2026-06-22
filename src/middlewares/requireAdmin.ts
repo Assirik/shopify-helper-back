@@ -7,13 +7,13 @@ export const requireAdmin = async (req: Request, res: Response, next: NextFuncti
   }
 
   try {
-    const user = await User.findById(req.userId).select('role');
+    const user = req.user ?? (await User.findById(req.userId).select('role isActive'));
 
     if (!user) {
       return res.status(401).json({ error: 'InvalidToken' });
     }
 
-    if (user.role !== Role.ADMIN) {
+    if (user.isActive === false || user.role !== Role.ADMIN) {
       return res.status(403).json({ error: 'AdminRequired' });
     }
 

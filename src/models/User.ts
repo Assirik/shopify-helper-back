@@ -5,19 +5,21 @@ const Schema = mongoose.Schema;
 export enum Role {
   ADMIN = 'ADMIN',
   USER = 'USER',
-  IOT = 'IOT',
-  DEVELOPER = 'DEVELOPER',
-  DEVICE = 'DEVICE'
+  DEVELOPER = 'DEVELOPER'
 }
 
 const UserSchema = new Schema<IUser>(
   {
     userName: { type: String, trim: true, required: true, unique: true },
-    email: { type: String, required: true, unique: true },
-    password: { type: String, required: true },
+    email: { type: String, trim: true, lowercase: true, required: true, unique: true },
+    password: { type: String, required: true, select: false },
     phone: { type: String, trim: true, index: { unique: true, sparse: true } },
     role: { type: String, enum: Object.values(Role), default: Role.USER },
-    fcmTokens: { type: [String], default: [] } // Tokens Firebase Cloud Messaging pour les notifications push
+    isActive: { type: Boolean, default: true, index: true },
+    disabledAt: { type: Date },
+    sessionVersion: { type: Number, default: 0, select: false },
+    bootstrapKey: { type: String, unique: true, sparse: true, select: false },
+    fcmTokens: { type: [String], default: [] }
   },
   {
     timestamps: true
@@ -57,7 +59,11 @@ export interface IUser extends Document {
   password: string;
   phone?: string;
   role: Role;
-  fcmTokens: string[]; // Array of FCM tokens for push notifications
+  isActive: boolean;
+  disabledAt?: Date;
+  sessionVersion: number;
+  bootstrapKey?: string;
+  fcmTokens: string[];
   setPassword(plainPssswd: string): Promise<void>;
   isPasswordValid(plainPasswd: string): Promise<boolean>;
 }
