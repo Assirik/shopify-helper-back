@@ -1,7 +1,7 @@
 import { Job, Worker } from 'bullmq';
 import { Customer, ICustomer } from '../models/Customer';
 import { Message, MessageChannel, MessageProvider, MessageStatus, TemplatePurpose } from '../models/Message';
-import { CustomerConfirmationStatus, IOrder, NotificationStatus, Order } from '../models/Order';
+import { AttentionReasonCode, CustomerConfirmationStatus, IOrder, NotificationStatus, Order } from '../models/Order';
 import { createOrderConfirmationButtonPayload, MetaWhatsAppProvider } from '../providers/metaWhatsApp.provider';
 import { OrderConfirmationInput, ProviderError, TemplateVariable } from '../providers/messaging.provider';
 import { buildOrderConfirmationSmsText, TermiiSmsProvider } from '../providers/termiiSms.provider';
@@ -440,7 +440,11 @@ const processSmsFallback = async (job: Job<SendOrderConfirmationJobData>) => {
   await Order.findByIdAndUpdate(order._id, {
     $set: {
       notificationStatus: NotificationStatus.PARTIALLY_SENT,
-      customerConfirmationStatus: CustomerConfirmationStatus.SMS_ONLY
+      customerConfirmationStatus: CustomerConfirmationStatus.SMS_ONLY,
+      needsHelpdeskAttention: true,
+      attentionReasonCode: AttentionReasonCode.SMS_ONLY,
+      attentionReason: 'WhatsApp failed and the confirmation request was delivered by SMS',
+      attentionRequiredAt: new Date()
     }
   });
 
