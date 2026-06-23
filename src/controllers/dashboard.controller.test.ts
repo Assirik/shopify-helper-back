@@ -1,11 +1,32 @@
 import { afterEach, describe, expect, it, jest } from '@jest/globals';
 import { Message, MessageChannel, MessageStatus } from '../models/Message';
 import { CustomerConfirmationStatus, Order } from '../models/Order';
-import { computeMongoDashboardStats } from './dashboard.controller';
+import { notificationQueue } from '../queues/notification.queue';
+import { computeDashboardStats, computeMongoDashboardStats } from './dashboard.controller';
+
+jest.mock('../queues/notification.queue', () => ({
+  notificationQueue: {
+    getJobCounts: jest.fn()
+  }
+}));
 
 afterEach(() => {
   jest.restoreAllMocks();
 });
+
+const mockBaseMongoStats = () => {
+  jest.spyOn(Order, 'countDocuments')
+    .mockResolvedValueOnce(1 as never)
+    .mockResolvedValueOnce(2 as never)
+    .mockResolvedValueOnce(3 as never)
+    .mockResolvedValueOnce(4 as never);
+  jest.spyOn(Order, 'aggregate').mockResolvedValueOnce([
+    { _id: CustomerConfirmationStatus.CONFIRMED, count: 1 }
+  ] as never);
+  jest.spyOn(Message, 'countDocuments')
+    .mockResolvedValueOnce(5 as never)
+    .mockResolvedValueOnce(6 as never);
+};
 
 describe('dashboard Mongo metrics', () => {
   it('computes order, message and confirmation metrics', async () => {
@@ -77,6 +98,43 @@ describe('dashboard Mongo metrics', () => {
       messageFailures: 0,
       smsFallbacks: 0,
       cancelledOrders: 3
+    });
+  });
+});
+
+describe('dashboard queue health', () => {
+  it('adds BullMQ completed and failed job counts when available', async () => {
+    mockBaseMongoStats();
+    jest.mocked(notificationQueue.getJobCounts).mockResolvedValueOnce({
+      completed: 8,
+      failed: 9
+    } as never);
+
+    await expect(computeDashboardStats(new Date('2026-06-23T16:00:00.000Z'))).resolves.toEqual({
+      ordersToday: 1,
+      ordersYesterday: 2,
+      attention: 3,
+      confirmationRate: 100,
+      messageFailures: 5,
+      smsFallbacks: 6,
+      cancelledOrders: 4,
+      jobsSucceeded: 8,
+      jobsFailed: 9
+    });
+  });
+
+  it('omits BullMQ job counts when queue health is unavailable', async () => {
+    mockBaseMongoStats();
+    jest.mocked(notificationQueue.getJobCounts).mockRejectedValueOnce(new Error('Redis unavailable') as never);
+
+    await expect(computeDashboardStats(new Date('2026-06-23T16:00:00.000Z'))).resolves.toEqual({
+      ordersToday: 1,
+      ordersYesterday: 2,
+      attention: 3,
+      confirmationRate: 100,
+      messageFailures: 5,
+      smsFallbacks: 6,
+      cancelledOrders: 4
     });
   });
 });
