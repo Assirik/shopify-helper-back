@@ -156,3 +156,102 @@ describe('message list filters', () => {
     });
   });
 });
+
+describe('message detail', () => {
+  const response = () => {
+    const status = jest.fn().mockReturnThis();
+    const json = jest.fn();
+
+    return { status, json };
+  };
+
+  it('returns MessageNotFound for invalid IDs', async () => {
+    const findById = jest.spyOn(Message, 'findById');
+    const res = response();
+
+    await MessageController.detail({ params: { id: 'invalid' } } as never, res as never);
+
+    expect(findById).not.toHaveBeenCalled();
+    expect(res.status).toHaveBeenCalledWith(404);
+    expect(res.json).toHaveBeenCalledWith({ error: 'MessageNotFound' });
+  });
+
+  it('returns MessageNotFound when the message is absent', async () => {
+    const messageId = new Types.ObjectId().toString();
+    jest.spyOn(Message, 'findById').mockResolvedValueOnce(null as never);
+    const res = response();
+
+    await MessageController.detail({ params: { id: messageId } } as never, res as never);
+
+    expect(res.status).toHaveBeenCalledWith(404);
+    expect(res.json).toHaveBeenCalledWith({ error: 'MessageNotFound' });
+  });
+
+  it('returns a normal message enriched with orderName', async () => {
+    const messageId = new Types.ObjectId();
+    const orderId = new Types.ObjectId();
+    jest.spyOn(Message, 'findById').mockResolvedValueOnce(
+      messageDoc({
+        _id: messageId,
+        orderId,
+        channel: MessageChannel.WHATSAPP,
+        provider: MessageProvider.META,
+        status: MessageStatus.SENT
+      }) as never
+    );
+    jest.spyOn(Order, 'find').mockResolvedValueOnce([orderDoc(orderId, '#1042')] as never);
+    jest.spyOn(Message, 'find').mockResolvedValueOnce([] as never);
+    const res = response();
+
+    await MessageController.detail({ params: { id: messageId.toString() } } as never, res as never);
+
+    expect(res.status).toHaveBeenCalledWith(200);
+    expect(res.json).toHaveBeenCalledWith({
+      data: expect.objectContaining({ orderName: '#1042' })
+    });
+  });
+
+  it('returns an SMS fallback message enriched with fallbackOf', async () => {
+    const messageId = new Types.ObjectId();
+    const orderId = new Types.ObjectId();
+    const fallbackOrderId = new Types.ObjectId();
+    const fallbackMessageId = new Types.ObjectId();
+    jest.spyOn(Message, 'findById').mockResolvedValueOnce(
+      messageDoc({
+        _id: messageId,
+        orderId,
+        channel: MessageChannel.SMS,
+        provider: MessageProvider.TERMII,
+        status: MessageStatus.SENT,
+        fallbackOfMessageId: fallbackMessageId
+      }) as never
+    );
+    jest.spyOn(Order, 'find')
+      .mockResolvedValueOnce([orderDoc(orderId, '#1043')] as never)
+      .mockResolvedValueOnce([orderDoc(fallbackOrderId, '#1042')] as never);
+    jest.spyOn(Message, 'find').mockResolvedValueOnce([
+      messageDoc({
+        _id: fallbackMessageId,
+        orderId: fallbackOrderId,
+        channel: MessageChannel.WHATSAPP,
+        provider: MessageProvider.META,
+        status: MessageStatus.FAILED
+      })
+    ] as never);
+    const res = response();
+
+    await MessageController.detail({ params: { id: messageId.toString() } } as never, res as never);
+
+    expect(res.status).toHaveBeenCalledWith(200);
+    expect(res.json).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        orderName: '#1043',
+        fallbackOf: {
+          id: fallbackMessageId.toString(),
+          orderName: '#1042',
+          channel: MessageChannel.WHATSAPP
+        }
+      })
+    });
+  });
+});
