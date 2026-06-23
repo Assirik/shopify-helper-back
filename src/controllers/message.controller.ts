@@ -22,6 +22,10 @@ const toStringFilter = (value: unknown) => {
   return typeof value === 'string' ? value.trim() : '';
 };
 
+const escapeRegExp = (value: string) => {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+};
+
 const createPagination = (page: number, limit: number, total: number) => {
   return {
     page,
@@ -83,6 +87,50 @@ const buildOrderNameMap = async (orderIds: string[]) => {
   }, new Map<string, string>());
 };
 
+export const buildMessageListFilters = async (query: Pick<Request, 'query'>['query']) => {
+  const status = toStringFilter(query.status);
+  const channel = toStringFilter(query.channel);
+  const provider = toStringFilter(query.provider);
+  const orderName = toStringFilter(query.orderName);
+
+  const filters: Record<string, unknown> = {};
+  let noMatches = false;
+
+  if (status && Object.values(MessageStatus).includes(status as MessageStatus)) {
+    filters.status = status;
+  }
+
+  if (channel && Object.values(MessageChannel).includes(channel as MessageChannel)) {
+    filters.channel = channel;
+  }
+
+  if (provider && Object.values(MessageProvider).includes(provider as MessageProvider)) {
+    filters.provider = provider;
+  }
+
+  if (orderName) {
+    const orders = await Order.find({
+      shopifyOrderName: { $regex: escapeRegExp(orderName), $options: 'i' }
+    });
+    const orderIds = orders.map(order => order._id);
+
+    if (orderIds.length === 0) {
+      noMatches = true;
+    } else {
+      filters.orderId = { $in: orderIds };
+    }
+  }
+
+  return {
+    filters,
+    status,
+    channel,
+    provider,
+    orderName,
+    noMatches
+  };
+};
+
 export const enrichMessages = async (messages: IMessage[]): Promise<EnrichedMessageJson[]> => {
   const messageJsons = messages.map(toMessageJson);
   const orderNameById = await buildOrderNameMap(uniqueIds(messageJsons.map(message => message.orderId)));
@@ -127,22 +175,27 @@ export class MessageController {
     const page = toPositiveInteger(req.query.page, 1);
     const limit = Math.min(toPositiveInteger(req.query.limit, DEFAULT_LIMIT), MAX_LIMIT);
     const skip = (page - 1) * limit;
-    const status = toStringFilter(req.query.status);
-    const channel = toStringFilter(req.query.channel);
-    const provider = toStringFilter(req.query.provider);
+    const { filters, status, channel, provider, orderName, noMatches } = await buildMessageListFilters(req.query);
 
-    const filters: Record<string, unknown> = {};
+    if (noMatches) {
+      log.info(
+        {
+          page,
+          limit,
+          total: 0,
+          returned: 0,
+          status,
+          channel,
+          provider,
+          hasOrderNameFilter: true
+        },
+        'Listed messages'
+      );
 
-    if (status && Object.values(MessageStatus).includes(status as MessageStatus)) {
-      filters.status = status;
-    }
-
-    if (channel && Object.values(MessageChannel).includes(channel as MessageChannel)) {
-      filters.channel = channel;
-    }
-
-    if (provider && Object.values(MessageProvider).includes(provider as MessageProvider)) {
-      filters.provider = provider;
+      return res.status(200).json({
+        data: [],
+        pagination: createPagination(page, limit, 0)
+      });
     }
 
     const [messages, total] = await Promise.all([
@@ -159,7 +212,8 @@ export class MessageController {
         returned: enrichedMessages.length,
         status,
         channel,
-        provider
+        provider,
+        hasOrderNameFilter: Boolean(orderName)
       },
       'Listed messages'
     );
