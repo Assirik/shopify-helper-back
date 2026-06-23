@@ -1,7 +1,7 @@
 import { describe, expect, it, jest } from '@jest/globals';
 import { Types } from 'mongoose';
 import { AttentionReasonCode, CustomerConfirmationStatus, IOrder } from '../models/Order';
-import { buildOrderListFilters, parseBulkOrderIds, toAttentionOrder } from './order.controller';
+import { buildOrderListFilters, parseBulkOrderIds, toAttentionOrder, toOrderResponse } from './order.controller';
 
 jest.mock('../queues/notification.queue', () => ({
   enqueueConfirmationReminder: jest.fn(),
@@ -13,6 +13,28 @@ describe('order controller attention contracts', () => {
   it('accepts a bounded list of unique ObjectIds', () => {
     const ids = [new Types.ObjectId().toString(), new Types.ObjectId().toString()];
     expect(parseBulkOrderIds(ids)).toEqual(ids);
+  });
+
+  it('restores delivery fields from legacy Easysell note attributes', () => {
+    const order = {
+      _id: new Types.ObjectId(),
+      shopifyOrderName: '#1128',
+      noteAttributes: {
+        Région: 'Dakar',
+        'Adresse de livraison': 'Mbao',
+        'Moment de livraison préféré': 'Matinée'
+      }
+    } as unknown as IOrder;
+
+    expect(toOrderResponse(order)).toEqual(
+      expect.objectContaining({
+        deliveryRegion: 'Dakar',
+        deliveryRegionCode: 'SN_DK',
+        shippingRegion: 'Dakar',
+        deliveryAddress: 'Mbao',
+        deliveryPreferredMoment: 'Matinée'
+      })
+    );
   });
 
   it.each([undefined, [], ['invalid'], [new Types.ObjectId().toString(), new Types.ObjectId().toString()].flatMap(id => [id, id])])(
