@@ -1,7 +1,7 @@
 import { describe, expect, it, jest } from '@jest/globals';
 import { Types } from 'mongoose';
 import { AttentionReasonCode, CustomerConfirmationStatus, IOrder } from '../models/Order';
-import { parseBulkOrderIds, toAttentionOrder } from './order.controller';
+import { buildOrderListFilters, parseBulkOrderIds, toAttentionOrder } from './order.controller';
 
 jest.mock('../queues/notification.queue', () => ({
   enqueueConfirmationReminder: jest.fn(),
@@ -51,5 +51,31 @@ describe('order controller attention contracts', () => {
         capabilities: { canConfirm: true, canRemind: false, canCancel: true }
       })
     );
+  });
+});
+
+describe('order controller list filters', () => {
+  it('filters COD orders when cod=true', () => {
+    expect(buildOrderListFilters({ cod: 'true' }).filters).toEqual({ isCashOnDelivery: true });
+  });
+
+  it('filters non-COD orders when cod=false', () => {
+    expect(buildOrderListFilters({ cod: 'false' }).filters).toEqual({ isCashOnDelivery: false });
+  });
+
+  it('ignores invalid COD filter values', () => {
+    expect(buildOrderListFilters({ cod: 'yes' }).filters).toEqual({});
+  });
+
+  it('combines COD and customer confirmation filters', () => {
+    expect(
+      buildOrderListFilters({
+        cod: 'true',
+        customerConfirmationStatus: CustomerConfirmationStatus.NEEDS_ATTENTION
+      }).filters
+    ).toEqual({
+      isCashOnDelivery: true,
+      customerConfirmationStatus: CustomerConfirmationStatus.NEEDS_ATTENTION
+    });
   });
 });

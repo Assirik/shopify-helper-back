@@ -39,6 +39,51 @@ const createPagination = (page: number, limit: number, total: number) => {
 const MAX_BULK_ORDERS = 100;
 const BULK_CONCURRENCY = 5;
 
+export const buildOrderListFilters = (query: Pick<Request, 'query'>['query']) => {
+  const status = toStringFilter(query.status);
+  const customerConfirmationStatus = toStringFilter(query.customerConfirmationStatus);
+  const orderName = toStringFilter(query.orderName);
+  const phone = toStringFilter(query.phone);
+  const cod = toStringFilter(query.cod);
+
+  const filters: Record<string, unknown> = {};
+
+  if (status && Object.values(NotificationStatus).includes(status as NotificationStatus)) {
+    filters.notificationStatus = status;
+  }
+
+  if (
+    customerConfirmationStatus &&
+    Object.values(CustomerConfirmationStatus).includes(customerConfirmationStatus as CustomerConfirmationStatus)
+  ) {
+    filters.customerConfirmationStatus = customerConfirmationStatus;
+  }
+
+  if (orderName) {
+    filters.shopifyOrderName = { $regex: escapeRegExp(orderName), $options: 'i' };
+  }
+
+  if (phone) {
+    filters.$or = [
+      { customerPhoneE164: { $regex: escapeRegExp(phone), $options: 'i' } },
+      { customerPhoneRaw: { $regex: escapeRegExp(phone), $options: 'i' } }
+    ];
+  }
+
+  if (cod === 'true' || cod === 'false') {
+    filters.isCashOnDelivery = cod === 'true';
+  }
+
+  return {
+    filters,
+    status,
+    customerConfirmationStatus,
+    orderName,
+    phone,
+    cod
+  };
+};
+
 export const parseBulkOrderIds = (value: unknown) => {
   if (!Array.isArray(value) || value.length === 0 || value.length > MAX_BULK_ORDERS) {
     return undefined;
@@ -232,34 +277,7 @@ export class OrderController {
     const page = toPositiveInteger(req.query.page, 1);
     const limit = Math.min(toPositiveInteger(req.query.limit, DEFAULT_LIMIT), MAX_LIMIT);
     const skip = (page - 1) * limit;
-    const status = toStringFilter(req.query.status);
-    const customerConfirmationStatus = toStringFilter(req.query.customerConfirmationStatus);
-    const orderName = toStringFilter(req.query.orderName);
-    const phone = toStringFilter(req.query.phone);
-
-    const filters: Record<string, unknown> = {};
-
-    if (status && Object.values(NotificationStatus).includes(status as NotificationStatus)) {
-      filters.notificationStatus = status;
-    }
-
-    if (
-      customerConfirmationStatus &&
-      Object.values(CustomerConfirmationStatus).includes(customerConfirmationStatus as CustomerConfirmationStatus)
-    ) {
-      filters.customerConfirmationStatus = customerConfirmationStatus;
-    }
-
-    if (orderName) {
-      filters.shopifyOrderName = { $regex: escapeRegExp(orderName), $options: 'i' };
-    }
-
-    if (phone) {
-      filters.$or = [
-        { customerPhoneE164: { $regex: escapeRegExp(phone), $options: 'i' } },
-        { customerPhoneRaw: { $regex: escapeRegExp(phone), $options: 'i' } }
-      ];
-    }
+    const { filters, status, customerConfirmationStatus, orderName, phone, cod } = buildOrderListFilters(req.query);
 
     const [orders, total] = await Promise.all([
       Order.find(filters).sort({ createdAt: -1 }).skip(skip).limit(limit),
@@ -275,7 +293,8 @@ export class OrderController {
         status,
         customerConfirmationStatus,
         hasOrderNameFilter: Boolean(orderName),
-        hasPhoneFilter: Boolean(phone)
+        hasPhoneFilter: Boolean(phone),
+        hasCodFilter: cod === 'true' || cod === 'false'
       },
       'Listed orders'
     );
