@@ -29,13 +29,6 @@ export enum ReminderSource {
   AUTO = 'auto'
 }
 
-export enum AttentionReasonCode {
-  FREE_TEXT = 'free_text',
-  SMS_ONLY = 'sms_only',
-  INVALID_NUMBER = 'invalid_number',
-  LATE_CONFIRM = 'late_confirm'
-}
-
 const OrderLineItemSchema = new Schema<IOrderLineItem>(
   {
     shopifyLineItemId: { type: String, trim: true },
@@ -117,8 +110,6 @@ const OrderSchema = new Schema<IOrder>(
     lastReminderSource: { type: String, enum: Object.values(ReminderSource) },
     confirmationPayload: { type: Schema.Types.Mixed },
     attentionReason: { type: String, trim: true },
-    attentionReasonCode: { type: String, enum: Object.values(AttentionReasonCode), index: true },
-    attentionRequiredAt: { type: Date, index: true },
     needsHelpdeskAttention: { type: Boolean, default: false, index: true }
   },
   {
@@ -130,7 +121,6 @@ OrderSchema.index({ createdAt: -1 });
 OrderSchema.index({ notificationStatus: 1, createdAt: -1 });
 OrderSchema.index({ customerConfirmationStatus: 1, createdAt: -1 });
 OrderSchema.index({ isCashOnDelivery: 1, createdAt: -1 });
-OrderSchema.index({ needsHelpdeskAttention: 1, attentionReasonCode: 1, attentionRequiredAt: -1 });
 OrderSchema.index({ shopifyOrderName: 'text', customerPhoneE164: 'text', customerPhoneRaw: 'text' });
 
 OrderSchema.set('toJSON', {
@@ -191,8 +181,6 @@ export interface IOrder extends Document {
   lastReminderSource?: ReminderSource;
   confirmationPayload?: unknown;
   attentionReason?: string;
-  attentionReasonCode?: AttentionReasonCode;
-  attentionRequiredAt?: Date;
   needsHelpdeskAttention: boolean;
   createdAt: Date;
   updatedAt: Date;
