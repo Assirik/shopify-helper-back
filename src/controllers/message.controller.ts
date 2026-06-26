@@ -1,6 +1,7 @@
 import { Request, Response } from 'express';
 import { Types } from 'mongoose';
-import { Message, MessageChannel, MessageProvider, MessageStatus } from '../models/Message';
+import { IMessage, Message, MessageChannel, MessageProvider, MessageStatus } from '../models/Message';
+import { IOrder, Order } from '../models/Order';
 import { enqueueOrderConfirmation } from '../queues/notification.queue';
 import log from '../utilities/logger/logger';
 
@@ -21,6 +22,10 @@ const toStringFilter = (value: unknown) => {
   return typeof value === 'string' ? value.trim() : '';
 };
 
+const escapeRegExp = (value: string) => {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+};
+
 const createPagination = (page: number, limit: number, total: number) => {
   return {
     page,
@@ -30,49 +35,191 @@ const createPagination = (page: number, limit: number, total: number) => {
   };
 };
 
+type JsonRecord = Record<string, unknown>;
+type MessageJson = JsonRecord & {
+  _id?: unknown;
+  id?: unknown;
+  orderId?: unknown;
+  channel?: unknown;
+  fallbackOfMessageId?: unknown;
+};
+type EnrichedMessageJson = MessageJson & {
+  orderName?: string;
+  fallbackOf?: {
+    id: string;
+    orderName?: string;
+    channel?: string;
+  };
+};
+
+const toIdString = (value: unknown) => {
+  if (typeof value === 'string') {
+    return value;
+  }
+
+  if (value instanceof Types.ObjectId) {
+    return value.toString();
+  }
+
+  if (value && typeof value === 'object' && 'toString' in value) {
+    return String(value);
+  }
+
+  return '';
+};
+
+const uniqueIds = (values: unknown[]) => {
+  return [...new Set(values.map(toIdString).filter(Boolean))];
+};
+
+const toMessageJson = (message: IMessage) => message.toJSON() as MessageJson;
+
+const buildOrderNameMap = async (orderIds: string[]) => {
+  if (orderIds.length === 0) {
+    return new Map<string, string>();
+  }
+
+  const orders = await Order.find({ _id: { $in: orderIds } });
+
+  return orders.reduce((map, order: IOrder) => {
+    map.set(order._id.toString(), order.shopifyOrderName);
+    return map;
+  }, new Map<string, string>());
+};
+
+export const buildMessageListFilters = async (query: Pick<Request, 'query'>['query']) => {
+  const status = toStringFilter(query.status);
+  const channel = toStringFilter(query.channel);
+  const provider = toStringFilter(query.provider);
+  const orderName = toStringFilter(query.orderName);
+
+  const filters: Record<string, unknown> = {};
+  let noMatches = false;
+
+  if (status && Object.values(MessageStatus).includes(status as MessageStatus)) {
+    filters.status = status;
+  }
+
+  if (channel && Object.values(MessageChannel).includes(channel as MessageChannel)) {
+    filters.channel = channel;
+  }
+
+  if (provider && Object.values(MessageProvider).includes(provider as MessageProvider)) {
+    filters.provider = provider;
+  }
+
+  if (orderName) {
+    const orders = await Order.find({
+      shopifyOrderName: { $regex: escapeRegExp(orderName), $options: 'i' }
+    });
+    const orderIds = orders.map(order => order._id);
+
+    if (orderIds.length === 0) {
+      noMatches = true;
+    } else {
+      filters.orderId = { $in: orderIds };
+    }
+  }
+
+  return {
+    filters,
+    status,
+    channel,
+    provider,
+    orderName,
+    noMatches
+  };
+};
+
+export const enrichMessages = async (messages: IMessage[]): Promise<EnrichedMessageJson[]> => {
+  const messageJsons = messages.map(toMessageJson);
+  const orderNameById = await buildOrderNameMap(uniqueIds(messageJsons.map(message => message.orderId)));
+
+  const fallbackIds = uniqueIds(messageJsons.map(message => message.fallbackOfMessageId));
+  const fallbackMessages = fallbackIds.length > 0 ? await Message.find({ _id: { $in: fallbackIds } }) : [];
+  const fallbackJsons = fallbackMessages.map(toMessageJson);
+  const fallbackOrderNameById = await buildOrderNameMap(uniqueIds(fallbackJsons.map(message => message.orderId)));
+
+  const fallbackById = fallbackJsons.reduce((map, message) => {
+    const messageId = toIdString(message._id || message.id);
+    if (!messageId) return map;
+
+    map.set(messageId, {
+      id: messageId,
+      orderName: fallbackOrderNameById.get(toIdString(message.orderId)),
+      channel: typeof message.channel === 'string' ? message.channel : undefined
+    });
+    return map;
+  }, new Map<string, { id: string; orderName?: string; channel?: string }>());
+
+  return messageJsons.map(message => {
+    const enriched = {
+      ...message,
+      orderName: orderNameById.get(toIdString(message.orderId))
+    };
+    const fallbackOf = fallbackById.get(toIdString(message.fallbackOfMessageId));
+
+    if (!fallbackOf) {
+      return enriched;
+    }
+
+    return {
+      ...enriched,
+      fallbackOf
+    };
+  });
+};
+
 export class MessageController {
   public static async list(req: Request, res: Response) {
     const page = toPositiveInteger(req.query.page, 1);
     const limit = Math.min(toPositiveInteger(req.query.limit, DEFAULT_LIMIT), MAX_LIMIT);
     const skip = (page - 1) * limit;
-    const status = toStringFilter(req.query.status);
-    const channel = toStringFilter(req.query.channel);
-    const provider = toStringFilter(req.query.provider);
+    const { filters, status, channel, provider, orderName, noMatches } = await buildMessageListFilters(req.query);
 
-    const filters: Record<string, unknown> = {};
+    if (noMatches) {
+      log.info(
+        {
+          page,
+          limit,
+          total: 0,
+          returned: 0,
+          status,
+          channel,
+          provider,
+          hasOrderNameFilter: true
+        },
+        'Listed messages'
+      );
 
-    if (status && Object.values(MessageStatus).includes(status as MessageStatus)) {
-      filters.status = status;
-    }
-
-    if (channel && Object.values(MessageChannel).includes(channel as MessageChannel)) {
-      filters.channel = channel;
-    }
-
-    if (provider && Object.values(MessageProvider).includes(provider as MessageProvider)) {
-      filters.provider = provider;
+      return res.status(200).json({
+        data: [],
+        pagination: createPagination(page, limit, 0)
+      });
     }
 
     const [messages, total] = await Promise.all([
       Message.find(filters).sort({ createdAt: -1 }).skip(skip).limit(limit),
       Message.countDocuments(filters)
     ]);
+    const enrichedMessages = await enrichMessages(messages);
 
     log.info(
       {
         page,
         limit,
         total,
-        returned: messages.length,
+        returned: enrichedMessages.length,
         status,
         channel,
-        provider
+        provider,
+        hasOrderNameFilter: Boolean(orderName)
       },
       'Listed messages'
     );
 
     return res.status(200).json({
-      data: messages,
+      data: enrichedMessages,
       pagination: createPagination(page, limit, total)
     });
   }
@@ -101,8 +248,10 @@ export class MessageController {
       'Fetched message detail'
     );
 
+    const [enrichedMessage] = await enrichMessages([message]);
+
     return res.status(200).json({
-      data: message
+      data: enrichedMessage
     });
   }
 

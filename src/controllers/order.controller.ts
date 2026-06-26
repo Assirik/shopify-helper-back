@@ -4,6 +4,7 @@ import { Message } from '../models/Message';
 import { AttentionReasonCode, CustomerConfirmationStatus, IOrder, NotificationStatus, Order } from '../models/Order';
 import { getOrderActionCapabilities } from '../utilities/services/orderCapabilities.service';
 import { OrderConfirmationError, OrderConfirmationService } from '../utilities/services/orderConfirmation.service';
+import { resolveRegion } from '../utilities/reference/senegalRegions';
 import log from '../utilities/logger/logger';
 
 const DEFAULT_LIMIT = 20;
@@ -38,6 +39,51 @@ const createPagination = (page: number, limit: number, total: number) => {
 
 const MAX_BULK_ORDERS = 100;
 const BULK_CONCURRENCY = 5;
+
+export const buildOrderListFilters = (query: Pick<Request, 'query'>['query']) => {
+  const status = toStringFilter(query.status);
+  const customerConfirmationStatus = toStringFilter(query.customerConfirmationStatus);
+  const orderName = toStringFilter(query.orderName);
+  const phone = toStringFilter(query.phone);
+  const cod = toStringFilter(query.cod);
+
+  const filters: Record<string, unknown> = {};
+
+  if (status && Object.values(NotificationStatus).includes(status as NotificationStatus)) {
+    filters.notificationStatus = status;
+  }
+
+  if (
+    customerConfirmationStatus &&
+    Object.values(CustomerConfirmationStatus).includes(customerConfirmationStatus as CustomerConfirmationStatus)
+  ) {
+    filters.customerConfirmationStatus = customerConfirmationStatus;
+  }
+
+  if (orderName) {
+    filters.shopifyOrderName = { $regex: escapeRegExp(orderName), $options: 'i' };
+  }
+
+  if (phone) {
+    filters.$or = [
+      { customerPhoneE164: { $regex: escapeRegExp(phone), $options: 'i' } },
+      { customerPhoneRaw: { $regex: escapeRegExp(phone), $options: 'i' } }
+    ];
+  }
+
+  if (cod === 'true' || cod === 'false') {
+    filters.isCashOnDelivery = cod === 'true';
+  }
+
+  return {
+    filters,
+    status,
+    customerConfirmationStatus,
+    orderName,
+    phone,
+    cod
+  };
+};
 
 export const parseBulkOrderIds = (value: unknown) => {
   if (!Array.isArray(value) || value.length === 0 || value.length > MAX_BULK_ORDERS) {
@@ -101,23 +147,77 @@ const buildMessageSummary = (messages: Array<{ channel: string; provider: string
   );
 };
 
-export const toAttentionOrder = (order: IOrder) => ({
-  id: order._id.toString(),
-  orderName: order.shopifyOrderName,
-  customerName: order.customerName || 'Client non renseigné',
-  customerPhone: order.customerPhoneE164 || order.customerPhoneRaw || '',
-  region: order.deliveryRegion || order.shippingRegion || 'Non renseignée',
-  amount: {
-    value: order.totalPrice,
-    currency: order.currency
-  },
-  isCashOnDelivery: order.isCashOnDelivery,
-  reason: order.attentionReasonCode,
-  lastCustomerMessage: order.lastCustomerMessageText || '',
-  receivedAt: order.attentionRequiredAt || order.lastCustomerMessageAt || order.updatedAt || order.createdAt,
-  customerConfirmationStatus: order.customerConfirmationStatus,
-  capabilities: getOrderActionCapabilities(order)
-});
+const firstNonEmpty = (...values: Array<string | null | undefined>) => {
+  return values.find(value => typeof value === 'string' && value.trim().length > 0)?.trim();
+};
+
+const getOrderNoteAttribute = (order: IOrder, ...names: string[]) => {
+  const attributes = order.noteAttributes;
+  if (!attributes || typeof attributes !== 'object') return undefined;
+
+  for (const name of names) {
+    const value = attributes[name];
+    if (typeof value === 'string' && value.trim()) return value.trim();
+  }
+
+  return undefined;
+};
+
+/**
+ * Reconstitue les champs de livraison des anciennes commandes qui ne
+ * possèdent que les note_attributes Easysell.
+ */
+export const toOrderResponse = (order: IOrder) => {
+  const serialized =
+    typeof order.toJSON === 'function'
+      ? order.toJSON()
+      : { ...order, id: order._id.toString() };
+  const rawRegion = firstNonEmpty(
+    order.deliveryRegion,
+    order.shippingRegion,
+    getOrderNoteAttribute(order, 'Région', 'Region')
+  );
+  const canonicalRegion = resolveRegion(rawRegion);
+  const region = canonicalRegion?.label || rawRegion;
+
+  return {
+    ...serialized,
+    deliveryRegion: region,
+    deliveryRegionCode: order.deliveryRegionCode || canonicalRegion?.code,
+    shippingRegion: order.shippingRegion || region,
+    deliveryAddress: firstNonEmpty(
+      order.deliveryAddress,
+      getOrderNoteAttribute(order, 'Adresse de livraison'),
+      getOrderNoteAttribute(order, 'Adresse', 'Address')
+    ),
+    deliveryPreferredMoment: firstNonEmpty(
+      order.deliveryPreferredMoment,
+      getOrderNoteAttribute(order, 'Moment de livraison préféré')
+    )
+  };
+};
+
+export const toAttentionOrder = (order: IOrder) => {
+  const normalizedOrder = toOrderResponse(order);
+
+  return {
+    id: order._id.toString(),
+    orderName: order.shopifyOrderName,
+    customerName: order.customerName || 'Client non renseigné',
+    customerPhone: order.customerPhoneE164 || order.customerPhoneRaw || '',
+    region: normalizedOrder.deliveryRegion || normalizedOrder.shippingRegion || 'Non renseignée',
+    amount: {
+      value: order.totalPrice,
+      currency: order.currency
+    },
+    isCashOnDelivery: order.isCashOnDelivery,
+    reason: order.attentionReasonCode,
+    lastCustomerMessage: order.lastCustomerMessageText || '',
+    receivedAt: order.attentionRequiredAt || order.lastCustomerMessageAt || order.updatedAt || order.createdAt,
+    customerConfirmationStatus: order.customerConfirmationStatus,
+    capabilities: getOrderActionCapabilities(order)
+  };
+};
 
 export class OrderController {
   public static async bulkConfirm(req: Request, res: Response) {
@@ -232,34 +332,7 @@ export class OrderController {
     const page = toPositiveInteger(req.query.page, 1);
     const limit = Math.min(toPositiveInteger(req.query.limit, DEFAULT_LIMIT), MAX_LIMIT);
     const skip = (page - 1) * limit;
-    const status = toStringFilter(req.query.status);
-    const customerConfirmationStatus = toStringFilter(req.query.customerConfirmationStatus);
-    const orderName = toStringFilter(req.query.orderName);
-    const phone = toStringFilter(req.query.phone);
-
-    const filters: Record<string, unknown> = {};
-
-    if (status && Object.values(NotificationStatus).includes(status as NotificationStatus)) {
-      filters.notificationStatus = status;
-    }
-
-    if (
-      customerConfirmationStatus &&
-      Object.values(CustomerConfirmationStatus).includes(customerConfirmationStatus as CustomerConfirmationStatus)
-    ) {
-      filters.customerConfirmationStatus = customerConfirmationStatus;
-    }
-
-    if (orderName) {
-      filters.shopifyOrderName = { $regex: escapeRegExp(orderName), $options: 'i' };
-    }
-
-    if (phone) {
-      filters.$or = [
-        { customerPhoneE164: { $regex: escapeRegExp(phone), $options: 'i' } },
-        { customerPhoneRaw: { $regex: escapeRegExp(phone), $options: 'i' } }
-      ];
-    }
+    const { filters, status, customerConfirmationStatus, orderName, phone, cod } = buildOrderListFilters(req.query);
 
     const [orders, total] = await Promise.all([
       Order.find(filters).sort({ createdAt: -1 }).skip(skip).limit(limit),
@@ -275,13 +348,14 @@ export class OrderController {
         status,
         customerConfirmationStatus,
         hasOrderNameFilter: Boolean(orderName),
-        hasPhoneFilter: Boolean(phone)
+        hasPhoneFilter: Boolean(phone),
+        hasCodFilter: cod === 'true' || cod === 'false'
       },
       'Listed orders'
     );
 
     return res.status(200).json({
-      data: orders,
+      data: orders.map(toOrderResponse),
       pagination: createPagination(page, limit, total)
     });
   }
@@ -313,7 +387,7 @@ export class OrderController {
 
     return res.status(200).json({
       data: {
-        order,
+        order: toOrderResponse(order),
         messages,
         messageSummary
       }
