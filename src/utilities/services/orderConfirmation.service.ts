@@ -122,7 +122,7 @@ const dispatchReminderMessage = async (orderId: Types.ObjectId) => {
   return { message, job };
 };
 
-export const CONFIRMABLE_BY_ADMIN = [
+const CONFIRMABLE_BY_ADMIN = [
   CustomerConfirmationStatus.PENDING,
   CustomerConfirmationStatus.NEEDS_ATTENTION,
   CustomerConfirmationStatus.SMS_ONLY,
@@ -134,30 +134,6 @@ const CONFIRMABLE_BY_BUTTON = [
   CustomerConfirmationStatus.NEEDS_ATTENTION,
   CustomerConfirmationStatus.SMS_ONLY
 ];
-
-export interface OrderActionCapabilities {
-  canConfirm: boolean;
-  canRemind: boolean;
-  canCancel: boolean;
-}
-
-export const getOrderActionCapabilities = (
-  order: Pick<IOrder, 'customerConfirmationStatus' | 'reminderCount' | 'lastReminderAt' | 'customerPhoneE164'>,
-  now = Date.now()
-): OrderActionCapabilities => {
-  const reminderCooldownMs = config.confirmation.reminderCooldownMinutes * 60 * 1000;
-  const reminderCooldownElapsed = !order.lastReminderAt || now - order.lastReminderAt.getTime() >= reminderCooldownMs;
-
-  return {
-    canConfirm: CONFIRMABLE_BY_ADMIN.includes(order.customerConfirmationStatus),
-    canRemind:
-      order.customerConfirmationStatus === CustomerConfirmationStatus.PENDING &&
-      Boolean(order.customerPhoneE164) &&
-      (order.reminderCount || 0) < config.confirmation.maxReminders &&
-      reminderCooldownElapsed,
-    canCancel: order.customerConfirmationStatus !== CustomerConfirmationStatus.CANCELLED
-  };
-};
 
 export class OrderConfirmationService {
   public static async confirmByWhatsAppButton(orderId: string, payload: WhatsAppButtonConfirmation) {
@@ -254,10 +230,6 @@ export class OrderConfirmationService {
       throw new OrderConfirmationError('OrderCancelReasonRequired', 'A cancellation reason is required', 400);
     }
 
-    if (!getOrderActionCapabilities(order).canCancel) {
-      throw new OrderConfirmationError('OrderCancellationNotAllowed', 'Order is already cancelled', 409);
-    }
-
     order.customerConfirmationStatus = CustomerConfirmationStatus.CANCELLED;
     order.confirmationCancelledAt = new Date();
     order.confirmationCancelReason = trimmedReason;
@@ -291,10 +263,6 @@ export class OrderConfirmationService {
 
     if (order.customerConfirmationStatus !== CustomerConfirmationStatus.PENDING) {
       throw new OrderConfirmationError('OrderReminderNotAllowed', 'Only pending orders can be reminded', 409);
-    }
-
-    if (!order.customerPhoneE164) {
-      throw new OrderConfirmationError('OrderPhoneRequired', 'A valid customer phone is required', 409);
     }
 
     if ((order.reminderCount || 0) >= config.confirmation.maxReminders) {
