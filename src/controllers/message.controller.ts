@@ -248,10 +248,8 @@ export class MessageController {
       'Fetched message detail'
     );
 
-    const [enrichedMessage] = await enrichMessages([message]);
-
     return res.status(200).json({
-      data: enrichedMessage
+      data: message
     });
   }
 
