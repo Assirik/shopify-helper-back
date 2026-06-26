@@ -10,7 +10,6 @@ const allowedOrigins = process.env.ALLOWED_ORIGINS
   ? process.env.ALLOWED_ORIGINS.split(',').map(origin => origin.trim())
   : '*';
 const jwtSecret = process.env.JWT_SECRET || 'change-me-in-env';
-const initialAdminBootstrapSecret = process.env.INITIAL_ADMIN_BOOTSTRAP_SECRET || '';
 
 export default {
   port,
@@ -22,7 +21,6 @@ export default {
   redisUrl: process.env.REDIS_URL || 'redis://localhost:6379',
   allowedOrigins,
   jwtSecret,
-  initialAdminBootstrapSecret,
   shopify: {
     webhookSecret: process.env.SHOPIFY_WEBHOOK_SECRET || '',
     shopDomain: process.env.SHOPIFY_SHOP_DOMAIN || ''

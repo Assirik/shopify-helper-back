@@ -34,7 +34,6 @@ const swaggerOptions: swaggerJSDoc.Options = {
     tags: [
       { name: 'Health', description: 'État du service' },
       { name: 'Auth', description: 'Authentification du helpdesk' },
-      { name: 'User Administration', description: 'Gestion des comptes helpdesk réservée aux administrateurs' },
       { name: 'Customers', description: 'Consultation des clients Shopify' },
       { name: 'Orders', description: 'Consultation et confirmation des commandes' },
       { name: 'Messages', description: 'Suivi et relance des messages' },
@@ -105,46 +104,10 @@ const swaggerOptions: swaggerJSDoc.Options = {
             userName: { type: 'string', example: 'helpdesk.agent' },
             email: { type: 'string', format: 'email', example: 'agent@example.com' },
             phone: { type: 'string', example: '+221770000000' },
-            role: { type: 'string', enum: ['ADMIN', 'USER', 'DEVELOPER'] },
-            isActive: { type: 'boolean', example: true },
-            disabledAt: dateTime,
+            role: { type: 'string', enum: ['ADMIN', 'USER', 'IOT', 'DEVELOPER', 'DEVICE'] },
             fcmTokens: { type: 'array', items: { type: 'string' } },
             createdAt: dateTime,
             updatedAt: dateTime
-          }
-        },
-        AdminCreateUserInput: {
-          type: 'object',
-          additionalProperties: false,
-          required: ['userName', 'email', 'password'],
-          properties: {
-            userName: { type: 'string', minLength: 3, maxLength: 50, pattern: '^[a-zA-Z0-9._-]+$' },
-            email: { type: 'string', format: 'email', maxLength: 254 },
-            phone: { type: 'string', maxLength: 30 },
-            role: { type: 'string', enum: ['ADMIN', 'USER', 'DEVELOPER'], default: 'USER' },
-            password: { type: 'string', format: 'password', minLength: 8, maxLength: 72, writeOnly: true }
-          }
-        },
-        InitialAdminInput: {
-          type: 'object',
-          additionalProperties: false,
-          required: ['userName', 'email', 'password'],
-          properties: {
-            userName: { type: 'string', minLength: 3, maxLength: 50, pattern: '^[a-zA-Z0-9._-]+$' },
-            email: { type: 'string', format: 'email', maxLength: 254 },
-            phone: { type: 'string', maxLength: 30 },
-            password: { type: 'string', format: 'password', minLength: 8, maxLength: 72, writeOnly: true }
-          }
-        },
-        AdminUpdateUserInput: {
-          type: 'object',
-          additionalProperties: false,
-          minProperties: 1,
-          properties: {
-            userName: { type: 'string', minLength: 3, maxLength: 50, pattern: '^[a-zA-Z0-9._-]+$' },
-            email: { type: 'string', format: 'email', maxLength: 254 },
-            phone: { type: 'string', nullable: true, maxLength: 30 },
-            role: { type: 'string', enum: ['ADMIN', 'USER', 'DEVELOPER'] }
           }
         },
         Customer: {

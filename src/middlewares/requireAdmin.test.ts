@@ -12,10 +12,7 @@ const createResponse = () => {
 
 describe('requireAdmin', () => {
   it('rejects a non-admin authenticated user', async () => {
-    const select = jest.fn<() => Promise<{ role: Role; isActive: boolean }>>().mockResolvedValue({
-      role: Role.USER,
-      isActive: true
-    });
+    const select = jest.fn<() => Promise<{ role: Role }>>().mockResolvedValue({ role: Role.USER });
     jest.spyOn(User, 'findById').mockReturnValue({ select } as never);
     const { response, status, json } = createResponse();
     const next = jest.fn() as NextFunction;
@@ -28,7 +25,7 @@ describe('requireAdmin', () => {
   });
 
   it('allows an admin user', async () => {
-    const admin = { role: Role.ADMIN, isActive: true };
+    const admin = { role: Role.ADMIN };
     const select = jest.fn<() => Promise<typeof admin>>().mockResolvedValue(admin);
     jest.spyOn(User, 'findById').mockReturnValue({ select } as never);
     const { response } = createResponse();
