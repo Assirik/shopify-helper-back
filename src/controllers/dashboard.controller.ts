@@ -1,7 +1,6 @@
 import { Request, Response } from 'express';
 import { Message, MessageChannel, MessageStatus } from '../models/Message';
 import { CustomerConfirmationStatus, Order } from '../models/Order';
-import { notificationQueue } from '../queues/notification.queue';
 import log from '../utilities/logger/logger';
 
 export interface DashboardStats {
@@ -81,26 +80,9 @@ export const computeMongoDashboardStats = async (now = new Date()): Promise<Dash
   };
 };
 
-export const computeDashboardStats = async (now = new Date()): Promise<DashboardStats> => {
-  const stats = await computeMongoDashboardStats(now);
-
-  try {
-    const jobCounts = await notificationQueue.getJobCounts();
-
-    return {
-      ...stats,
-      jobsSucceeded: jobCounts.completed || 0,
-      jobsFailed: jobCounts.failed || 0
-    };
-  } catch (err) {
-    log.warn({ err }, 'Dashboard queue health unavailable');
-    return stats;
-  }
-};
-
 export class DashboardController {
   public static async stats(_req: Request, res: Response) {
-    const stats = await computeDashboardStats();
+    const stats = await computeMongoDashboardStats();
 
     log.info(stats, 'Fetched dashboard stats');
 
