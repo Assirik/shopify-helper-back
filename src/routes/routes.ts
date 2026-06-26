@@ -5,7 +5,6 @@ import shopifyWebhooks from './shopifyWebhooks';
 import customers from './customers';
 import orders from './orders';
 import messages from './messages';
-import dashboard from './dashboard';
 import whatsappWebhooks from './whatsappWebhooks';
 import whatsappTemplates from './whatsappTemplates';
 import messageConfig from './messageConfig';
@@ -21,6 +20,5 @@ router.use('/api/whatsapp/message-config', messageConfig);
 router.use('/api/customers', customers);
 router.use('/api/orders', orders);
 router.use('/api/messages', messages);
-router.use('/api/dashboard', dashboard);
 
 export default router;
