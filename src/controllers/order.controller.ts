@@ -150,33 +150,6 @@ export class OrderController {
     });
   }
 
-  public static async bulkRemind(req: Request, res: Response) {
-    const orderIds = parseBulkOrderIds(req.body?.orderIds);
-    if (!orderIds) return res.status(400).json({ error: 'InvalidOrderIds' });
-
-    const results = await runWithConcurrency(orderIds, orderId => OrderConfirmationService.remindByAdmin(orderId));
-    const succeeded = results
-      .filter(result => result.status === 'fulfilled')
-      .map(result => ({ orderId: result.orderId }));
-    const failed = results
-      .filter((result): result is PromiseRejectedResult & { orderId: string } => result.status === 'rejected')
-      .map(result => toBulkFailure(result.orderId, result.reason));
-
-    log.info(
-      { adminId: req.userId, requested: orderIds.length, succeeded: succeeded.length, failed: failed.length },
-      'Bulk order reminder completed'
-    );
-
-    return res.status(failed.length ? 207 : 200).json({
-      data: {
-        requested: orderIds.length,
-        succeeded,
-        failed,
-        summary: { succeeded: succeeded.length, failed: failed.length }
-      }
-    });
-  }
-
   public static async attentionQueue(req: Request, res: Response) {
     const page = toPositiveInteger(req.query.page, 1);
     const limit = Math.min(toPositiveInteger(req.query.limit, DEFAULT_LIMIT), MAX_LIMIT);
