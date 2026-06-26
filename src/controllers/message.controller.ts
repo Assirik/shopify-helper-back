@@ -1,7 +1,6 @@
 import { Request, Response } from 'express';
 import { Types } from 'mongoose';
-import { IMessage, Message, MessageChannel, MessageProvider, MessageStatus } from '../models/Message';
-import { IOrder, Order } from '../models/Order';
+import { Message, MessageChannel, MessageProvider, MessageStatus } from '../models/Message';
 import { enqueueOrderConfirmation } from '../queues/notification.queue';
 import log from '../utilities/logger/logger';
 
@@ -31,97 +30,6 @@ const createPagination = (page: number, limit: number, total: number) => {
   };
 };
 
-type JsonRecord = Record<string, unknown>;
-type MessageJson = JsonRecord & {
-  _id?: unknown;
-  id?: unknown;
-  orderId?: unknown;
-  channel?: unknown;
-  fallbackOfMessageId?: unknown;
-};
-type EnrichedMessageJson = MessageJson & {
-  orderName?: string;
-  fallbackOf?: {
-    id: string;
-    orderName?: string;
-    channel?: string;
-  };
-};
-
-const toIdString = (value: unknown) => {
-  if (typeof value === 'string') {
-    return value;
-  }
-
-  if (value instanceof Types.ObjectId) {
-    return value.toString();
-  }
-
-  if (value && typeof value === 'object' && 'toString' in value) {
-    return String(value);
-  }
-
-  return '';
-};
-
-const uniqueIds = (values: unknown[]) => {
-  return [...new Set(values.map(toIdString).filter(Boolean))];
-};
-
-const toMessageJson = (message: IMessage) => message.toJSON() as MessageJson;
-
-const buildOrderNameMap = async (orderIds: string[]) => {
-  if (orderIds.length === 0) {
-    return new Map<string, string>();
-  }
-
-  const orders = await Order.find({ _id: { $in: orderIds } });
-
-  return orders.reduce((map, order: IOrder) => {
-    map.set(order._id.toString(), order.shopifyOrderName);
-    return map;
-  }, new Map<string, string>());
-};
-
-export const enrichMessages = async (messages: IMessage[]): Promise<EnrichedMessageJson[]> => {
-  const messageJsons = messages.map(toMessageJson);
-  const orderNameById = await buildOrderNameMap(uniqueIds(messageJsons.map(message => message.orderId)));
-
-  const fallbackIds = uniqueIds(messageJsons.map(message => message.fallbackOfMessageId));
-  const fallbackMessages = fallbackIds.length > 0 ? await Message.find({ _id: { $in: fallbackIds } }) : [];
-  const fallbackJsons = fallbackMessages.map(toMessageJson);
-  const fallbackOrderNameById = await buildOrderNameMap(uniqueIds(fallbackJsons.map(message => message.orderId)));
-
-  const fallbackById = fallbackJsons.reduce((map, message) => {
-    const messageId = toIdString(message._id || message.id);
-    if (!messageId) return map;
-
-    map.set(messageId, {
-      id: messageId,
-      orderName: fallbackOrderNameById.get(toIdString(message.orderId)),
-      channel: typeof message.channel === 'string' ? message.channel : undefined
-    });
-    return map;
-  }, new Map<string, { id: string; orderName?: string; channel?: string }>());
-
-  return messageJsons.map(message => {
-    const enriched = {
-      ...message,
-      orderName: orderNameById.get(toIdString(message.orderId))
-    };
-    const fallbackOf = fallbackById.get(toIdString(message.fallbackOfMessageId));
-
-    if (!fallbackOf) {
-      return enriched;
-    }
-
-    return {
-      ...enriched,
-      fallbackOf
-    };
-  });
-};
-
 export class MessageController {
   public static async list(req: Request, res: Response) {
     const page = toPositiveInteger(req.query.page, 1);
@@ -149,14 +57,13 @@ export class MessageController {
       Message.find(filters).sort({ createdAt: -1 }).skip(skip).limit(limit),
       Message.countDocuments(filters)
     ]);
-    const enrichedMessages = await enrichMessages(messages);
 
     log.info(
       {
         page,
         limit,
         total,
-        returned: enrichedMessages.length,
+        returned: messages.length,
         status,
         channel,
         provider
@@ -165,7 +72,7 @@ export class MessageController {
     );
 
     return res.status(200).json({
-      data: enrichedMessages,
+      data: messages,
       pagination: createPagination(page, limit, total)
     });
   }
