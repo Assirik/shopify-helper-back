@@ -218,8 +218,7 @@ const KNOWN_DELIVERY_MOMENTS = new Set(
 export const extractDeliverySnapshot = (payload: ShopifyOrderPayload) => {
   const rawRegion = getFirstString(
     payload.shipping_address?.province,
-    getNoteAttribute(payload, 'Région', 'Region'),
-    payload.shipping_address?.city
+    getNoteAttribute(payload, 'Région', 'Region')
   );
   const canonicalRegion = resolveRegion(rawRegion);
 
@@ -231,9 +230,7 @@ export const extractDeliverySnapshot = (payload: ShopifyOrderPayload) => {
     ),
     deliveryAddress: getFirstString(
       payload.shipping_address?.address2,
-      getNoteAttribute(payload, 'Adresse de livraison'),
-      payload.shipping_address?.address1,
-      getNoteAttribute(payload, 'Adresse', 'Address')
+      getNoteAttribute(payload, 'Adresse de livraison')
     ),
     deliveryLatitude: toFiniteNumber(payload.shipping_address?.latitude),
     deliveryLongitude: toFiniteNumber(payload.shipping_address?.longitude),

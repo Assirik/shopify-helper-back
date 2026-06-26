@@ -36,25 +36,6 @@ describe('extractDeliverySnapshot', () => {
       customerLocale: undefined
     });
   });
-
-  it('falls back to Shopify city and address1 when Easysell delivery fields are absent', () => {
-    const snapshot = extractDeliverySnapshot({
-      shipping_address: {
-        province: null,
-        city: 'Dakar',
-        address1: 'Mbao',
-        address2: null
-      }
-    });
-
-    expect(snapshot).toEqual(
-      expect.objectContaining({
-        deliveryRegion: 'Dakar',
-        deliveryRegionCode: 'SN_DK',
-        deliveryAddress: 'Mbao'
-      })
-    );
-  });
 });
 
 describe('normalizeDeliveryMoment', () => {
