@@ -64,15 +64,6 @@ export const backfillAttentionQueue = async (): Promise<AttentionBackfillResult>
     {
       ...missingReason,
       notificationStatus: NotificationStatus.FAILED,
-      // On ne réactive jamais une commande déjà résolue: confirmer/annuler/expirer
-      // retire le code d'attention, ce qui la rendrait sinon de nouveau éligible ici.
-      customerConfirmationStatus: {
-        $nin: [
-          CustomerConfirmationStatus.CONFIRMED,
-          CustomerConfirmationStatus.CANCELLED,
-          CustomerConfirmationStatus.EXPIRED
-        ]
-      },
       $or: [{ customerPhoneE164: { $exists: false } }, { customerPhoneE164: '' }]
     },
     [
