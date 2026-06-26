@@ -13,14 +13,6 @@ type ValidationDetails = Record<string, string>;
 
 export const isValidSignupPassword = isValidPassword;
 
-export const buildLoginLookup = (identifier: string) => {
-  const trimmed = identifier.trim();
-
-  return trimmed.includes('@')
-    ? { $or: [{ userName: trimmed }, { email: trimmed.toLowerCase() }] }
-    : { userName: trimmed };
-};
-
 const toSafeUser = (user: IUser) => {
   const result = user.toObject() as Record<string, unknown>;
   delete result.password;
@@ -128,20 +120,10 @@ export class AuthController {
   }
 
   public static async login(req: Request, res: Response) {
-    const identifier =
-      typeof req.body?.identifier === 'string'
-        ? req.body.identifier.trim()
-        : typeof req.body?.userName === 'string'
-          ? req.body.userName.trim()
-          : typeof req.body?.email === 'string'
-            ? req.body.email.trim()
-            : '';
-
     try {
+      const userName = typeof req.body?.userName === 'string' ? req.body.userName.trim() : '';
       const password = typeof req.body?.password === 'string' ? req.body.password : '';
-      const user = identifier
-        ? await User.findOne(buildLoginLookup(identifier)).select('+password +sessionVersion')
-        : null;
+      const user = await User.findOne({ userName }).select('+password +sessionVersion');
 
       if (!user || !password || !(await user.isPasswordValid(password))) {
         return res.status(401).json({ error: 'InvalidCredentials' });
@@ -160,7 +142,7 @@ export class AuthController {
         message: 'Successful'
       });
     } catch (error) {
-      log.error({ err: error, identifierType: identifier.includes('@') ? 'email' : 'userName' }, 'Login failed');
+      log.error({ err: error, userName: req.body?.userName }, 'Login failed');
       return res.status(500).json({ error: 'InternalError' });
     }
   }
