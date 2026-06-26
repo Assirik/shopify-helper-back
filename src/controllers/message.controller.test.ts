@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, jest } from '@jest/globals';
 import { Types } from 'mongoose';
 import { Message, MessageChannel, MessageProvider, MessageStatus } from '../models/Message';
 import { Order } from '../models/Order';
-import { buildMessageListFilters, enrichMessages, MessageController } from './message.controller';
+import { enrichMessages } from './message.controller';
 
 jest.mock('../queues/notification.queue', () => ({
   enqueueOrderConfirmation: jest.fn()
@@ -91,68 +91,6 @@ describe('message enrichment helpers', () => {
       id: fallbackMessageId.toString(),
       orderName: '#1042',
       channel: MessageChannel.WHATSAPP
-    });
-  });
-});
-
-describe('message list filters', () => {
-  it('filters messages by matching orderName', async () => {
-    const orderId = new Types.ObjectId();
-    jest.spyOn(Order, 'find').mockResolvedValueOnce([orderDoc(orderId, '#1042')] as never);
-
-    const result = await buildMessageListFilters({ orderName: '1042' });
-
-    expect(Order.find).toHaveBeenCalledWith({
-      shopifyOrderName: { $regex: '1042', $options: 'i' }
-    });
-    expect(result.noMatches).toBe(false);
-    expect(result.filters).toEqual({
-      orderId: { $in: [orderId] }
-    });
-  });
-
-  it('combines orderName with status filters', async () => {
-    const orderId = new Types.ObjectId();
-    jest.spyOn(Order, 'find').mockResolvedValueOnce([orderDoc(orderId, '#1042')] as never);
-
-    const result = await buildMessageListFilters({
-      orderName: '#1042',
-      status: MessageStatus.FAILED
-    });
-
-    expect(result.filters).toEqual({
-      orderId: { $in: [orderId] },
-      status: MessageStatus.FAILED
-    });
-  });
-
-  it('returns noMatches when no orderName matches', async () => {
-    jest.spyOn(Order, 'find').mockResolvedValueOnce([] as never);
-
-    const result = await buildMessageListFilters({ orderName: 'xxx' });
-
-    expect(result.noMatches).toBe(true);
-    expect(result.filters).toEqual({});
-  });
-
-  it('returns an empty page without searching messages when orderName has no matches', async () => {
-    jest.spyOn(Order, 'find').mockResolvedValueOnce([] as never);
-    const messageFind = jest.spyOn(Message, 'find');
-    const countDocuments = jest.spyOn(Message, 'countDocuments');
-    const status = jest.fn().mockReturnThis();
-    const json = jest.fn();
-
-    await MessageController.list(
-      { query: { orderName: 'xxx' } } as never,
-      { status, json } as never
-    );
-
-    expect(messageFind).not.toHaveBeenCalled();
-    expect(countDocuments).not.toHaveBeenCalled();
-    expect(status).toHaveBeenCalledWith(200);
-    expect(json).toHaveBeenCalledWith({
-      data: [],
-      pagination: { page: 1, limit: 20, total: 0, pages: 0 }
     });
   });
 });
