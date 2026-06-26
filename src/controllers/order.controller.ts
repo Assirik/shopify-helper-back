@@ -39,52 +39,6 @@ const createPagination = (page: number, limit: number, total: number) => {
   };
 };
 
-const MAX_BULK_ORDERS = 100;
-const BULK_CONCURRENCY = 5;
-
-export const parseBulkOrderIds = (value: unknown) => {
-  if (!Array.isArray(value) || value.length === 0 || value.length > MAX_BULK_ORDERS) {
-    return undefined;
-  }
-
-  const ids = [...new Set(value)];
-  if (ids.length !== value.length || !ids.every(id => typeof id === 'string' && Types.ObjectId.isValid(id))) {
-    return undefined;
-  }
-
-  return ids as string[];
-};
-
-const runWithConcurrency = async <T>(items: string[], task: (item: string) => Promise<T>) => {
-  const results: Array<PromiseSettledResult<T> & { orderId: string }> = [];
-  let cursor = 0;
-
-  const worker = async () => {
-    while (cursor < items.length) {
-      const index = cursor;
-      cursor += 1;
-      const orderId = items[index];
-
-      try {
-        results[index] = { status: 'fulfilled', value: await task(orderId), orderId };
-      } catch (reason) {
-        results[index] = { status: 'rejected', reason, orderId };
-      }
-    }
-  };
-
-  await Promise.all(Array.from({ length: Math.min(BULK_CONCURRENCY, items.length) }, worker));
-  return results;
-};
-
-const toBulkFailure = (orderId: string, reason: unknown) => {
-  if (reason instanceof OrderConfirmationError) {
-    return { orderId, error: reason.code, status: reason.status };
-  }
-
-  return { orderId, error: 'InternalError', status: 500 };
-};
-
 const buildMessageSummary = (messages: Array<{ channel: string; provider: string; status: string }>) => {
   return messages.reduce(
     (summary, message) => {
@@ -123,33 +77,6 @@ export const toAttentionOrder = (order: IOrder) => ({
 });
 
 export class OrderController {
-  public static async bulkConfirm(req: Request, res: Response) {
-    const orderIds = parseBulkOrderIds(req.body?.orderIds);
-    if (!orderIds) return res.status(400).json({ error: 'InvalidOrderIds' });
-
-    const results = await runWithConcurrency(orderIds, orderId => OrderConfirmationService.confirmByAdmin(orderId));
-    const succeeded = results
-      .filter(result => result.status === 'fulfilled')
-      .map(result => ({ orderId: result.orderId }));
-    const failed = results
-      .filter((result): result is PromiseRejectedResult & { orderId: string } => result.status === 'rejected')
-      .map(result => toBulkFailure(result.orderId, result.reason));
-
-    log.info(
-      { adminId: req.userId, requested: orderIds.length, succeeded: succeeded.length, failed: failed.length },
-      'Bulk order confirmation completed'
-    );
-
-    return res.status(failed.length ? 207 : 200).json({
-      data: {
-        requested: orderIds.length,
-        succeeded,
-        failed,
-        summary: { succeeded: succeeded.length, failed: failed.length }
-      }
-    });
-  }
-
   public static async attentionQueue(req: Request, res: Response) {
     const page = toPositiveInteger(req.query.page, 1);
     const limit = Math.min(toPositiveInteger(req.query.limit, DEFAULT_LIMIT), MAX_LIMIT);
