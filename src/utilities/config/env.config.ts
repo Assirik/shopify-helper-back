@@ -19,6 +19,7 @@ export default {
   productionApiEndpoint,
   environment: process.env.NODE_ENV || 'development',
   mongodbUri: process.env.MONGODB_URI || 'mongodb://localhost:27017/starter-kit',
+  mongodbDbName: process.env.MONGODB_DB_NAME || 'starter-kit',
   redisUrl: process.env.REDIS_URL || 'redis://localhost:6379',
   allowedOrigins,
   jwtSecret,

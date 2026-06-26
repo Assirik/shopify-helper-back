@@ -9,7 +9,9 @@ export class DatabaseService {
     log.info('Connecting to MongoDB');
 
     try {
-      await mongoose.connect(config.mongodbUri);
+      await mongoose.connect(config.mongodbUri, {
+        dbName: config.mongodbDbName,
+      });
       log.info('MongoDB connected');
     } catch (err) {
       DatabaseService.retryCount += 1;
