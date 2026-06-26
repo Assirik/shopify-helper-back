@@ -4,7 +4,7 @@ import config from '../utilities/config/env.config';
 import { PhoneNormalizationService } from '../utilities/services/phoneNormalization.service';
 import { Customer } from '../models/Customer';
 import { Message, MessageChannel, MessageProvider, MessageStatus, TemplatePurpose } from '../models/Message';
-import { AttentionReasonCode, NotificationStatus, Order } from '../models/Order';
+import { NotificationStatus, Order } from '../models/Order';
 import { Product } from '../models/Product';
 import { WebhookEvent, WebhookEventStatus } from '../models/WebhookEvent';
 import { enqueueOrderConfirmation } from '../queues/notification.queue';
@@ -641,15 +641,7 @@ export class ShopifyWebhookController {
       shopifyCancelReason: payload.cancel_reason || undefined,
       financialStatus: payload.financial_status || undefined,
       fulfillmentStatus: payload.fulfillment_status || undefined,
-      notificationStatus,
-      ...(!phone.isValid && !skipNotificationReason
-        ? {
-            needsHelpdeskAttention: true,
-            attentionReasonCode: AttentionReasonCode.INVALID_NUMBER,
-            attentionReason: phone.errorReason || 'Invalid customer phone number',
-            attentionRequiredAt: new Date()
-          }
-        : {})
+      notificationStatus
     });
 
     // On rattache la dernière commande au client après création, car on a besoin de l'_id Order.

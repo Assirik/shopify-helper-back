@@ -2,7 +2,7 @@ import { Request, Response } from 'express';
 import { Types } from 'mongoose';
 import { InboundWhatsAppEvent, InboundWhatsAppEventStatus } from '../models/InboundWhatsAppEvent';
 import { Message, MessageStatus } from '../models/Message';
-import { AttentionReasonCode, CustomerConfirmationStatus, Order } from '../models/Order';
+import { CustomerConfirmationStatus, Order } from '../models/Order';
 import config from '../utilities/config/env.config';
 import log from '../utilities/logger/logger';
 import { OrderConfirmationService } from '../utilities/services/orderConfirmation.service';
@@ -267,9 +267,7 @@ const handleCustomerReaction = async (message: MetaWhatsAppMessagePayload, rawPa
     needsHelpdeskAttention: true,
     lastCustomerMessageAt: new Date(),
     lastCustomerMessageText: summary,
-    attentionReason: reason,
-    attentionReasonCode: AttentionReasonCode.FREE_TEXT,
-    attentionRequiredAt: new Date()
+    attentionReason: reason
   };
 
   // Only downgrade to needs_attention when the order is not yet in a final
