@@ -40,7 +40,6 @@
  *         schema: { type: string, enum: [pending, confirmed, needs_attention, expired, cancelled, sms_only] }
  *       - { in: query, name: orderName, schema: { type: string }, example: '#1001' }
  *       - { in: query, name: phone, schema: { type: string } }
- *       - { in: query, name: cod, schema: { type: boolean }, description: Filtre les commandes cash on delivery si true ou false. }
  *       - { in: query, name: page, schema: { type: integer, minimum: 1, default: 1 } }
  *       - { in: query, name: limit, schema: { type: integer, minimum: 1, maximum: 100, default: 20 } }
  *     responses:
@@ -258,7 +257,6 @@
  *       - { in: query, name: status, schema: { type: string, enum: [queued, sending, sent, delivered, read, failed] } }
  *       - { in: query, name: channel, schema: { type: string, enum: [whatsapp, sms] } }
  *       - { in: query, name: provider, schema: { type: string, enum: [meta, termii] } }
- *       - { in: query, name: orderName, schema: { type: string }, description: Recherche insensible à la casse sur le nom de commande Shopify. }
  *       - { in: query, name: page, schema: { type: integer, minimum: 1, default: 1 } }
  *       - { in: query, name: limit, schema: { type: integer, minimum: 1, maximum: 100, default: 20 } }
  *     responses:
@@ -318,24 +316,6 @@
  *       409:
  *         description: Le message n’est pas en échec.
  *         content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } }
- *       500: { $ref: '#/components/responses/InternalError' }
- *
- * /api/dashboard/stats:
- *   get:
- *     tags: [Dashboard]
- *     operationId: getDashboardStats
- *     summary: Lire les métriques opérationnelles du helpdesk
- *     security: [{ bearerAuth: [] }]
- *     responses:
- *       200:
- *         description: Métriques calculées depuis Mongo, enrichies par BullMQ si disponible.
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 data: { $ref: '#/components/schemas/DashboardStats' }
- *       401: { $ref: '#/components/responses/Unauthorized' }
  *       500: { $ref: '#/components/responses/InternalError' }
  */
 export const helpdeskDocs = true;

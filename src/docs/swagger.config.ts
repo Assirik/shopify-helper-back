@@ -38,7 +38,6 @@ const swaggerOptions: swaggerJSDoc.Options = {
       { name: 'Customers', description: 'Consultation des clients Shopify' },
       { name: 'Orders', description: 'Consultation et confirmation des commandes' },
       { name: 'Messages', description: 'Suivi et relance des messages' },
-      { name: 'Dashboard', description: 'Métriques opérationnelles du helpdesk' },
       { name: 'Shopify Webhooks', description: 'Ingestion signée des commandes Shopify' },
       { name: 'WhatsApp Webhooks', description: 'Vérification et événements entrants Meta' },
       { name: 'WhatsApp Templates', description: 'Catalogue des templates Meta' },
@@ -390,7 +389,6 @@ const swaggerOptions: swaggerJSDoc.Options = {
           properties: {
             _id: objectId,
             orderId: objectId,
-            orderName: { type: 'string', example: '#1042' },
             channel: { type: 'string', enum: ['whatsapp', 'sms'] },
             provider: { type: 'string', enum: ['meta', 'termii'] },
             status: { type: 'string', enum: ['queued', 'sending', 'sent', 'delivered', 'read', 'failed'] },
@@ -405,39 +403,8 @@ const swaggerOptions: swaggerJSDoc.Options = {
             errorMessage: { type: 'string' },
             attempts: { type: 'array', items: { $ref: '#/components/schemas/MessageAttempt' } },
             fallbackOfMessageId: objectId,
-            fallbackOf: {
-              type: 'object',
-              properties: {
-                id: objectId,
-                orderName: { type: 'string', example: '#1042' },
-                channel: { type: 'string', enum: ['whatsapp', 'sms'] }
-              }
-            },
             createdAt: dateTime,
             updatedAt: dateTime
-          }
-        },
-        DashboardStats: {
-          type: 'object',
-          required: [
-            'ordersToday',
-            'ordersYesterday',
-            'attention',
-            'confirmationRate',
-            'messageFailures',
-            'smsFallbacks',
-            'cancelledOrders'
-          ],
-          properties: {
-            ordersToday: { type: 'integer', minimum: 0 },
-            ordersYesterday: { type: 'integer', minimum: 0 },
-            attention: { type: 'integer', minimum: 0 },
-            confirmationRate: { type: 'number', minimum: 0, maximum: 100 },
-            messageFailures: { type: 'integer', minimum: 0 },
-            smsFallbacks: { type: 'integer', minimum: 0 },
-            cancelledOrders: { type: 'integer', minimum: 0 },
-            jobsSucceeded: { type: 'integer', minimum: 0 },
-            jobsFailed: { type: 'integer', minimum: 0 }
           }
         },
         WebhookEvent: {

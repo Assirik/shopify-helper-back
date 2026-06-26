@@ -29,7 +29,6 @@ const EXPECTED_OPERATIONS: Record<string, HttpMethod[]> = {
   '/api/messages': ['get'],
   '/api/messages/{id}': ['get'],
   '/api/messages/{id}/retry': ['post'],
-  '/api/dashboard/stats': ['get'],
   '/api/webhooks/shopify/orders-create': ['post'],
   '/api/webhooks/whatsapp': ['get', 'post'],
   '/api/whatsapp/templates': ['get'],
@@ -57,7 +56,6 @@ const PROTECTED_OPERATIONS: Array<[string, HttpMethod]> = [
   ['/api/messages', 'get'],
   ['/api/messages/{id}', 'get'],
   ['/api/messages/{id}/retry', 'post'],
-  ['/api/dashboard/stats', 'get'],
   ['/api/whatsapp/templates', 'get'],
   ['/api/whatsapp/message-config', 'get'],
   ['/api/whatsapp/message-config', 'put']
@@ -136,17 +134,5 @@ describe('Swagger MVP specification', () => {
     ]);
     expect(document.components.schemas.BulkOrderInput.properties.orderIds.maxItems).toBe(100);
     expect(paths['/api/orders/bulk/confirm'].post.responses).toHaveProperty('207');
-  });
-
-  it('documents remaining helpdesk API contracts', () => {
-    const orderParameters = (paths['/api/orders'].get as any).parameters as Array<{ name: string }>;
-    const messageParameters = (paths['/api/messages'].get as any).parameters as Array<{ name: string }>;
-
-    expect(orderParameters.some(parameter => parameter.name === 'cod')).toBe(true);
-    expect(messageParameters.some(parameter => parameter.name === 'orderName')).toBe(true);
-    expect(document.components.schemas.Message.properties).toHaveProperty('orderName');
-    expect(document.components.schemas.Message.properties).toHaveProperty('fallbackOf');
-    expect(document.components.schemas.DashboardStats.properties).toHaveProperty('jobsSucceeded');
-    expect(paths['/api/dashboard/stats'].get.security).toEqual([{ bearerAuth: [] }]);
   });
 });
