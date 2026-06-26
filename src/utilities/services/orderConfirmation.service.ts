@@ -1,6 +1,13 @@
 import { Types } from 'mongoose';
 import { Message, MessageChannel, MessageProvider, MessageStatus, TemplatePurpose } from '../../models/Message';
-import { ConfirmationSource, CustomerConfirmationStatus, IOrder, Order, ReminderSource } from '../../models/Order';
+import {
+  AttentionReasonCode,
+  ConfirmationSource,
+  CustomerConfirmationStatus,
+  IOrder,
+  Order,
+  ReminderSource
+} from '../../models/Order';
 import {
   enqueueConfirmationReminder,
   enqueueOrderCancelled,
@@ -8,6 +15,7 @@ import {
 } from '../../queues/notification.queue';
 import config from '../config/env.config';
 import log from '../logger/logger';
+import { CONFIRMABLE_BY_ADMIN, getOrderActionCapabilities } from './orderCapabilities.service';
 
 export class OrderConfirmationError extends Error {
   public readonly code: string;
@@ -26,6 +34,8 @@ export interface WhatsAppButtonConfirmation {
   buttonText?: string;
   waMessageId?: string;
 }
+
+export const MAX_CANCELLATION_REASON_LENGTH = 500;
 
 const ensureObjectId = (orderId: string) => {
   if (!Types.ObjectId.isValid(orderId)) {
@@ -115,13 +125,6 @@ const dispatchReminderMessage = async (orderId: Types.ObjectId) => {
   return { message, job };
 };
 
-const CONFIRMABLE_BY_ADMIN = [
-  CustomerConfirmationStatus.PENDING,
-  CustomerConfirmationStatus.NEEDS_ATTENTION,
-  CustomerConfirmationStatus.SMS_ONLY,
-  CustomerConfirmationStatus.EXPIRED
-];
-
 const CONFIRMABLE_BY_BUTTON = [
   CustomerConfirmationStatus.PENDING,
   CustomerConfirmationStatus.NEEDS_ATTENTION,
@@ -149,7 +152,7 @@ export class OrderConfirmationService {
           confirmationPayload: payload,
           needsHelpdeskAttention: false
         },
-        $unset: { attentionReason: '' }
+        $unset: { attentionReason: '', attentionReasonCode: '', attentionRequiredAt: '' }
       },
       { new: true }
     );
@@ -172,6 +175,8 @@ export class OrderConfirmationService {
     order.lastCustomerMessageText = lastCustomerMessageText;
     order.confirmationPayload = payload;
     order.attentionReason = 'Confirmation received after expiration or cancellation';
+    order.attentionReasonCode = AttentionReasonCode.LATE_CONFIRM;
+    order.attentionRequiredAt = now;
     await order.save();
 
     return { order, message: undefined, job: undefined, alreadyConfirmed: false, needsAttention: true };
@@ -189,7 +194,7 @@ export class OrderConfirmationService {
           confirmedAt: new Date(),
           needsHelpdeskAttention: false
         },
-        $unset: { attentionReason: '' }
+        $unset: { attentionReason: '', attentionReasonCode: '', attentionRequiredAt: '' }
       },
       { new: true }
     );
@@ -221,10 +226,25 @@ export class OrderConfirmationService {
       throw new OrderConfirmationError('OrderCancelReasonRequired', 'A cancellation reason is required', 400);
     }
 
+    if (trimmedReason.length > MAX_CANCELLATION_REASON_LENGTH) {
+      throw new OrderConfirmationError(
+        'OrderCancelReasonTooLong',
+        `Cancellation reason must not exceed ${MAX_CANCELLATION_REASON_LENGTH} characters`,
+        400
+      );
+    }
+
+    if (!getOrderActionCapabilities(order).canCancel) {
+      throw new OrderConfirmationError('OrderCancellationNotAllowed', 'Order is already cancelled', 409);
+    }
+
     order.customerConfirmationStatus = CustomerConfirmationStatus.CANCELLED;
     order.confirmationCancelledAt = new Date();
     order.confirmationCancelReason = trimmedReason;
     order.needsHelpdeskAttention = false;
+    order.attentionReason = undefined;
+    order.attentionReasonCode = undefined;
+    order.attentionRequiredAt = undefined;
     await order.save();
 
     // Inform the customer explicitly when a cancellation template is configured at Meta.
@@ -251,6 +271,10 @@ export class OrderConfirmationService {
 
     if (order.customerConfirmationStatus !== CustomerConfirmationStatus.PENDING) {
       throw new OrderConfirmationError('OrderReminderNotAllowed', 'Only pending orders can be reminded', 409);
+    }
+
+    if (!order.customerPhoneE164) {
+      throw new OrderConfirmationError('OrderPhoneRequired', 'A valid customer phone is required', 409);
     }
 
     if ((order.reminderCount || 0) >= config.confirmation.maxReminders) {

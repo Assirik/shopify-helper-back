@@ -109,3 +109,93 @@ Frontend (future) :
                     │
                     ▼
          Dashboard / Helpdesk
+```
+
+## Créer le premier administrateur
+
+Le premier administrateur peut être créé avec Postman via `POST /api/auth/bootstrap`. Définir temporairement un secret d'au moins 32 caractères :
+
+```env
+INITIAL_ADMIN_BOOTSTRAP_SECRET=replace-with-a-random-secret-of-at-least-32-characters
+```
+
+Envoyer ce secret dans le header `X-Bootstrap-Secret`, avec le corps JSON :
+
+```json
+{
+  "userName": "admin",
+  "email": "admin@example.com",
+  "password": "replace-with-a-strong-secret"
+}
+```
+
+L'endpoint refuse tout nouvel appel dès qu'un administrateur existe. Retirer ensuite `INITIAL_ADMIN_BOOTSTRAP_SECRET` et redémarrer le service pour désactiver complètement le bootstrap.
+
+## Authentification helpdesk
+
+La connexion accepte un nom d'utilisateur ou un email :
+
+```http
+POST /api/auth/login
+Content-Type: application/json
+
+{
+  "identifier": "admin@example.com",
+  "password": "replace-with-the-user-password"
+}
+```
+
+Le JWT retourné doit être envoyé avec `Authorization: Bearer <token>`. Une désactivation, un changement de rôle ou de mot de passe révoque les anciennes sessions via `sessionVersion`.
+
+## File « À traiter »
+
+La file réelle est accessible avec un JWT :
+
+```http
+GET /api/orders/attention?reason=free_text&page=1&limit=20
+```
+
+Raisons disponibles :
+
+- `free_text` : réponse client hors bouton de confirmation ;
+- `sms_only` : demande de confirmation livrée par fallback SMS ;
+- `invalid_number` : téléphone client invalide ;
+- `late_confirm` : confirmation reçue après expiration ou annulation.
+
+La réponse contient la page, les compteurs globaux par raison et les capacités d'action calculées côté serveur.
+
+Actions groupées :
+
+```http
+POST /api/orders/bulk/confirm
+POST /api/orders/bulk/remind
+
+{
+  "orderIds": ["6650f1d7a7b3c42f842b1234"]
+}
+```
+
+Une réponse `207` indique un résultat partiel. Les détails `succeeded` et `failed` doivent être lus pour chaque commande.
+
+## Backfill de la file
+
+Après déploiement du nouveau modèle, classer les commandes historiques une seule fois :
+
+```bash
+# Sources TypeScript disponibles
+npm run attention:backfill
+
+# Après npm run build dans l'image de production
+npm run attention:backfill:prod
+```
+
+La commande est idempotente et utilise `MONGODB_URI`. Vérifier la cible Atlas avant exécution et ne jamais lancer ce backfill sans sauvegarde et fenêtre opérationnelle contrôlée.
+
+## Vérification
+
+```bash
+npm run build
+npm test -- --runInBand --detectOpenHandles
+```
+
+Swagger est disponible sur `/api/docs` et la spécification JSON sur `/api/docs.json`.

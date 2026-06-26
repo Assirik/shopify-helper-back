@@ -5,15 +5,23 @@ import path from 'path';
 import ts from 'typescript';
 import { swaggerSpec } from './swagger.config';
 
-type HttpMethod = 'get' | 'post' | 'put';
+type HttpMethod = 'get' | 'post' | 'put' | 'patch';
 
 const EXPECTED_OPERATIONS: Record<string, HttpMethod[]> = {
   '/api/health': ['get'],
-  '/api/auth/signup': ['post'],
+  '/api/auth/bootstrap': ['post'],
   '/api/auth/login': ['post'],
   '/api/auth/me': ['get'],
+  '/api/auth/me/password': ['put'],
+  '/api/auth/users': ['get', 'post'],
+  '/api/auth/users/{userId}': ['get', 'patch'],
+  '/api/auth/users/{userId}/password': ['put'],
+  '/api/auth/users/{userId}/status': ['patch'],
   '/api/customers': ['get'],
   '/api/orders': ['get'],
+  '/api/orders/attention': ['get'],
+  '/api/orders/bulk/confirm': ['post'],
+  '/api/orders/bulk/remind': ['post'],
   '/api/orders/{id}': ['get'],
   '/api/orders/{id}/confirm': ['post'],
   '/api/orders/{id}/cancel': ['post'],
@@ -29,8 +37,18 @@ const EXPECTED_OPERATIONS: Record<string, HttpMethod[]> = {
 
 const PROTECTED_OPERATIONS: Array<[string, HttpMethod]> = [
   ['/api/auth/me', 'get'],
+  ['/api/auth/me/password', 'put'],
+  ['/api/auth/users', 'get'],
+  ['/api/auth/users', 'post'],
+  ['/api/auth/users/{userId}', 'get'],
+  ['/api/auth/users/{userId}', 'patch'],
+  ['/api/auth/users/{userId}/password', 'put'],
+  ['/api/auth/users/{userId}/status', 'patch'],
   ['/api/customers', 'get'],
   ['/api/orders', 'get'],
+  ['/api/orders/attention', 'get'],
+  ['/api/orders/bulk/confirm', 'post'],
+  ['/api/orders/bulk/remind', 'post'],
   ['/api/orders/{id}', 'get'],
   ['/api/orders/{id}/confirm', 'post'],
   ['/api/orders/{id}/cancel', 'post'],
@@ -75,6 +93,8 @@ describe('Swagger MVP specification', () => {
     }
 
     expect(paths['/api/whatsapp/message-config'].put.responses).toHaveProperty('403');
+    expect(paths['/api/auth/users'].post.responses).toHaveProperty('403');
+    expect(paths['/api/auth/bootstrap'].post.security).toBeUndefined();
   });
 
   it('includes step 16 delivery fields and no starter metadata', () => {
@@ -103,5 +123,16 @@ describe('Swagger MVP specification', () => {
   it('documents strict message variants and template limit errors', () => {
     expect(document.components.schemas.RegionVariant.additionalProperties).toBe(false);
     expect(paths['/api/whatsapp/templates'].get.responses).toHaveProperty('400');
+  });
+
+  it('documents the real attention queue and bounded bulk inputs', () => {
+    expect(document.components.schemas.AttentionOrder.properties.reason.enum).toEqual([
+      'free_text',
+      'sms_only',
+      'invalid_number',
+      'late_confirm'
+    ]);
+    expect(document.components.schemas.BulkOrderInput.properties.orderIds.maxItems).toBe(100);
+    expect(paths['/api/orders/bulk/confirm'].post.responses).toHaveProperty('207');
   });
 });

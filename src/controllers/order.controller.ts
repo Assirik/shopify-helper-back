@@ -1,7 +1,8 @@
 import { Request, Response } from 'express';
 import { Types } from 'mongoose';
 import { Message } from '../models/Message';
-import { CustomerConfirmationStatus, NotificationStatus, Order } from '../models/Order';
+import { AttentionReasonCode, CustomerConfirmationStatus, IOrder, NotificationStatus, Order } from '../models/Order';
+import { getOrderActionCapabilities } from '../utilities/services/orderCapabilities.service';
 import { OrderConfirmationError, OrderConfirmationService } from '../utilities/services/orderConfirmation.service';
 import log from '../utilities/logger/logger';
 
@@ -35,6 +36,52 @@ const createPagination = (page: number, limit: number, total: number) => {
   };
 };
 
+const MAX_BULK_ORDERS = 100;
+const BULK_CONCURRENCY = 5;
+
+export const parseBulkOrderIds = (value: unknown) => {
+  if (!Array.isArray(value) || value.length === 0 || value.length > MAX_BULK_ORDERS) {
+    return undefined;
+  }
+
+  const ids = [...new Set(value)];
+  if (ids.length !== value.length || !ids.every(id => typeof id === 'string' && Types.ObjectId.isValid(id))) {
+    return undefined;
+  }
+
+  return ids as string[];
+};
+
+const runWithConcurrency = async <T>(items: string[], task: (item: string) => Promise<T>) => {
+  const results: Array<PromiseSettledResult<T> & { orderId: string }> = [];
+  let cursor = 0;
+
+  const worker = async () => {
+    while (cursor < items.length) {
+      const index = cursor;
+      cursor += 1;
+      const orderId = items[index];
+
+      try {
+        results[index] = { status: 'fulfilled', value: await task(orderId), orderId };
+      } catch (reason) {
+        results[index] = { status: 'rejected', reason, orderId };
+      }
+    }
+  };
+
+  await Promise.all(Array.from({ length: Math.min(BULK_CONCURRENCY, items.length) }, worker));
+  return results;
+};
+
+const toBulkFailure = (orderId: string, reason: unknown) => {
+  if (reason instanceof OrderConfirmationError) {
+    return { orderId, error: reason.code, status: reason.status };
+  }
+
+  return { orderId, error: 'InternalError', status: 500 };
+};
+
 const buildMessageSummary = (messages: Array<{ channel: string; provider: string; status: string }>) => {
   return messages.reduce(
     (summary, message) => {
@@ -54,7 +101,133 @@ const buildMessageSummary = (messages: Array<{ channel: string; provider: string
   );
 };
 
+export const toAttentionOrder = (order: IOrder) => ({
+  id: order._id.toString(),
+  orderName: order.shopifyOrderName,
+  customerName: order.customerName || 'Client non renseigné',
+  customerPhone: order.customerPhoneE164 || order.customerPhoneRaw || '',
+  region: order.deliveryRegion || order.shippingRegion || 'Non renseignée',
+  amount: {
+    value: order.totalPrice,
+    currency: order.currency
+  },
+  isCashOnDelivery: order.isCashOnDelivery,
+  reason: order.attentionReasonCode,
+  lastCustomerMessage: order.lastCustomerMessageText || '',
+  receivedAt: order.attentionRequiredAt || order.lastCustomerMessageAt || order.updatedAt || order.createdAt,
+  customerConfirmationStatus: order.customerConfirmationStatus,
+  capabilities: getOrderActionCapabilities(order)
+});
+
 export class OrderController {
+  public static async bulkConfirm(req: Request, res: Response) {
+    const orderIds = parseBulkOrderIds(req.body?.orderIds);
+    if (!orderIds) return res.status(400).json({ error: 'InvalidOrderIds' });
+
+    const results = await runWithConcurrency(orderIds, orderId => OrderConfirmationService.confirmByAdmin(orderId));
+    const succeeded = results
+      .filter(result => result.status === 'fulfilled')
+      .map(result => ({ orderId: result.orderId }));
+    const failed = results
+      .filter((result): result is PromiseRejectedResult & { orderId: string } => result.status === 'rejected')
+      .map(result => toBulkFailure(result.orderId, result.reason));
+
+    log.info(
+      { adminId: req.userId, requested: orderIds.length, succeeded: succeeded.length, failed: failed.length },
+      'Bulk order confirmation completed'
+    );
+
+    return res.status(failed.length ? 207 : 200).json({
+      data: {
+        requested: orderIds.length,
+        succeeded,
+        failed,
+        summary: { succeeded: succeeded.length, failed: failed.length }
+      }
+    });
+  }
+
+  public static async bulkRemind(req: Request, res: Response) {
+    const orderIds = parseBulkOrderIds(req.body?.orderIds);
+    if (!orderIds) return res.status(400).json({ error: 'InvalidOrderIds' });
+
+    const results = await runWithConcurrency(orderIds, orderId => OrderConfirmationService.remindByAdmin(orderId));
+    const succeeded = results
+      .filter(result => result.status === 'fulfilled')
+      .map(result => ({ orderId: result.orderId }));
+    const failed = results
+      .filter((result): result is PromiseRejectedResult & { orderId: string } => result.status === 'rejected')
+      .map(result => toBulkFailure(result.orderId, result.reason));
+
+    log.info(
+      { adminId: req.userId, requested: orderIds.length, succeeded: succeeded.length, failed: failed.length },
+      'Bulk order reminder completed'
+    );
+
+    return res.status(failed.length ? 207 : 200).json({
+      data: {
+        requested: orderIds.length,
+        succeeded,
+        failed,
+        summary: { succeeded: succeeded.length, failed: failed.length }
+      }
+    });
+  }
+
+  public static async attentionQueue(req: Request, res: Response) {
+    const page = toPositiveInteger(req.query.page, 1);
+    const limit = Math.min(toPositiveInteger(req.query.limit, DEFAULT_LIMIT), MAX_LIMIT);
+    const reason = toStringFilter(req.query.reason);
+
+    if (reason && !Object.values(AttentionReasonCode).includes(reason as AttentionReasonCode)) {
+      return res.status(400).json({ error: 'InvalidAttentionReason' });
+    }
+
+    const filters: Record<string, unknown> = {
+      needsHelpdeskAttention: true,
+      attentionReasonCode: reason ? reason : { $in: Object.values(AttentionReasonCode) }
+    };
+
+    const [orders, total, groupedCounts] = await Promise.all([
+      Order.find(filters)
+        .sort({ attentionRequiredAt: -1, createdAt: -1 })
+        .skip((page - 1) * limit)
+        .limit(limit),
+      Order.countDocuments(filters),
+      Order.aggregate<{ _id: AttentionReasonCode; count: number }>([
+        {
+          $match: {
+            needsHelpdeskAttention: true,
+            attentionReasonCode: { $in: Object.values(AttentionReasonCode) }
+          }
+        },
+        { $group: { _id: '$attentionReasonCode', count: { $sum: 1 } } }
+      ])
+    ]);
+
+    const counts = Object.values(AttentionReasonCode).reduce(
+      (result, code) => {
+        result[code] = groupedCounts.find(item => item._id === code)?.count || 0;
+        return result;
+      },
+      {
+        all: groupedCounts.reduce((sum, item) => sum + item.count, 0),
+        free_text: 0,
+        sms_only: 0,
+        invalid_number: 0,
+        late_confirm: 0
+      } as Record<'all' | AttentionReasonCode, number>
+    );
+
+    log.info({ page, limit, reason: reason || 'all', total, returned: orders.length }, 'Listed attention queue');
+
+    return res.status(200).json({
+      data: orders.map(toAttentionOrder),
+      counts,
+      pagination: createPagination(page, limit, total)
+    });
+  }
+
   public static async list(req: Request, res: Response) {
     const page = toPositiveInteger(req.query.page, 1);
     const limit = Math.min(toPositiveInteger(req.query.limit, DEFAULT_LIMIT), MAX_LIMIT);
