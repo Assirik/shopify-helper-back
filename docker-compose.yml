@@ -2,6 +2,7 @@ services:
   api:
     build:
       context: .
+      dockerfile: Dockerfile
     working_dir: /app
     env_file:
       - .env
