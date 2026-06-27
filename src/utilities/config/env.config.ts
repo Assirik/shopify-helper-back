@@ -6,9 +6,10 @@ const port = Number(process.env.PORT) || 3600;
 const apiEndpoint = process.env.API_ENDPOINT || `http://localhost:${port}`;
 const ngrokEndpoint = process.env.NGROK_ENDPOINT || '';
 const productionApiEndpoint = process.env.PRODUCTION_API_ENDPOINT || '';
-const allowedOrigins = process.env.ALLOWED_ORIGINS
-  ? process.env.ALLOWED_ORIGINS.split(',').map(origin => origin.trim())
-  : '*';
+const allowedOrigins =
+  !process.env.ALLOWED_ORIGINS || process.env.ALLOWED_ORIGINS.trim() === '*'
+    ? '*'
+    : process.env.ALLOWED_ORIGINS.split(',').map(origin => origin.trim());
 const jwtSecret = process.env.JWT_SECRET || 'change-me-in-env';
 const initialAdminBootstrapSecret = process.env.INITIAL_ADMIN_BOOTSTRAP_SECRET || '';
 
