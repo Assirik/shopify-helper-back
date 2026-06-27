@@ -6,6 +6,7 @@ import { swaggerSpec } from './docs/swagger.config';
 import router from './routes/routes';
 import config from './utilities/config/env.config';
 import { errorHandler } from './middlewares/errorHandler';
+import log from './utilities/logger/logger';
 
 const app = express();
 
@@ -17,6 +18,7 @@ const captureRawBody = (req: IncomingMessage, _res: ServerResponse, buffer: Buff
 
 app.use(express.json({ limit: '1mb', verify: captureRawBody }));
 app.use(express.urlencoded({ extended: false }));
+log.info(`Allowed origins: ${config.allowedOrigins}`);
 app.use(cors({ origin: config.allowedOrigins }));
 
 app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
