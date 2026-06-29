@@ -108,4 +108,10 @@ describe('order controller list filters', () => {
       customerConfirmationStatus: CustomerConfirmationStatus.NEEDS_ATTENTION
     });
   });
+
+  it('filters operational statuses', () => {
+    expect(buildOrderListFilters({ operationalStatus: 'to_deliver' }).filters).toEqual({
+      operationalStatus: 'to_deliver'
+    });
+  });
 });
