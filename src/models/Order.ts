@@ -142,6 +142,7 @@ const OrderSchema = new Schema<IOrder>(
     operationalStatus: { type: String, enum: Object.values(OrderOperationalStatus), index: true },
     deliveryChannel: { type: String, enum: Object.values(DeliveryChannel) },
     assignedCourierId: { type: Schema.Types.ObjectId, ref: 'Courier', index: true },
+    assignedCarrierId: { type: Schema.Types.ObjectId, ref: 'Carrier', index: true },
     carrierTrackingNumber: { type: String, trim: true },
     dispatchedAt: { type: Date },
     deliveredAt: { type: Date },
@@ -150,6 +151,7 @@ const OrderSchema = new Schema<IOrder>(
     codExpectedAmount: { type: Number },
     codCollectedAmount: { type: Number },
     courierFeeAmount: { type: Number },
+    carrierFeeAmount: { type: Number },
     codNetRemitted: { type: Number },
     codPaymentStatus: { type: String, enum: Object.values(CodPaymentStatus) },
     collectedAt: { type: Date }
@@ -166,6 +168,7 @@ OrderSchema.index({ isCashOnDelivery: 1, createdAt: -1 });
 OrderSchema.index({ needsHelpdeskAttention: 1, attentionReasonCode: 1, attentionRequiredAt: -1 });
 OrderSchema.index({ operationalStatus: 1, createdAt: -1 });
 OrderSchema.index({ assignedCourierId: 1, deliveredAt: 1 });
+OrderSchema.index({ assignedCarrierId: 1, deliveredAt: 1 });
 OrderSchema.index({ deliveredAt: 1 });
 OrderSchema.index({ shopifyOrderName: 'text', customerPhoneE164: 'text', customerPhoneRaw: 'text' });
 
@@ -233,6 +236,7 @@ export interface IOrder extends Document {
   operationalStatus?: OrderOperationalStatus;
   deliveryChannel?: DeliveryChannel;
   assignedCourierId?: Types.ObjectId;
+  assignedCarrierId?: Types.ObjectId;
   carrierTrackingNumber?: string;
   dispatchedAt?: Date;
   deliveredAt?: Date;
@@ -241,6 +245,7 @@ export interface IOrder extends Document {
   codExpectedAmount?: number;
   codCollectedAmount?: number;
   courierFeeAmount?: number;
+  carrierFeeAmount?: number;
   codNetRemitted?: number;
   codPaymentStatus?: CodPaymentStatus;
   collectedAt?: Date;

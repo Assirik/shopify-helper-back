@@ -56,6 +56,7 @@ export default {
     sweepIntervalMinutes: Number(process.env.CONFIRMATION_SWEEP_INTERVAL_MINUTES) || 30
   },
   delivery: {
-    defaultFee: Number(process.env.DELIVERY_DEFAULT_FEE) || 0
+    defaultFee: Number(process.env.DELIVERY_DEFAULT_FEE) || 0,
+    defaultCarrierFee: Number(process.env.DELIVERY_DEFAULT_CARRIER_FEE) || 2000
   }
 };

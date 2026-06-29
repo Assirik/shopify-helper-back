@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, jest } from '@jest/globals';
 import { Types } from 'mongoose';
+import { Carrier } from '../../models/Carrier';
 import { Courier } from '../../models/Courier';
 import { OrderEvent } from '../../models/OrderEvent';
 import { CodPaymentStatus, DeliveryChannel, Order, OrderOperationalStatus } from '../../models/Order';
@@ -77,33 +78,73 @@ describe('order fulfillment service', () => {
     [25000, 25000, CodPaymentStatus.PAID],
     [12000, 25000, CodPaymentStatus.PARTIAL],
     [0, 25000, CodPaymentStatus.UNPAID]
-  ])('delivers and records COD status %s/%s as %s', async (collectedAmount, expectedAmount, paymentStatus) => {
+  ])(
+    'delivers an internal order and records COD status %s/%s as %s',
+    async (collectedAmount, expectedAmount, paymentStatus) => {
+      const currentOrder = {
+        _id: orderId,
+        totalPrice: String(expectedAmount),
+        deliveryRegionCode: 'SN_DK',
+        deliveryChannel: DeliveryChannel.INTERNAL,
+        assignedCourierId: courierId,
+        operationalStatus: OrderOperationalStatus.IN_DELIVERY
+      };
+      const updatedOrder = { ...currentOrder, operationalStatus: OrderOperationalStatus.DELIVERED };
+
+      jest.spyOn(Order, 'findById').mockResolvedValue(currentOrder as never);
+      jest.spyOn(DeliveryFeeConfigService, 'resolveDeliveryFee').mockResolvedValue(1500);
+      const update = jest.spyOn(Order, 'findOneAndUpdate').mockResolvedValue(updatedOrder as never);
+      jest.spyOn(OrderEvent, 'create').mockResolvedValue({} as never);
+
+      await expect(
+        OrderFulfillmentService.deliver(orderId.toString(), { collectedAmount })
+      ).resolves.toEqual(updatedOrder);
+
+      expect(update.mock.calls[0]?.[1]).toEqual(
+        expect.objectContaining({
+          $set: expect.objectContaining({
+            codExpectedAmount: expectedAmount,
+            codCollectedAmount: collectedAmount,
+            courierFeeAmount: 1500,
+            carrierFeeAmount: 0,
+            codNetRemitted: collectedAmount - 1500,
+            codPaymentStatus: paymentStatus,
+            operationalStatus: OrderOperationalStatus.DELIVERED
+          })
+        })
+      );
+    }
+  );
+
+  it('delivers a carrier order: deducts both courier remuneration and carrier cost from net', async () => {
+    const carrierId = new Types.ObjectId();
     const currentOrder = {
       _id: orderId,
-      totalPrice: String(expectedAmount),
-      deliveryRegionCode: 'SN_DK',
+      totalPrice: '25000',
+      deliveryRegionCode: 'SN_ZG',
+      deliveryChannel: DeliveryChannel.CARRIER,
+      assignedCourierId: courierId,
+      assignedCarrierId: carrierId,
+      shippingPrice: '2000',
       operationalStatus: OrderOperationalStatus.IN_DELIVERY
     };
     const updatedOrder = { ...currentOrder, operationalStatus: OrderOperationalStatus.DELIVERED };
 
     jest.spyOn(Order, 'findById').mockResolvedValue(currentOrder as never);
+    // Pas de defaultPrice transporteur -> repli sur shippingPrice (2000).
+    jest.spyOn(Carrier, 'findById').mockResolvedValue({ _id: carrierId } as never);
     jest.spyOn(DeliveryFeeConfigService, 'resolveDeliveryFee').mockResolvedValue(1500);
     const update = jest.spyOn(Order, 'findOneAndUpdate').mockResolvedValue(updatedOrder as never);
     jest.spyOn(OrderEvent, 'create').mockResolvedValue({} as never);
 
-    await expect(
-      OrderFulfillmentService.deliver(orderId.toString(), { collectedAmount })
-    ).resolves.toEqual(updatedOrder);
+    await OrderFulfillmentService.deliver(orderId.toString(), {});
 
     expect(update.mock.calls[0]?.[1]).toEqual(
       expect.objectContaining({
         $set: expect.objectContaining({
-          codExpectedAmount: expectedAmount,
-          codCollectedAmount: collectedAmount,
           courierFeeAmount: 1500,
-          codNetRemitted: collectedAmount - 1500,
-          codPaymentStatus: paymentStatus,
-          operationalStatus: OrderOperationalStatus.DELIVERED
+          carrierFeeAmount: 2000,
+          codNetRemitted: 25000 - 1500 - 2000
         })
       })
     );

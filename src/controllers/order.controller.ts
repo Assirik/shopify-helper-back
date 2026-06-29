@@ -526,6 +526,7 @@ export class OrderController {
         {
           channel: req.body?.channel as DeliveryChannel,
           courierId: typeof req.body?.courierId === 'string' ? req.body.courierId : undefined,
+          carrierId: typeof req.body?.carrierId === 'string' ? req.body.carrierId : undefined,
           trackingNumber: typeof req.body?.trackingNumber === 'string' ? req.body.trackingNumber : undefined
         },
         req.userId
@@ -545,6 +546,7 @@ export class OrderController {
     const id = typeof req.params.id === 'string' ? req.params.id : '';
     const collectedAmount = req.body?.collectedAmount === undefined ? undefined : Number(req.body.collectedAmount);
     const courierFee = req.body?.courierFee === undefined ? undefined : Number(req.body.courierFee);
+    const carrierFee = req.body?.carrierFee === undefined ? undefined : Number(req.body.carrierFee);
 
     try {
       const order = await OrderFulfillmentService.deliver(
@@ -552,6 +554,7 @@ export class OrderController {
         {
           collectedAmount,
           courierFee,
+          carrierFee,
           note: typeof req.body?.note === 'string' ? req.body.note : undefined
         },
         req.userId

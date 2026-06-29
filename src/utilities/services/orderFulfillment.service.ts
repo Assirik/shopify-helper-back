@@ -1,12 +1,15 @@
 import { Types } from 'mongoose';
+import { Carrier } from '../../models/Carrier';
 import { Courier } from '../../models/Courier';
 import { OrderEvent, OrderEventType } from '../../models/OrderEvent';
 import {
   CodPaymentStatus,
   DeliveryChannel,
+  IOrder,
   Order,
   OrderOperationalStatus
 } from '../../models/Order';
+import config from '../config/env.config';
 import { DeliveryFeeConfigService } from './deliveryFeeConfig.service';
 
 export class OrderFulfillmentError extends Error {
@@ -24,12 +27,14 @@ export class OrderFulfillmentError extends Error {
 export interface DispatchOrderInput {
   channel?: DeliveryChannel;
   courierId?: string;
+  carrierId?: string;
   trackingNumber?: string;
 }
 
 export interface DeliverOrderInput {
   collectedAmount?: number;
   courierFee?: number;
+  carrierFee?: number;
   note?: string;
 }
 
@@ -87,6 +92,56 @@ const getOrderOrThrow = async (orderId: string) => {
   return order;
 };
 
+const loadActiveCourier = async (courierId?: string) => {
+  if (!courierId || !Types.ObjectId.isValid(courierId)) {
+    throw new OrderFulfillmentError('CourierRequired', 'An active courier is required', 400);
+  }
+
+  const courier = await Courier.findById(courierId);
+  if (!courier) {
+    throw new OrderFulfillmentError('CourierNotFound', 'Courier not found', 404);
+  }
+  if (!courier.isActive) {
+    throw new OrderFulfillmentError('CourierInactive', 'Courier is inactive', 409);
+  }
+
+  return courier;
+};
+
+const loadActiveCarrier = async (carrierId?: string) => {
+  if (!carrierId || !Types.ObjectId.isValid(carrierId)) {
+    throw new OrderFulfillmentError('CarrierRequired', 'A carrier is required', 400);
+  }
+
+  const carrier = await Carrier.findById(carrierId);
+  if (!carrier) {
+    throw new OrderFulfillmentError('CarrierNotFound', 'Carrier not found', 404);
+  }
+  if (!carrier.isActive) {
+    throw new OrderFulfillmentError('CarrierInactive', 'Carrier is inactive', 409);
+  }
+
+  return carrier;
+};
+
+// Coût d'une livraison transporteur tiers (hors Dakar) : prix indicatif du transporteur,
+// sinon le shipping facturé au client (déjà dans l'order), sinon le défaut de config.
+const resolveCarrierFee = async (order: Pick<IOrder, 'assignedCarrierId' | 'shippingPrice'>) => {
+  if (order.assignedCarrierId) {
+    const carrier = await Carrier.findById(order.assignedCarrierId);
+    if (carrier && typeof carrier.defaultPrice === 'number') {
+      return carrier.defaultPrice;
+    }
+  }
+
+  const shippingPrice = Number(order.shippingPrice);
+  if (Number.isFinite(shippingPrice) && shippingPrice >= 0) {
+    return shippingPrice;
+  }
+
+  return config.delivery.defaultCarrierFee;
+};
+
 export class OrderFulfillmentService {
   public static async dispatch(orderId: string, input: DispatchOrderInput, actorId?: string) {
     ensureObjectId(orderId);
@@ -104,25 +159,29 @@ export class OrderFulfillmentService {
     const metadata: Record<string, unknown> = { channel: input.channel };
 
     if (input.channel === DeliveryChannel.INTERNAL) {
-      if (!input.courierId || !Types.ObjectId.isValid(input.courierId)) {
-        throw new OrderFulfillmentError('CourierRequired', 'An active courier is required', 400);
-      }
-
-      const courier = await Courier.findById(input.courierId);
-      if (!courier) {
-        throw new OrderFulfillmentError('CourierNotFound', 'Courier not found', 404);
-      }
-      if (!courier.isActive) {
-        throw new OrderFulfillmentError('CourierInactive', 'Courier is inactive', 409);
-      }
+      const courier = await loadActiveCourier(input.courierId);
 
       update.assignedCourierId = courier._id;
       unset.carrierTrackingNumber = '';
+      unset.assignedCarrierId = '';
       metadata.courierId = courier._id.toString();
     } else {
+      const carrier = await loadActiveCarrier(input.carrierId);
+
+      update.assignedCarrierId = carrier._id;
       update.carrierTrackingNumber = input.trackingNumber?.trim() || undefined;
-      unset.assignedCourierId = '';
+      metadata.carrierId = carrier._id.toString();
       metadata.trackingNumber = input.trackingNumber?.trim();
+
+      // Livreur interne qui amène le colis au transporteur et détient le cash encaissé
+      // (optionnel : il porte la rémunération livreur et apparaît au rapprochement caisse).
+      if (input.courierId) {
+        const courier = await loadActiveCourier(input.courierId);
+        update.assignedCourierId = courier._id;
+        metadata.courierId = courier._id.toString();
+      } else {
+        unset.assignedCourierId = '';
+      }
     }
 
     const order = await Order.findOneAndUpdate(
@@ -170,10 +229,22 @@ export class OrderFulfillmentService {
 
     ensureMoneyAmount(codCollectedAmount, 'InvalidCollectedAmount');
 
-    const courierFeeAmount = input.courierFee ?? (await DeliveryFeeConfigService.resolveDeliveryFee(currentOrder.deliveryRegionCode));
+    // Rémunération du livreur interne (barème région) : uniquement si un livreur est assigné.
+    const courierFeeAmount =
+      input.courierFee ??
+      (currentOrder.assignedCourierId
+        ? await DeliveryFeeConfigService.resolveDeliveryFee(currentOrder.deliveryRegionCode)
+        : 0);
     ensureMoneyAmount(courierFeeAmount, 'InvalidCourierFee');
 
-    const codNetRemitted = codCollectedAmount - courierFeeAmount;
+    // Coût du transporteur tiers : uniquement pour le canal carrier (hors Dakar).
+    const carrierFeeAmount =
+      currentOrder.deliveryChannel === DeliveryChannel.CARRIER
+        ? input.carrierFee ?? (await resolveCarrierFee(currentOrder))
+        : 0;
+    ensureMoneyAmount(carrierFeeAmount, 'InvalidCarrierFee');
+
+    const codNetRemitted = codCollectedAmount - courierFeeAmount - carrierFeeAmount;
     const codPaymentStatus = getCodPaymentStatus(codCollectedAmount, codExpectedAmount);
     const now = new Date();
 
@@ -185,6 +256,7 @@ export class OrderFulfillmentService {
           codExpectedAmount,
           codCollectedAmount,
           courierFeeAmount,
+          carrierFeeAmount,
           codNetRemitted,
           codPaymentStatus,
           deliveredAt: now,
@@ -202,6 +274,7 @@ export class OrderFulfillmentService {
       expectedAmount: codExpectedAmount,
       collectedAmount: codCollectedAmount,
       courierFee: courierFeeAmount,
+      carrierFee: carrierFeeAmount,
       netRemitted: codNetRemitted,
       codPaymentStatus
     };

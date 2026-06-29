@@ -1,5 +1,5 @@
 import { Types } from 'mongoose';
-import { CodPaymentStatus, DeliveryChannel, Order, OrderOperationalStatus } from '../../models/Order';
+import { CodPaymentStatus, Order, OrderOperationalStatus } from '../../models/Order';
 
 export interface ReconciliationQuery {
   date?: string;
@@ -53,7 +53,10 @@ export class ReconciliationService {
       match.assignedCourierId = new Types.ObjectId(query.courierId);
     }
 
-    const rows = await Order.aggregate([
+    // Ledger CAISSE : groupé par livreur interne qui détient le cash encaissé.
+    // Le net dû en caisse = encaissé − rémunération livreur − coût transporteur (déjà
+    // défalqués et stockés dans codNetRemitted par le service de livraison).
+    const courierRows = await Order.aggregate([
       { $match: match },
       {
         $lookup: {
@@ -66,14 +69,12 @@ export class ReconciliationService {
       { $unwind: { path: '$courier', preserveNullAndEmptyArrays: true } },
       {
         $group: {
-          _id: {
-            courierId: '$assignedCourierId',
-            channel: '$deliveryChannel'
-          },
+          _id: '$assignedCourierId',
           courierName: { $first: '$courier.name' },
           deliveredOrders: { $sum: 1 },
           totalCollected: { $sum: { $ifNull: ['$codCollectedAmount', 0] } },
           totalCourierFees: { $sum: { $ifNull: ['$courierFeeAmount', 0] } },
+          totalCarrierFees: { $sum: { $ifNull: ['$carrierFeeAmount', 0] } },
           totalNetRemitted: { $sum: { $ifNull: ['$codNetRemitted', 0] } },
           discrepancies: {
             $push: {
@@ -96,27 +97,56 @@ export class ReconciliationService {
       { $sort: { courierName: 1 } }
     ]);
 
-    const groups = rows.map(row => ({
-      courierId: row._id.courierId?.toString(),
-      courierName:
-        row.courierName ||
-        (row._id.channel === DeliveryChannel.CARRIER ? 'Transporteur tiers' : 'Livreur non assigne'),
-      deliveryChannel: row._id.channel || DeliveryChannel.CARRIER,
+    // Ledger TRANSPORTEURS : montant dû à chaque transporteur tiers (ce qu'on doit payer).
+    const carrierRows = await Order.aggregate([
+      { $match: { ...match, assignedCarrierId: { $ne: null } } },
+      {
+        $lookup: {
+          from: 'carriers',
+          localField: 'assignedCarrierId',
+          foreignField: '_id',
+          as: 'carrier'
+        }
+      },
+      { $unwind: { path: '$carrier', preserveNullAndEmptyArrays: true } },
+      {
+        $group: {
+          _id: '$assignedCarrierId',
+          carrierName: { $first: '$carrier.name' },
+          deliveredOrders: { $sum: 1 },
+          totalDue: { $sum: { $ifNull: ['$carrierFeeAmount', 0] } }
+        }
+      },
+      { $sort: { carrierName: 1 } }
+    ]);
+
+    const couriers = courierRows.map(row => ({
+      courierId: row._id?.toString(),
+      courierName: row.courierName || 'Livreur non assigné',
       deliveredOrders: row.deliveredOrders,
       totalCollected: row.totalCollected,
-      totalCourierFees: row._id.channel === DeliveryChannel.CARRIER ? 0 : row.totalCourierFees,
-      totalNetRemitted:
-        row._id.channel === DeliveryChannel.CARRIER ? row.totalCollected : row.totalNetRemitted,
+      totalCourierFees: row.totalCourierFees,
+      totalCarrierFees: row.totalCarrierFees,
+      totalNetRemitted: row.totalNetRemitted,
       discrepancies: row.discrepancies || []
+    }));
+
+    const carriers = carrierRows.map(row => ({
+      carrierId: row._id?.toString(),
+      carrierName: row.carrierName || 'Transporteur inconnu',
+      deliveredOrders: row.deliveredOrders,
+      totalDue: row.totalDue
     }));
 
     return {
       date: range.start.toISOString().slice(0, 10),
-      totals: groups.reduce(
+      // Totaux calculés sur le ledger caisse, qui couvre toutes les commandes livrées une fois.
+      totals: couriers.reduce(
         (sum, group) => ({
           deliveredOrders: sum.deliveredOrders + group.deliveredOrders,
           totalCollected: sum.totalCollected + group.totalCollected,
           totalCourierFees: sum.totalCourierFees + group.totalCourierFees,
+          totalCarrierFees: sum.totalCarrierFees + group.totalCarrierFees,
           totalNetRemitted: sum.totalNetRemitted + group.totalNetRemitted,
           discrepancyCount: sum.discrepancyCount + group.discrepancies.length
         }),
@@ -124,11 +154,13 @@ export class ReconciliationService {
           deliveredOrders: 0,
           totalCollected: 0,
           totalCourierFees: 0,
+          totalCarrierFees: 0,
           totalNetRemitted: 0,
           discrepancyCount: 0
         }
       ),
-      groups
+      couriers,
+      carriers
     };
   }
 }

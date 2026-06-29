@@ -7,56 +7,59 @@ afterEach(() => {
 });
 
 describe('reconciliation service', () => {
-  it('aggregates delivered orders by courier for a date', async () => {
-    jest.spyOn(Order, 'aggregate').mockResolvedValue([
-      {
-        _id: { courierId: undefined, channel: 'carrier' },
-        deliveredOrders: 1,
-        totalCollected: 20000,
-        totalCourierFees: 1500,
-        totalNetRemitted: 18500,
-        discrepancies: []
-      },
-      {
-        _id: { courierId: { toString: () => 'courier-1' }, channel: 'internal' },
-        courierName: 'Moussa',
-        deliveredOrders: 2,
-        totalCollected: 50000,
-        totalCourierFees: 3000,
-        totalNetRemitted: 47000,
-        discrepancies: [{ orderName: '#1' }]
-      }
-    ] as never);
+  it('aggregates delivered orders into a cash ledger (couriers) and a payables ledger (carriers)', async () => {
+    // 1er appel = ledger caisse (par livreur) ; 2e appel = ledger transporteurs.
+    jest
+      .spyOn(Order, 'aggregate')
+      .mockResolvedValueOnce([
+        {
+          _id: { toString: () => 'courier-1' },
+          courierName: 'Moussa',
+          deliveredOrders: 2,
+          totalCollected: 50000,
+          totalCourierFees: 3000,
+          totalCarrierFees: 2000,
+          totalNetRemitted: 45000,
+          discrepancies: [{ orderName: '#1' }]
+        }
+      ] as never)
+      .mockResolvedValueOnce([
+        {
+          _id: { toString: () => 'carrier-1' },
+          carrierName: 'Dakar Dem Dikk',
+          deliveredOrders: 1,
+          totalDue: 2000
+        }
+      ] as never);
 
     await expect(ReconciliationService.summarize({ date: '2026-06-29' })).resolves.toEqual({
       date: '2026-06-29',
       totals: {
-        deliveredOrders: 3,
-        totalCollected: 70000,
+        deliveredOrders: 2,
+        totalCollected: 50000,
         totalCourierFees: 3000,
-        totalNetRemitted: 67000,
+        totalCarrierFees: 2000,
+        totalNetRemitted: 45000,
         discrepancyCount: 1
       },
-      groups: [
-        {
-          courierId: undefined,
-          courierName: 'Transporteur tiers',
-          deliveryChannel: 'carrier',
-          deliveredOrders: 1,
-          totalCollected: 20000,
-          totalCourierFees: 0,
-          totalNetRemitted: 20000,
-          discrepancies: []
-        },
+      couriers: [
         {
           courierId: 'courier-1',
           courierName: 'Moussa',
-          deliveryChannel: 'internal',
           deliveredOrders: 2,
           totalCollected: 50000,
           totalCourierFees: 3000,
-          totalNetRemitted: 47000,
+          totalCarrierFees: 2000,
+          totalNetRemitted: 45000,
           discrepancies: [{ orderName: '#1' }]
+        }
+      ],
+      carriers: [
+        {
+          carrierId: 'carrier-1',
+          carrierName: 'Dakar Dem Dikk',
+          deliveredOrders: 1,
+          totalDue: 2000
         }
       ]
     });
