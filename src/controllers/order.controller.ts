@@ -35,6 +35,29 @@ const toStringFilter = (value: unknown) => {
   return typeof value === 'string' ? value.trim() : '';
 };
 
+// Montant optionnel : `undefined` (champ omis) => repli côté service ; toute autre valeur
+// invalide (chaîne vide, null, non numérique, négative) => rejet, jamais de coercition en 0.
+export const parseOptionalAmount = (value: unknown): { ok: true; value?: number } | { ok: false } => {
+  if (value === undefined) {
+    return { ok: true, value: undefined };
+  }
+
+  if (typeof value !== 'number' && typeof value !== 'string') {
+    return { ok: false };
+  }
+
+  if (typeof value === 'string' && value.trim() === '') {
+    return { ok: false };
+  }
+
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return { ok: false };
+  }
+
+  return { ok: true, value: parsed };
+};
+
 const escapeRegExp = (value: string) => {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 };
@@ -544,17 +567,22 @@ export class OrderController {
 
   public static async deliver(req: Request, res: Response) {
     const id = typeof req.params.id === 'string' ? req.params.id : '';
-    const collectedAmount = req.body?.collectedAmount === undefined ? undefined : Number(req.body.collectedAmount);
-    const courierFee = req.body?.courierFee === undefined ? undefined : Number(req.body.courierFee);
-    const carrierFee = req.body?.carrierFee === undefined ? undefined : Number(req.body.carrierFee);
+    const collectedAmount = parseOptionalAmount(req.body?.collectedAmount);
+    if (!collectedAmount.ok) return res.status(400).json({ error: 'InvalidCollectedAmount' });
+
+    const courierFee = parseOptionalAmount(req.body?.courierFee);
+    if (!courierFee.ok) return res.status(400).json({ error: 'InvalidCourierFee' });
+
+    const carrierFee = parseOptionalAmount(req.body?.carrierFee);
+    if (!carrierFee.ok) return res.status(400).json({ error: 'InvalidCarrierFee' });
 
     try {
       const order = await OrderFulfillmentService.deliver(
         id,
         {
-          collectedAmount,
-          courierFee,
-          carrierFee,
+          collectedAmount: collectedAmount.value,
+          courierFee: courierFee.value,
+          carrierFee: carrierFee.value,
           note: typeof req.body?.note === 'string' ? req.body.note : undefined
         },
         req.userId

@@ -1,7 +1,13 @@
 import { describe, expect, it, jest } from '@jest/globals';
 import { Types } from 'mongoose';
 import { AttentionReasonCode, CustomerConfirmationStatus, IOrder } from '../models/Order';
-import { buildOrderListFilters, parseBulkOrderIds, toAttentionOrder, toOrderResponse } from './order.controller';
+import {
+  buildOrderListFilters,
+  parseBulkOrderIds,
+  parseOptionalAmount,
+  toAttentionOrder,
+  toOrderResponse
+} from './order.controller';
 
 jest.mock('../queues/notification.queue', () => ({
   enqueueConfirmationReminder: jest.fn(),
@@ -113,5 +119,20 @@ describe('order controller list filters', () => {
     expect(buildOrderListFilters({ operationalStatus: 'to_deliver' }).filters).toEqual({
       operationalStatus: 'to_deliver'
     });
+  });
+});
+
+describe('order controller optional amount parsing', () => {
+  it('treats an omitted value as a service-side fallback', () => {
+    expect(parseOptionalAmount(undefined)).toEqual({ ok: true, value: undefined });
+  });
+
+  it('accepts a finite non-negative number', () => {
+    expect(parseOptionalAmount(25000)).toEqual({ ok: true, value: 25000 });
+    expect(parseOptionalAmount(0)).toEqual({ ok: true, value: 0 });
+  });
+
+  it.each([null, '', '   ', 'abc', -1, NaN, {}])('rejects the invalid amount %p', value => {
+    expect(parseOptionalAmount(value)).toEqual({ ok: false });
   });
 });
