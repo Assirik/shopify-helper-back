@@ -70,7 +70,15 @@ describe('order controller attention contracts', () => {
         orderName: '#10428',
         reason: AttentionReasonCode.FREE_TEXT,
         receivedAt: now,
-        capabilities: { canConfirm: true, canRemind: false, canCancel: true }
+        capabilities: {
+          canConfirm: true,
+          canRemind: false,
+          canCancel: true,
+          canDispatch: false,
+          canDeliver: false,
+          canMarkFailed: false,
+          canReturn: false
+        }
       })
     );
   });
