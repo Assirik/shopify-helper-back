@@ -150,6 +150,10 @@ export class OrderFulfillmentService {
       throw new OrderFulfillmentError('InvalidDeliveryChannel', 'Invalid delivery channel', 400);
     }
 
+    // Statut courant capturé pour la timeline (distingue 1re expédition / réexpédition).
+    const currentOrder = await getOrderOrThrow(orderId);
+    const fromStatus = currentOrder.operationalStatus;
+
     const update: Record<string, unknown> = {
       operationalStatus: OrderOperationalStatus.IN_DELIVERY,
       deliveryChannel: input.channel,
@@ -197,17 +201,15 @@ export class OrderFulfillmentService {
     );
 
     if (!order) {
-      const exists = await Order.exists({ _id: orderId });
-      if (!exists) {
-        throw new OrderFulfillmentError('OrderNotFound', 'Order not found', 404);
-      }
+      // L'existence est déjà garantie par getOrderOrThrow ci-dessus : un échec ici signifie
+      // que le statut courant n'autorise pas l'expédition.
       throw new OrderFulfillmentError('OrderDispatchNotAllowed', 'Order cannot be dispatched from its current status', 409);
     }
 
     await createEvent({
       orderId: order._id,
       type: OrderEventType.DISPATCHED,
-      fromStatus: undefined,
+      fromStatus,
       toStatus: OrderOperationalStatus.IN_DELIVERY,
       actorId,
       metadata

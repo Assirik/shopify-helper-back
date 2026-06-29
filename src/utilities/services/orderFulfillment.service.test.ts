@@ -23,9 +23,12 @@ describe('order fulfillment service', () => {
       assignedCourierId: courierId
     };
 
+    jest
+      .spyOn(Order, 'findById')
+      .mockResolvedValue({ _id: orderId, operationalStatus: OrderOperationalStatus.TO_DELIVER } as never);
     jest.spyOn(Courier, 'findById').mockResolvedValue({ _id: courierId, isActive: true } as never);
     const update = jest.spyOn(Order, 'findOneAndUpdate').mockResolvedValue(updatedOrder as never);
-    jest.spyOn(OrderEvent, 'create').mockResolvedValue({} as never);
+    const createEvent = jest.spyOn(OrderEvent, 'create').mockResolvedValue({} as never);
 
     await expect(
       OrderFulfillmentService.dispatch(
@@ -48,12 +51,18 @@ describe('order fulfillment service', () => {
         })
       })
     );
+    // La timeline capture le statut d'origine réel (1re expédition vs réexpédition).
+    expect(createEvent.mock.calls[0]?.[0]).toEqual(
+      expect.objectContaining({ fromStatus: OrderOperationalStatus.TO_DELIVER })
+    );
   });
 
   it('blocks dispatch from an invalid operational status', async () => {
+    jest
+      .spyOn(Order, 'findById')
+      .mockResolvedValue({ _id: orderId, operationalStatus: OrderOperationalStatus.DELIVERED } as never);
     jest.spyOn(Courier, 'findById').mockResolvedValue({ _id: courierId, isActive: true } as never);
     jest.spyOn(Order, 'findOneAndUpdate').mockResolvedValue(null);
-    jest.spyOn(Order, 'exists').mockResolvedValue({ _id: orderId } as never);
 
     await expect(
       OrderFulfillmentService.dispatch(orderId.toString(), {
@@ -64,6 +73,9 @@ describe('order fulfillment service', () => {
   });
 
   it('requires an active courier for internal dispatch', async () => {
+    jest
+      .spyOn(Order, 'findById')
+      .mockResolvedValue({ _id: orderId, operationalStatus: OrderOperationalStatus.TO_DELIVER } as never);
     jest.spyOn(Courier, 'findById').mockResolvedValue({ _id: courierId, isActive: false } as never);
 
     await expect(
