@@ -76,8 +76,7 @@ describe('order fulfillment service', () => {
 
   it.each([
     [25000, 25000, CodPaymentStatus.PAID],
-    [12000, 25000, CodPaymentStatus.PARTIAL],
-    [0, 25000, CodPaymentStatus.UNPAID]
+    [12000, 25000, CodPaymentStatus.PARTIAL]
   ])(
     'delivers an internal order and records COD status %s/%s as %s',
     async (collectedAmount, expectedAmount, paymentStatus) => {
@@ -116,6 +115,34 @@ describe('order fulfillment service', () => {
     }
   );
 
+  it('records an unpaid delivery (0 collected, no fee to deduct)', async () => {
+    const currentOrder = {
+      _id: orderId,
+      totalPrice: '25000',
+      deliveryChannel: DeliveryChannel.INTERNAL,
+      operationalStatus: OrderOperationalStatus.IN_DELIVERY
+    };
+    const updatedOrder = { ...currentOrder, operationalStatus: OrderOperationalStatus.DELIVERED };
+
+    jest.spyOn(Order, 'findById').mockResolvedValue(currentOrder as never);
+    const update = jest.spyOn(Order, 'findOneAndUpdate').mockResolvedValue(updatedOrder as never);
+    jest.spyOn(OrderEvent, 'create').mockResolvedValue({} as never);
+
+    await OrderFulfillmentService.deliver(orderId.toString(), { collectedAmount: 0 });
+
+    expect(update.mock.calls[0]?.[1]).toEqual(
+      expect.objectContaining({
+        $set: expect.objectContaining({
+          codCollectedAmount: 0,
+          courierFeeAmount: 0,
+          carrierFeeAmount: 0,
+          codNetRemitted: 0,
+          codPaymentStatus: CodPaymentStatus.UNPAID
+        })
+      })
+    );
+  });
+
   it('delivers a carrier order: deducts both courier remuneration and carrier cost from net', async () => {
     const carrierId = new Types.ObjectId();
     const currentOrder = {
@@ -148,6 +175,24 @@ describe('order fulfillment service', () => {
         })
       })
     );
+  });
+
+  it('refuses to deliver when deducted fees exceed the collected amount', async () => {
+    jest.spyOn(Order, 'findById').mockResolvedValue({
+      _id: orderId,
+      totalPrice: '25000',
+      deliveryChannel: DeliveryChannel.INTERNAL,
+      assignedCourierId: courierId,
+      operationalStatus: OrderOperationalStatus.IN_DELIVERY
+    } as never);
+    const update = jest.spyOn(Order, 'findOneAndUpdate');
+
+    await expect(
+      OrderFulfillmentService.deliver(orderId.toString(), { collectedAmount: 1000, courierFee: 1500 })
+    ).rejects.toMatchObject({ code: 'InvalidCourierFee', status: 400 });
+
+    // Aucune écriture : pas de donnée incohérente persistée.
+    expect(update).not.toHaveBeenCalled();
   });
 
   it('blocks deliver from any status other than in_delivery', async () => {

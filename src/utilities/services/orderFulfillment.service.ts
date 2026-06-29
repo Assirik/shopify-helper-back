@@ -245,6 +245,13 @@ export class OrderFulfillmentService {
     ensureMoneyAmount(carrierFeeAmount, 'InvalidCarrierFee');
 
     const codNetRemitted = codCollectedAmount - courierFeeAmount - carrierFeeAmount;
+
+    // Jamais de net négatif : on refuse plutôt que de persister une caisse incohérente.
+    if (codNetRemitted < 0) {
+      const code = courierFeeAmount > codCollectedAmount ? 'InvalidCourierFee' : 'InvalidCarrierFee';
+      throw new OrderFulfillmentError(code, 'Deducted fees cannot exceed the collected amount', 400);
+    }
+
     const codPaymentStatus = getCodPaymentStatus(codCollectedAmount, codExpectedAmount);
     const now = new Date();
 
