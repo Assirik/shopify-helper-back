@@ -1,11 +1,13 @@
 import { Types } from 'mongoose';
 import { Message, MessageChannel, MessageProvider, MessageStatus, TemplatePurpose } from '../../models/Message';
+import { OrderEvent, OrderEventType } from '../../models/OrderEvent';
 import {
   AttentionReasonCode,
   ConfirmationSource,
   CustomerConfirmationStatus,
   IOrder,
   Order,
+  OrderOperationalStatus,
   ReminderSource
 } from '../../models/Order';
 import {
@@ -131,6 +133,29 @@ const CONFIRMABLE_BY_BUTTON = [
   CustomerConfirmationStatus.SMS_ONLY
 ];
 
+const toActorObjectId = (actorId?: string) =>
+  actorId && Types.ObjectId.isValid(actorId) ? new Types.ObjectId(actorId) : undefined;
+
+const createOrderEvent = (input: {
+  orderId: Types.ObjectId;
+  type: OrderEventType;
+  fromStatus?: string;
+  toStatus?: string;
+  actorId?: string;
+  note?: string;
+  metadata?: Record<string, unknown>;
+}) => {
+  return OrderEvent.create({
+    orderId: input.orderId,
+    type: input.type,
+    fromStatus: input.fromStatus,
+    toStatus: input.toStatus,
+    actorId: toActorObjectId(input.actorId),
+    note: input.note,
+    metadata: input.metadata
+  });
+};
+
 export class OrderConfirmationService {
   public static async confirmByWhatsAppButton(orderId: string, payload: WhatsAppButtonConfirmation) {
     ensureObjectId(orderId);
@@ -150,7 +175,8 @@ export class OrderConfirmationService {
           lastCustomerMessageAt: now,
           lastCustomerMessageText,
           confirmationPayload: payload,
-          needsHelpdeskAttention: false
+          needsHelpdeskAttention: false,
+          operationalStatus: OrderOperationalStatus.TO_DELIVER
         },
         $unset: { attentionReason: '', attentionReasonCode: '', attentionRequiredAt: '' }
       },
@@ -158,6 +184,12 @@ export class OrderConfirmationService {
     );
 
     if (confirmed) {
+      await createOrderEvent({
+        orderId: confirmed._id,
+        type: OrderEventType.CONFIRMED,
+        toStatus: OrderOperationalStatus.TO_DELIVER,
+        metadata: { source: ConfirmationSource.WHATSAPP_BUTTON }
+      });
       const { message, job } = await enqueueConfirmedTemplate(confirmed._id);
       return { order: confirmed, message, job, alreadyConfirmed: false, needsAttention: false };
     }
@@ -182,17 +214,19 @@ export class OrderConfirmationService {
     return { order, message: undefined, job: undefined, alreadyConfirmed: false, needsAttention: true };
   }
 
-  public static async confirmByAdmin(orderId: string) {
+  public static async confirmByAdmin(orderId: string, actorId?: string) {
     ensureObjectId(orderId);
 
+    const now = new Date();
     const order = await Order.findOneAndUpdate(
       { _id: orderId, customerConfirmationStatus: { $in: CONFIRMABLE_BY_ADMIN } },
       {
         $set: {
           customerConfirmationStatus: CustomerConfirmationStatus.CONFIRMED,
           confirmationSource: ConfirmationSource.ADMIN,
-          confirmedAt: new Date(),
-          needsHelpdeskAttention: false
+          confirmedAt: now,
+          needsHelpdeskAttention: false,
+          operationalStatus: OrderOperationalStatus.TO_DELIVER
         },
         $unset: { attentionReason: '', attentionReasonCode: '', attentionRequiredAt: '' }
       },
@@ -213,12 +247,20 @@ export class OrderConfirmationService {
       );
     }
 
+    await createOrderEvent({
+      orderId: order._id,
+      type: OrderEventType.CONFIRMED,
+      toStatus: OrderOperationalStatus.TO_DELIVER,
+      actorId,
+      metadata: { source: ConfirmationSource.ADMIN }
+    });
+
     const { message, job } = await enqueueConfirmedTemplate(order._id);
 
     return { order, message, job };
   }
 
-  public static async cancelByAdmin(orderId: string, reason?: string) {
+  public static async cancelByAdmin(orderId: string, reason?: string, actorId?: string) {
     const order = await getOrderOrThrow(orderId);
     const trimmedReason = reason?.trim();
 
@@ -246,6 +288,12 @@ export class OrderConfirmationService {
     order.attentionReasonCode = undefined;
     order.attentionRequiredAt = undefined;
     await order.save();
+    await createOrderEvent({
+      orderId: order._id,
+      type: OrderEventType.CANCELLED,
+      actorId,
+      note: trimmedReason
+    });
 
     // Inform the customer explicitly when a cancellation template is configured at Meta.
     let notification: Awaited<ReturnType<typeof enqueueCancelledTemplate>> | undefined;
@@ -266,7 +314,7 @@ export class OrderConfirmationService {
     return { order, notification };
   }
 
-  public static async remindByAdmin(orderId: string) {
+  public static async remindByAdmin(orderId: string, actorId?: string) {
     const order = await getOrderOrThrow(orderId);
 
     if (order.customerConfirmationStatus !== CustomerConfirmationStatus.PENDING) {
@@ -307,6 +355,12 @@ export class OrderConfirmationService {
     }
 
     const { message, job } = await dispatchReminderMessage(claimed._id);
+    await createOrderEvent({
+      orderId: claimed._id,
+      type: OrderEventType.REMINDED,
+      actorId,
+      metadata: { source: ReminderSource.ADMIN, reminderCount: claimed.reminderCount }
+    });
 
     return { order: claimed, message, job };
   }
