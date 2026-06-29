@@ -237,8 +237,8 @@ describe('order fulfillment service', () => {
     );
   });
 
-  it('marks in_delivery or delivery_failed orders as returned', async () => {
-    jest.spyOn(Order, 'findOneAndUpdate').mockResolvedValue({
+  it('marks in_delivery or delivery_failed orders as returned with a dedicated reason field', async () => {
+    const update = jest.spyOn(Order, 'findOneAndUpdate').mockResolvedValue({
       _id: orderId,
       operationalStatus: OrderOperationalStatus.RETURNED
     } as never);
@@ -246,9 +246,27 @@ describe('order fulfillment service', () => {
 
     await OrderFulfillmentService.markReturned(orderId.toString(), 'Retour client');
 
-    expect((Order.findOneAndUpdate as unknown as jest.Mock).mock.calls[0]?.[0]).toEqual({
+    expect(update.mock.calls[0]?.[0]).toEqual({
       _id: orderId.toString(),
       operationalStatus: { $in: [OrderOperationalStatus.IN_DELIVERY, OrderOperationalStatus.DELIVERY_FAILED] }
     });
+    expect(update.mock.calls[0]?.[1]).toEqual(
+      expect.objectContaining({
+        $set: expect.objectContaining({
+          operationalStatus: OrderOperationalStatus.RETURNED,
+          returnReason: 'Retour client'
+        })
+      })
+    );
+  });
+
+  it('requires a reason to mark an order returned', async () => {
+    const update = jest.spyOn(Order, 'findOneAndUpdate');
+
+    await expect(OrderFulfillmentService.markReturned(orderId.toString(), '  ')).rejects.toMatchObject({
+      code: 'ReturnReasonRequired',
+      status: 400
+    });
+    expect(update).not.toHaveBeenCalled();
   });
 });

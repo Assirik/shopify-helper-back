@@ -354,6 +354,10 @@ export class OrderFulfillmentService {
 
   public static async markReturned(orderId: string, reason: string | undefined, actorId?: string) {
     const trimmedReason = reason?.trim();
+    if (!trimmedReason) {
+      throw new OrderFulfillmentError('ReturnReasonRequired', 'A return reason is required', 400);
+    }
+
     ensureObjectId(orderId);
 
     const order = await Order.findOneAndUpdate(
@@ -364,7 +368,7 @@ export class OrderFulfillmentService {
       {
         $set: {
           operationalStatus: OrderOperationalStatus.RETURNED,
-          deliveryFailureReason: trimmedReason
+          returnReason: trimmedReason
         }
       },
       { new: true }

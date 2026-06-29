@@ -148,6 +148,7 @@ const OrderSchema = new Schema<IOrder>(
     deliveredAt: { type: Date },
     deliveryAttempts: { type: Number, default: 0, min: 0 },
     deliveryFailureReason: { type: String, trim: true },
+    returnReason: { type: String, trim: true },
     codExpectedAmount: { type: Number },
     codCollectedAmount: { type: Number },
     courierFeeAmount: { type: Number },
@@ -242,6 +243,7 @@ export interface IOrder extends Document {
   deliveredAt?: Date;
   deliveryAttempts: number;
   deliveryFailureReason?: string;
+  returnReason?: string;
   codExpectedAmount?: number;
   codCollectedAmount?: number;
   courierFeeAmount?: number;
