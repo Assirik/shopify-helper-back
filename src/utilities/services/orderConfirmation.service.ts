@@ -277,6 +277,18 @@ export class OrderConfirmationService {
     }
 
     if (!getOrderActionCapabilities(order).canCancel) {
+      const isTerminalOperationalStatus =
+        order.operationalStatus === OrderOperationalStatus.DELIVERED ||
+        order.operationalStatus === OrderOperationalStatus.RETURNED;
+
+      if (isTerminalOperationalStatus) {
+        throw new OrderConfirmationError(
+          'OrderCancellationNotAllowedAfterDelivery',
+          'Order has been delivered or returned and can no longer be cancelled',
+          409
+        );
+      }
+
       throw new OrderConfirmationError('OrderCancellationNotAllowed', 'Order is already cancelled', 409);
     }
 
