@@ -5,9 +5,13 @@ import log from '../utilities/logger/logger';
 
 const toTrimmedString = (value: unknown) => (typeof value === 'string' ? value.trim() : '');
 
-const parseDefaultPrice = (value: unknown): { value?: number } | { error: string } => {
-  if (value === undefined || value === null || value === '') {
+const parseDefaultPrice = (value: unknown): { value?: number; shouldUnset?: boolean } | { error: string } => {
+  if (value === undefined) {
     return { value: undefined };
+  }
+
+  if (value === null || (typeof value === 'string' && value.trim() === '')) {
+    return { shouldUnset: true };
   }
 
   const parsed = typeof value === 'number' ? value : Number(value);
@@ -67,6 +71,7 @@ export class CarrierController {
 
     const body = req.body || {};
     const set: Record<string, unknown> = {};
+    const unset: Record<string, ''> = {};
 
     if ('name' in body) {
       const name = toTrimmedString(body.name);
@@ -85,10 +90,14 @@ export class CarrierController {
       if ('error' in defaultPrice) {
         return res.status(400).json({ error: 'InvalidCarrier', details: { defaultPrice: defaultPrice.error } });
       }
-      set.defaultPrice = defaultPrice.value;
+      if (defaultPrice.shouldUnset) {
+        unset.defaultPrice = '';
+      } else {
+        set.defaultPrice = defaultPrice.value;
+      }
     }
 
-    if (Object.keys(set).length === 0) {
+    if (Object.keys(set).length === 0 && Object.keys(unset).length === 0) {
       return res.status(400).json({ error: 'InvalidCarrier', details: { _global: 'Aucune valeur à mettre à jour' } });
     }
 
@@ -96,7 +105,11 @@ export class CarrierController {
       set.updatedBy = new Types.ObjectId(req.userId);
     }
 
-    const carrier = await Carrier.findByIdAndUpdate(id, { $set: set }, { new: true });
+    const update: Record<string, unknown> = {};
+    if (Object.keys(set).length) update.$set = set;
+    if (Object.keys(unset).length) update.$unset = unset;
+
+    const carrier = await Carrier.findByIdAndUpdate(id, update, { new: true });
 
     if (!carrier) {
       return res.status(404).json({ error: 'CarrierNotFound' });
