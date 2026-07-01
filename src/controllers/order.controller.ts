@@ -4,6 +4,7 @@ import { Message } from '../models/Message';
 import { OrderEvent } from '../models/OrderEvent';
 import {
   AttentionReasonCode,
+  CodPaymentStatus,
   CustomerConfirmationStatus,
   DeliveryChannel,
   IOrder,
@@ -81,6 +82,7 @@ export const buildOrderListFilters = (query: Pick<Request, 'query'>['query']) =>
   const orderName = toStringFilter(query.orderName);
   const phone = toStringFilter(query.phone);
   const cod = toStringFilter(query.cod);
+  const hideCompleted = toStringFilter(query.hideCompleted);
 
   const filters: Record<string, unknown> = {};
 
@@ -114,6 +116,14 @@ export const buildOrderListFilters = (query: Pick<Request, 'query'>['query']) =>
     filters.isCashOnDelivery = cod === 'true';
   }
 
+  // Désencombrement : exclut les commandes dont tout le process est terminé
+  // (livrée ET intégralement encaissée). Les livrées impayées/partielles restent visibles.
+  if (hideCompleted === 'true') {
+    filters.$nor = [
+      { operationalStatus: OrderOperationalStatus.DELIVERED, codPaymentStatus: CodPaymentStatus.PAID }
+    ];
+  }
+
   return {
     filters,
     status,
@@ -121,7 +131,8 @@ export const buildOrderListFilters = (query: Pick<Request, 'query'>['query']) =>
     operationalStatus,
     orderName,
     phone,
-    cod
+    cod,
+    hideCompleted
   };
 };
 

@@ -120,6 +120,17 @@ describe('order controller list filters', () => {
       operationalStatus: 'to_deliver'
     });
   });
+
+  it('excludes completed orders (delivered & paid) when hideCompleted=true', () => {
+    expect(buildOrderListFilters({ hideCompleted: 'true' }).filters).toEqual({
+      $nor: [{ operationalStatus: 'delivered', codPaymentStatus: 'paid' }]
+    });
+  });
+
+  it('keeps completed orders unless hideCompleted is explicitly true', () => {
+    expect(buildOrderListFilters({ hideCompleted: 'false' }).filters).toEqual({});
+    expect(buildOrderListFilters({}).filters).toEqual({});
+  });
 });
 
 describe('order controller optional amount parsing', () => {
