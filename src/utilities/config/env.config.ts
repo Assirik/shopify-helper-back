@@ -54,5 +54,9 @@ export default {
     maxReminders: Number(process.env.CONFIRMATION_MAX_REMINDERS) || 2,
     reminderCooldownMinutes: Number(process.env.CONFIRMATION_REMINDER_COOLDOWN_MINUTES) || 60,
     sweepIntervalMinutes: Number(process.env.CONFIRMATION_SWEEP_INTERVAL_MINUTES) || 30
+  },
+  delivery: {
+    defaultFee: Number(process.env.DELIVERY_DEFAULT_FEE) || 0,
+    defaultCarrierFee: Number(process.env.DELIVERY_DEFAULT_CARRIER_FEE) || 2000
   }
 };

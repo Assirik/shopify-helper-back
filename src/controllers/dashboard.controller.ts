@@ -1,6 +1,11 @@
 import { Request, Response } from 'express';
 import { Message, MessageChannel, MessageStatus } from '../models/Message';
-import { CustomerConfirmationStatus, Order } from '../models/Order';
+import {
+  CodPaymentStatus,
+  CustomerConfirmationStatus,
+  Order,
+  OrderOperationalStatus
+} from '../models/Order';
 import { notificationQueue } from '../queues/notification.queue';
 import log from '../utilities/logger/logger';
 
@@ -12,6 +17,15 @@ export interface DashboardStats {
   messageFailures: number;
   smsFallbacks: number;
   cancelledOrders: number;
+  // Flux opérationnel de livraison (états courants, non bornés dans le temps).
+  toDeliver: number;
+  inDelivery: number;
+  // Bornés au jour courant (deliveredAt).
+  deliveredToday: number;
+  // Caisse COD du jour (commandes livrées aujourd'hui).
+  cashCollectedToday: number;
+  netToRemitToday: number;
+  cashDiscrepancies: number;
   jobsSucceeded?: number;
   jobsFailed?: number;
 }
@@ -38,6 +52,11 @@ export const computeMongoDashboardStats = async (now = new Date()): Promise<Dash
   const yesterdayStart = new Date(todayStart);
   yesterdayStart.setDate(yesterdayStart.getDate() - 1);
 
+  const deliveredTodayMatch = {
+    operationalStatus: OrderOperationalStatus.DELIVERED,
+    deliveredAt: { $gte: todayStart, $lt: tomorrowStart }
+  };
+
   const [
     ordersToday,
     ordersYesterday,
@@ -45,7 +64,12 @@ export const computeMongoDashboardStats = async (now = new Date()): Promise<Dash
     confirmationCounts,
     messageFailures,
     smsFallbacks,
-    cancelledOrders
+    cancelledOrders,
+    toDeliver,
+    inDelivery,
+    deliveredToday,
+    cashDiscrepancies,
+    cashRows
   ] = await Promise.all([
     Order.countDocuments({ createdAt: { $gte: todayStart, $lt: tomorrowStart } }),
     Order.countDocuments({ createdAt: { $gte: yesterdayStart, $lt: todayStart } }),
@@ -55,7 +79,26 @@ export const computeMongoDashboardStats = async (now = new Date()): Promise<Dash
     ]),
     Message.countDocuments({ status: MessageStatus.FAILED }),
     Message.countDocuments({ channel: MessageChannel.SMS, fallbackOfMessageId: { $ne: null } }),
-    Order.countDocuments({ customerConfirmationStatus: CustomerConfirmationStatus.CANCELLED })
+    Order.countDocuments({ customerConfirmationStatus: CustomerConfirmationStatus.CANCELLED }),
+    // À expédier : en attente de dispatch (inclut les échecs re-livrables).
+    Order.countDocuments({
+      operationalStatus: { $in: [OrderOperationalStatus.TO_DELIVER, OrderOperationalStatus.DELIVERY_FAILED] }
+    }),
+    Order.countDocuments({ operationalStatus: OrderOperationalStatus.IN_DELIVERY }),
+    Order.countDocuments(deliveredTodayMatch),
+    // Écart de caisse : livrée aujourd'hui mais encaissement non complet.
+    Order.countDocuments({ ...deliveredTodayMatch, codPaymentStatus: { $ne: CodPaymentStatus.PAID } }),
+    // Caisse du jour : encaissé et net à reverser, cohérents avec le rapprochement.
+    Order.aggregate<{ _id: null; cashCollected: number; netToRemit: number }>([
+      { $match: deliveredTodayMatch },
+      {
+        $group: {
+          _id: null,
+          cashCollected: { $sum: { $ifNull: ['$codCollectedAmount', 0] } },
+          netToRemit: { $sum: { $ifNull: ['$codNetRemitted', 0] } }
+        }
+      }
+    ])
   ]);
 
   const countByStatus = confirmationCounts.reduce((map, item) => {
@@ -70,6 +113,8 @@ export const computeMongoDashboardStats = async (now = new Date()): Promise<Dash
     (countByStatus[CustomerConfirmationStatus.EXPIRED] || 0) +
     (countByStatus[CustomerConfirmationStatus.SMS_ONLY] || 0);
 
+  const cash = cashRows[0];
+
   return {
     ordersToday,
     ordersYesterday,
@@ -77,7 +122,13 @@ export const computeMongoDashboardStats = async (now = new Date()): Promise<Dash
     confirmationRate: denominator === 0 ? 0 : roundToOneDecimal((confirmed / denominator) * 100),
     messageFailures,
     smsFallbacks,
-    cancelledOrders
+    cancelledOrders,
+    toDeliver,
+    inDelivery,
+    deliveredToday,
+    cashCollectedToday: cash?.cashCollected || 0,
+    netToRemitToday: cash?.netToRemit || 0,
+    cashDiscrepancies
   };
 };
 

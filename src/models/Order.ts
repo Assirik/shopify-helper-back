@@ -29,6 +29,25 @@ export enum ReminderSource {
   AUTO = 'auto'
 }
 
+export enum OrderOperationalStatus {
+  TO_DELIVER = 'to_deliver',
+  IN_DELIVERY = 'in_delivery',
+  DELIVERED = 'delivered',
+  DELIVERY_FAILED = 'delivery_failed',
+  RETURNED = 'returned'
+}
+
+export enum DeliveryChannel {
+  INTERNAL = 'internal',
+  CARRIER = 'carrier'
+}
+
+export enum CodPaymentStatus {
+  PAID = 'paid',
+  PARTIAL = 'partial',
+  UNPAID = 'unpaid'
+}
+
 export enum AttentionReasonCode {
   FREE_TEXT = 'free_text',
   SMS_ONLY = 'sms_only',
@@ -119,7 +138,24 @@ const OrderSchema = new Schema<IOrder>(
     attentionReason: { type: String, trim: true },
     attentionReasonCode: { type: String, enum: Object.values(AttentionReasonCode), index: true },
     attentionRequiredAt: { type: Date, index: true },
-    needsHelpdeskAttention: { type: Boolean, default: false, index: true }
+    needsHelpdeskAttention: { type: Boolean, default: false, index: true },
+    operationalStatus: { type: String, enum: Object.values(OrderOperationalStatus), index: true },
+    deliveryChannel: { type: String, enum: Object.values(DeliveryChannel) },
+    assignedCourierId: { type: Schema.Types.ObjectId, ref: 'Courier', index: true },
+    assignedCarrierId: { type: Schema.Types.ObjectId, ref: 'Carrier', index: true },
+    carrierTrackingNumber: { type: String, trim: true },
+    dispatchedAt: { type: Date },
+    deliveredAt: { type: Date },
+    deliveryAttempts: { type: Number, default: 0, min: 0 },
+    deliveryFailureReason: { type: String, trim: true },
+    returnReason: { type: String, trim: true },
+    codExpectedAmount: { type: Number },
+    codCollectedAmount: { type: Number },
+    courierFeeAmount: { type: Number },
+    carrierFeeAmount: { type: Number },
+    codNetRemitted: { type: Number },
+    codPaymentStatus: { type: String, enum: Object.values(CodPaymentStatus) },
+    collectedAt: { type: Date }
   },
   {
     timestamps: true
@@ -131,6 +167,10 @@ OrderSchema.index({ notificationStatus: 1, createdAt: -1 });
 OrderSchema.index({ customerConfirmationStatus: 1, createdAt: -1 });
 OrderSchema.index({ isCashOnDelivery: 1, createdAt: -1 });
 OrderSchema.index({ needsHelpdeskAttention: 1, attentionReasonCode: 1, attentionRequiredAt: -1 });
+OrderSchema.index({ operationalStatus: 1, createdAt: -1 });
+OrderSchema.index({ assignedCourierId: 1, deliveredAt: 1 });
+OrderSchema.index({ assignedCarrierId: 1, deliveredAt: 1 });
+OrderSchema.index({ deliveredAt: 1 });
 OrderSchema.index({ shopifyOrderName: 'text', customerPhoneE164: 'text', customerPhoneRaw: 'text' });
 
 OrderSchema.set('toJSON', {
@@ -194,6 +234,23 @@ export interface IOrder extends Document {
   attentionReasonCode?: AttentionReasonCode;
   attentionRequiredAt?: Date;
   needsHelpdeskAttention: boolean;
+  operationalStatus?: OrderOperationalStatus;
+  deliveryChannel?: DeliveryChannel;
+  assignedCourierId?: Types.ObjectId;
+  assignedCarrierId?: Types.ObjectId;
+  carrierTrackingNumber?: string;
+  dispatchedAt?: Date;
+  deliveredAt?: Date;
+  deliveryAttempts: number;
+  deliveryFailureReason?: string;
+  returnReason?: string;
+  codExpectedAmount?: number;
+  codCollectedAmount?: number;
+  courierFeeAmount?: number;
+  carrierFeeAmount?: number;
+  codNetRemitted?: number;
+  codPaymentStatus?: CodPaymentStatus;
+  collectedAt?: Date;
   createdAt: Date;
   updatedAt: Date;
 }

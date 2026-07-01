@@ -1,7 +1,13 @@
 import { describe, expect, it, jest } from '@jest/globals';
 import { Types } from 'mongoose';
 import { AttentionReasonCode, CustomerConfirmationStatus, IOrder } from '../models/Order';
-import { buildOrderListFilters, parseBulkOrderIds, toAttentionOrder, toOrderResponse } from './order.controller';
+import {
+  buildOrderListFilters,
+  parseBulkOrderIds,
+  parseOptionalAmount,
+  toAttentionOrder,
+  toOrderResponse
+} from './order.controller';
 
 jest.mock('../queues/notification.queue', () => ({
   enqueueConfirmationReminder: jest.fn(),
@@ -70,7 +76,15 @@ describe('order controller attention contracts', () => {
         orderName: '#10428',
         reason: AttentionReasonCode.FREE_TEXT,
         receivedAt: now,
-        capabilities: { canConfirm: true, canRemind: false, canCancel: true }
+        capabilities: {
+          canConfirm: true,
+          canRemind: false,
+          canCancel: true,
+          canDispatch: false,
+          canDeliver: false,
+          canMarkFailed: false,
+          canReturn: false
+        }
       })
     );
   });
@@ -99,5 +113,37 @@ describe('order controller list filters', () => {
       isCashOnDelivery: true,
       customerConfirmationStatus: CustomerConfirmationStatus.NEEDS_ATTENTION
     });
+  });
+
+  it('filters operational statuses', () => {
+    expect(buildOrderListFilters({ operationalStatus: 'to_deliver' }).filters).toEqual({
+      operationalStatus: 'to_deliver'
+    });
+  });
+
+  it('excludes completed orders (delivered & paid) when hideCompleted=true', () => {
+    expect(buildOrderListFilters({ hideCompleted: 'true' }).filters).toEqual({
+      $nor: [{ operationalStatus: 'delivered', codPaymentStatus: 'paid' }]
+    });
+  });
+
+  it('keeps completed orders unless hideCompleted is explicitly true', () => {
+    expect(buildOrderListFilters({ hideCompleted: 'false' }).filters).toEqual({});
+    expect(buildOrderListFilters({}).filters).toEqual({});
+  });
+});
+
+describe('order controller optional amount parsing', () => {
+  it('treats an omitted value as a service-side fallback', () => {
+    expect(parseOptionalAmount(undefined)).toEqual({ ok: true, value: undefined });
+  });
+
+  it('accepts a finite non-negative number', () => {
+    expect(parseOptionalAmount(25000)).toEqual({ ok: true, value: 25000 });
+    expect(parseOptionalAmount(0)).toEqual({ ok: true, value: 0 });
+  });
+
+  it.each([null, '', '   ', 'abc', -1, NaN, {}])('rejects the invalid amount %p', value => {
+    expect(parseOptionalAmount(value)).toEqual({ ok: false });
   });
 });

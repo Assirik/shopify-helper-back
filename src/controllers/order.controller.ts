@@ -1,9 +1,21 @@
 import { Request, Response } from 'express';
 import { Types } from 'mongoose';
 import { Message } from '../models/Message';
-import { AttentionReasonCode, CustomerConfirmationStatus, IOrder, NotificationStatus, Order } from '../models/Order';
+import { OrderEvent } from '../models/OrderEvent';
+import {
+  AttentionReasonCode,
+  CodPaymentStatus,
+  CustomerConfirmationStatus,
+  DeliveryChannel,
+  IOrder,
+  NotificationStatus,
+  Order,
+  OrderOperationalStatus
+} from '../models/Order';
 import { getOrderActionCapabilities } from '../utilities/services/orderCapabilities.service';
 import { OrderConfirmationError, OrderConfirmationService } from '../utilities/services/orderConfirmation.service';
+import { OrderFulfillmentError, OrderFulfillmentService } from '../utilities/services/orderFulfillment.service';
+import { ReconciliationError, ReconciliationService } from '../utilities/services/reconciliation.service';
 import { resolveRegion } from '../utilities/reference/senegalRegions';
 import log from '../utilities/logger/logger';
 
@@ -22,6 +34,29 @@ const toPositiveInteger = (value: unknown, fallback: number) => {
 
 const toStringFilter = (value: unknown) => {
   return typeof value === 'string' ? value.trim() : '';
+};
+
+// Montant optionnel : `undefined` (champ omis) => repli côté service ; toute autre valeur
+// invalide (chaîne vide, null, non numérique, négative) => rejet, jamais de coercition en 0.
+export const parseOptionalAmount = (value: unknown): { ok: true; value?: number } | { ok: false } => {
+  if (value === undefined) {
+    return { ok: true, value: undefined };
+  }
+
+  if (typeof value !== 'number' && typeof value !== 'string') {
+    return { ok: false };
+  }
+
+  if (typeof value === 'string' && value.trim() === '') {
+    return { ok: false };
+  }
+
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return { ok: false };
+  }
+
+  return { ok: true, value: parsed };
 };
 
 const escapeRegExp = (value: string) => {
@@ -43,9 +78,11 @@ const BULK_CONCURRENCY = 5;
 export const buildOrderListFilters = (query: Pick<Request, 'query'>['query']) => {
   const status = toStringFilter(query.status);
   const customerConfirmationStatus = toStringFilter(query.customerConfirmationStatus);
+  const operationalStatus = toStringFilter(query.operationalStatus);
   const orderName = toStringFilter(query.orderName);
   const phone = toStringFilter(query.phone);
   const cod = toStringFilter(query.cod);
+  const hideCompleted = toStringFilter(query.hideCompleted);
 
   const filters: Record<string, unknown> = {};
 
@@ -58,6 +95,10 @@ export const buildOrderListFilters = (query: Pick<Request, 'query'>['query']) =>
     Object.values(CustomerConfirmationStatus).includes(customerConfirmationStatus as CustomerConfirmationStatus)
   ) {
     filters.customerConfirmationStatus = customerConfirmationStatus;
+  }
+
+  if (operationalStatus && Object.values(OrderOperationalStatus).includes(operationalStatus as OrderOperationalStatus)) {
+    filters.operationalStatus = operationalStatus;
   }
 
   if (orderName) {
@@ -75,13 +116,23 @@ export const buildOrderListFilters = (query: Pick<Request, 'query'>['query']) =>
     filters.isCashOnDelivery = cod === 'true';
   }
 
+  // Désencombrement : exclut les commandes dont tout le process est terminé
+  // (livrée ET intégralement encaissée). Les livrées impayées/partielles restent visibles.
+  if (hideCompleted === 'true') {
+    filters.$nor = [
+      { operationalStatus: OrderOperationalStatus.DELIVERED, codPaymentStatus: CodPaymentStatus.PAID }
+    ];
+  }
+
   return {
     filters,
     status,
     customerConfirmationStatus,
+    operationalStatus,
     orderName,
     phone,
-    cod
+    cod,
+    hideCompleted
   };
 };
 
@@ -193,7 +244,8 @@ export const toOrderResponse = (order: IOrder) => {
     deliveryPreferredMoment: firstNonEmpty(
       order.deliveryPreferredMoment,
       getOrderNoteAttribute(order, 'Moment de livraison préféré')
-    )
+    ),
+    capabilities: getOrderActionCapabilities(order)
   };
 };
 
@@ -332,7 +384,8 @@ export class OrderController {
     const page = toPositiveInteger(req.query.page, 1);
     const limit = Math.min(toPositiveInteger(req.query.limit, DEFAULT_LIMIT), MAX_LIMIT);
     const skip = (page - 1) * limit;
-    const { filters, status, customerConfirmationStatus, orderName, phone, cod } = buildOrderListFilters(req.query);
+    const { filters, status, customerConfirmationStatus, operationalStatus, orderName, phone, cod } =
+      buildOrderListFilters(req.query);
 
     const [orders, total] = await Promise.all([
       Order.find(filters).sort({ createdAt: -1 }).skip(skip).limit(limit),
@@ -347,6 +400,7 @@ export class OrderController {
         returned: orders.length,
         status,
         customerConfirmationStatus,
+        operationalStatus,
         hasOrderNameFilter: Boolean(orderName),
         hasPhoneFilter: Boolean(phone),
         hasCodFilter: cod === 'true' || cod === 'false'
@@ -373,7 +427,10 @@ export class OrderController {
       return res.status(404).json({ error: 'OrderNotFound' });
     }
 
-    const messages = await Message.find({ orderId: order._id }).sort({ createdAt: -1 });
+    const [messages, events] = await Promise.all([
+      Message.find({ orderId: order._id }).sort({ createdAt: -1 }),
+      OrderEvent.find({ orderId: order._id }).sort({ createdAt: -1 })
+    ]);
     const messageSummary = buildMessageSummary(messages);
 
     log.info(
@@ -389,7 +446,9 @@ export class OrderController {
       data: {
         order: toOrderResponse(order),
         messages,
-        messageSummary
+        messageSummary,
+        events,
+        capabilities: getOrderActionCapabilities(order)
       }
     });
   }
@@ -398,7 +457,7 @@ export class OrderController {
     const id = typeof req.params.id === 'string' ? req.params.id : '';
 
     try {
-      const result = await OrderConfirmationService.confirmByAdmin(id);
+      const result = await OrderConfirmationService.confirmByAdmin(id, req.userId);
 
       log.info(
         {
@@ -411,7 +470,7 @@ export class OrderController {
 
       return res.status(202).json({
         data: {
-          order: result.order,
+          order: toOrderResponse(result.order),
           message: result.message,
           jobId: result.job.id,
           queueName: result.job.queueName
@@ -431,7 +490,7 @@ export class OrderController {
     const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim() : undefined;
 
     try {
-      const result = await OrderConfirmationService.cancelByAdmin(id, reason);
+      const result = await OrderConfirmationService.cancelByAdmin(id, reason, req.userId);
 
       log.info(
         {
@@ -444,7 +503,7 @@ export class OrderController {
 
       return res.status(200).json({
         data: {
-          order: result.order,
+          order: toOrderResponse(result.order),
           message: result.notification?.message,
           jobId: result.notification?.job.id,
           queueName: result.notification?.job.queueName
@@ -463,7 +522,7 @@ export class OrderController {
     const id = typeof req.params.id === 'string' ? req.params.id : '';
 
     try {
-      const result = await OrderConfirmationService.remindByAdmin(id);
+      const result = await OrderConfirmationService.remindByAdmin(id, req.userId);
 
       log.info(
         {
@@ -477,7 +536,7 @@ export class OrderController {
 
       return res.status(202).json({
         data: {
-          order: result.order,
+          order: toOrderResponse(result.order),
           message: result.message,
           jobId: result.job.id,
           queueName: result.job.queueName
@@ -485,6 +544,115 @@ export class OrderController {
       });
     } catch (err) {
       if (err instanceof OrderConfirmationError) {
+        return res.status(err.status).json({ error: err.code });
+      }
+
+      throw err;
+    }
+  }
+
+  public static async dispatch(req: Request, res: Response) {
+    const id = typeof req.params.id === 'string' ? req.params.id : '';
+
+    try {
+      const order = await OrderFulfillmentService.dispatch(
+        id,
+        {
+          channel: req.body?.channel as DeliveryChannel,
+          courierId: typeof req.body?.courierId === 'string' ? req.body.courierId : undefined,
+          carrierId: typeof req.body?.carrierId === 'string' ? req.body.carrierId : undefined,
+          trackingNumber: typeof req.body?.trackingNumber === 'string' ? req.body.trackingNumber : undefined
+        },
+        req.userId
+      );
+
+      return res.status(200).json({ data: { order: toOrderResponse(order) } });
+    } catch (err) {
+      if (err instanceof OrderFulfillmentError) {
+        return res.status(err.status).json({ error: err.code });
+      }
+
+      throw err;
+    }
+  }
+
+  public static async deliver(req: Request, res: Response) {
+    const id = typeof req.params.id === 'string' ? req.params.id : '';
+    const collectedAmount = parseOptionalAmount(req.body?.collectedAmount);
+    if (!collectedAmount.ok) return res.status(400).json({ error: 'InvalidCollectedAmount' });
+
+    const courierFee = parseOptionalAmount(req.body?.courierFee);
+    if (!courierFee.ok) return res.status(400).json({ error: 'InvalidCourierFee' });
+
+    const carrierFee = parseOptionalAmount(req.body?.carrierFee);
+    if (!carrierFee.ok) return res.status(400).json({ error: 'InvalidCarrierFee' });
+
+    try {
+      const order = await OrderFulfillmentService.deliver(
+        id,
+        {
+          collectedAmount: collectedAmount.value,
+          courierFee: courierFee.value,
+          carrierFee: carrierFee.value,
+          note: typeof req.body?.note === 'string' ? req.body.note : undefined
+        },
+        req.userId
+      );
+
+      return res.status(200).json({ data: { order: toOrderResponse(order) } });
+    } catch (err) {
+      if (err instanceof OrderFulfillmentError) {
+        return res.status(err.status).json({ error: err.code });
+      }
+
+      throw err;
+    }
+  }
+
+  public static async markDeliveryFailed(req: Request, res: Response) {
+    const id = typeof req.params.id === 'string' ? req.params.id : '';
+    const reason = typeof req.body?.reason === 'string' ? req.body.reason : undefined;
+
+    try {
+      const order = await OrderFulfillmentService.markDeliveryFailed(id, reason, req.userId);
+
+      return res.status(200).json({ data: { order: toOrderResponse(order) } });
+    } catch (err) {
+      if (err instanceof OrderFulfillmentError) {
+        return res.status(err.status).json({ error: err.code });
+      }
+
+      throw err;
+    }
+  }
+
+  public static async markReturned(req: Request, res: Response) {
+    const id = typeof req.params.id === 'string' ? req.params.id : '';
+    const reason = typeof req.body?.reason === 'string' ? req.body.reason : undefined;
+
+    try {
+      const order = await OrderFulfillmentService.markReturned(id, reason, req.userId);
+
+      return res.status(200).json({ data: { order: toOrderResponse(order) } });
+    } catch (err) {
+      if (err instanceof OrderFulfillmentError) {
+        return res.status(err.status).json({ error: err.code });
+      }
+
+      throw err;
+    }
+  }
+
+  public static async reconciliation(req: Request, res: Response) {
+    try {
+      const summary = await ReconciliationService.summarize({
+        date: typeof req.query.date === 'string' ? req.query.date : undefined,
+        courierId: typeof req.query.courierId === 'string' ? req.query.courierId : undefined
+      });
+
+      return res.status(200).json({ data: summary });
+    } catch (err) {
+      if (err instanceof ReconciliationError) {
         return res.status(err.status).json({ error: err.code });
       }
 

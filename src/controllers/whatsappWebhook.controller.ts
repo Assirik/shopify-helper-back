@@ -2,7 +2,7 @@ import { Request, Response } from 'express';
 import { Types } from 'mongoose';
 import { InboundWhatsAppEvent, InboundWhatsAppEventStatus } from '../models/InboundWhatsAppEvent';
 import { Message, MessageStatus } from '../models/Message';
-import { AttentionReasonCode, CustomerConfirmationStatus, Order } from '../models/Order';
+import { AttentionReasonCode, CustomerConfirmationStatus, Order, OrderOperationalStatus } from '../models/Order';
 import config from '../utilities/config/env.config';
 import log from '../utilities/logger/logger';
 import { OrderConfirmationService } from '../utilities/services/orderConfirmation.service';
@@ -241,6 +241,13 @@ const PRESERVED_CONFIRMATION_STATUSES: CustomerConfirmationStatus[] = [
   CustomerConfirmationStatus.EXPIRED
 ];
 
+// Operational states where the order lifecycle is closed. A post-sale message
+// (e.g. "merci") must NOT re-open the confirmation queue for these orders.
+const COMPLETED_OPERATIONAL_STATUSES: OrderOperationalStatus[] = [
+  OrderOperationalStatus.DELIVERED,
+  OrderOperationalStatus.RETURNED
+];
+
 // Any inbound customer message that is not a valid CONFIRM_ORDER button (free text,
 // image, audio, location, etc.) is treated as a reaction the helpdesk should review.
 const handleCustomerReaction = async (message: MetaWhatsAppMessagePayload, rawPayload: unknown) => {
@@ -262,20 +269,27 @@ const handleCustomerReaction = async (message: MetaWhatsAppMessagePayload, rawPa
 
   const reason = isText ? 'Customer replied with free text' : `Customer sent a ${message.type || 'non-text'} message`;
   const preserveStatus = PRESERVED_CONFIRMATION_STATUSES.includes(order.customerConfirmationStatus);
+  // A delivered/returned order is closed: record the message for audit but never
+  // re-open the helpdesk queue for it (post-sale "thanks" should not resurface it).
+  const isCompleted =
+    order.operationalStatus !== undefined && COMPLETED_OPERATIONAL_STATUSES.includes(order.operationalStatus);
 
   const set: Record<string, unknown> = {
-    needsHelpdeskAttention: true,
     lastCustomerMessageAt: new Date(),
-    lastCustomerMessageText: summary,
-    attentionReason: reason,
-    attentionReasonCode: AttentionReasonCode.FREE_TEXT,
-    attentionRequiredAt: new Date()
+    lastCustomerMessageText: summary
   };
 
-  // Only downgrade to needs_attention when the order is not yet in a final
-  // confirmation state; otherwise keep its status and just flag the helpdesk.
-  if (!preserveStatus) {
-    set.customerConfirmationStatus = CustomerConfirmationStatus.NEEDS_ATTENTION;
+  if (!isCompleted) {
+    set.needsHelpdeskAttention = true;
+    set.attentionReason = reason;
+    set.attentionReasonCode = AttentionReasonCode.FREE_TEXT;
+    set.attentionRequiredAt = new Date();
+
+    // Only downgrade to needs_attention when the order is not yet in a final
+    // confirmation state; otherwise keep its status and just flag the helpdesk.
+    if (!preserveStatus) {
+      set.customerConfirmationStatus = CustomerConfirmationStatus.NEEDS_ATTENTION;
+    }
   }
 
   await Order.findByIdAndUpdate(order._id, { $set: set });
@@ -287,7 +301,9 @@ const handleCustomerReaction = async (message: MetaWhatsAppMessagePayload, rawPa
     text,
     orderId: order._id,
     rawPayload,
-    processedStatus: InboundWhatsAppEventStatus.NEEDS_ATTENTION
+    processedStatus: isCompleted
+      ? InboundWhatsAppEventStatus.PROCESSED
+      : InboundWhatsAppEventStatus.NEEDS_ATTENTION
   });
 };
 
