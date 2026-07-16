@@ -99,12 +99,14 @@ export class DeliveryFeeConfigService {
     return DeliveryFeeConfig.findOne({ key: DELIVERY_FEE_CONFIG_KEY });
   }
 
+  // `updatedBy` est peuplé (userName) sur les chemins exposés à l'admin, pas sur
+  // `getConfig` utilisé par la résolution interne des frais.
   public static async getOrCreateConfig() {
     return DeliveryFeeConfig.findOneAndUpdate(
       { key: DELIVERY_FEE_CONFIG_KEY },
       { $setOnInsert: { defaultFee: config.delivery.defaultFee, regionFees: [] } },
       { upsert: true, new: true, setDefaultsOnInsert: true }
-    );
+    ).populate('updatedBy', 'userName');
   }
 
   public static async updateConfig(
@@ -137,7 +139,7 @@ export class DeliveryFeeConfigService {
       { key: DELIVERY_FEE_CONFIG_KEY },
       { $set: set },
       { upsert: true, new: true, setDefaultsOnInsert: true }
-    );
+    ).populate('updatedBy', 'userName');
 
     return { config: configDocument };
   }
