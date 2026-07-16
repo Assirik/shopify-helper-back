@@ -42,6 +42,22 @@ export default {
       process.env.META_WHATSAPP_TEMPLATE_LANGUAGE || process.env.META_WHATSAPP_TEMPLATE_LANGUAGE_CODE || 'fr',
     graphApiVersion: process.env.META_WHATSAPP_GRAPH_API_VERSION || 'v20.0'
   },
+  chatwoot: {
+    // Base URL of the self-hosted Chatwoot instance. Leave empty to disable forwarding.
+    url: (process.env.CHATWOOT_URL || '').replace(/\/+$/, ''),
+    // E.164 phone number of the Chatwoot WhatsApp inbox (route param of
+    // /webhooks/whatsapp/:phone_number) — the phone NUMBER, not the phone_number_id.
+    whatsappPhoneNumber: process.env.CHATWOOT_WHATSAPP_PHONE_NUMBER || '',
+    // Secret used to sign the forwarded payload (X-Hub-Signature-256). Chatwoot
+    // verifies against the app secret configured on its WhatsApp channel, which is
+    // the same Meta app secret unless overridden here.
+    metaAppSecret: process.env.CHATWOOT_META_APP_SECRET || process.env.META_WHATSAPP_APP_SECRET || '',
+    // Chatwoot REST API credentials for the outbound template mirror. Leave the
+    // token empty to disable the mirror (the inbound forward above still works).
+    apiAccessToken: process.env.CHATWOOT_API_ACCESS_TOKEN || '',
+    accountId: process.env.CHATWOOT_ACCOUNT_ID || '1',
+    inboxId: process.env.CHATWOOT_INBOX_ID || ''
+  },
   termii: {
     apiKey: process.env.TERMII_API_KEY || '',
     senderId: process.env.TERMII_SENDER_ID || '',
