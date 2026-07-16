@@ -19,6 +19,7 @@ import {
 } from '../queues/notification.queue';
 import config from '../utilities/config/env.config';
 import log from '../utilities/logger/logger';
+import { ChatwootOutboundMirrorService } from '../utilities/services/chatwootOutboundMirror.service';
 import { OrderConfirmationService } from '../utilities/services/orderConfirmation.service';
 import {
   MessageVariableConfigService,
@@ -287,6 +288,17 @@ const sendMetaTemplate = async (
         at: new Date()
       }
     }
+  });
+
+  // Mirror the sent template into Chatwoot so agents see what the customer's reply
+  // answers. Fire-and-forget: a Chatwoot outage must never fail the notification job.
+  void ChatwootOutboundMirrorService.mirrorTemplateMessage({
+    to: input.to,
+    customerName: order.customerName || customer?.fullName || 'Client',
+    templateName,
+    templateLanguage: input.templateLanguage,
+    variables: input.variables,
+    providerMessageId: result.providerMessageId
   });
 
   log.info(

@@ -1,8 +1,14 @@
-import { describe, expect, it } from '@jest/globals';
+import { afterEach, describe, expect, it, jest } from '@jest/globals';
+import { MessageVariableConfig } from '../../models/MessageVariableConfig';
 import {
   classifyDeliveryRegion,
+  MessageVariableConfigService,
   validateMessageVariableUpdate
 } from './messageVariableConfig.service';
+
+afterEach(() => {
+  jest.restoreAllMocks();
+});
 
 describe('classifyDeliveryRegion', () => {
   it.each([
@@ -54,5 +60,34 @@ describe('validateMessageVariableUpdate', () => {
     [{ shippingNote: ['x'] }]
   ])('rejects invalid payload %p', payload => {
     expect(validateMessageVariableUpdate(payload)).toEqual({ errors: expect.any(Object) });
+  });
+});
+
+describe('MessageVariableConfigService', () => {
+  const populatedConfig = {
+    shippingNote: { dakar: 'Livraison Dakar' },
+    paymentMethod: {},
+    updatedBy: { _id: '6a39dd4e8862d50323a51e53', userName: 'admin' }
+  };
+
+  it('getConfigWithEditor populates updatedBy with the user name', async () => {
+    const populate = jest.fn<(...args: unknown[]) => Promise<unknown>>().mockResolvedValue(populatedConfig);
+    jest.spyOn(MessageVariableConfig, 'findOne').mockReturnValue({ populate } as never);
+
+    await expect(MessageVariableConfigService.getConfigWithEditor()).resolves.toBe(populatedConfig);
+    expect(populate).toHaveBeenCalledWith('updatedBy', 'userName');
+  });
+
+  it('updateConfig populates updatedBy with the user name', async () => {
+    const populate = jest.fn<(...args: unknown[]) => Promise<unknown>>().mockResolvedValue(populatedConfig);
+    jest.spyOn(MessageVariableConfig, 'findOneAndUpdate').mockReturnValue({ populate } as never);
+
+    await expect(
+      MessageVariableConfigService.updateConfig(
+        { shippingNote: { dakar: 'Livraison Dakar' } },
+        '6a39dd4e8862d50323a51e53'
+      )
+    ).resolves.toEqual({ config: populatedConfig });
+    expect(populate).toHaveBeenCalledWith('updatedBy', 'userName');
   });
 });

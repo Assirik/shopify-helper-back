@@ -4,7 +4,7 @@ import log from '../utilities/logger/logger';
 
 export class MessageVariableConfigController {
   public static async get(_req: Request, res: Response) {
-    const config = await MessageVariableConfigService.getConfig();
+    const config = await MessageVariableConfigService.getConfigWithEditor();
 
     return res.status(200).json({ data: config });
   }

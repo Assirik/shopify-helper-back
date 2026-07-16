@@ -5,6 +5,7 @@ import { Message, MessageStatus } from '../models/Message';
 import { AttentionReasonCode, CustomerConfirmationStatus, Order, OrderOperationalStatus } from '../models/Order';
 import config from '../utilities/config/env.config';
 import log from '../utilities/logger/logger';
+import { ChatwootForwardService } from '../utilities/services/chatwootForward.service';
 import { OrderConfirmationService } from '../utilities/services/orderConfirmation.service';
 import { PhoneNormalizationService } from '../utilities/services/phoneNormalization.service';
 
@@ -342,6 +343,7 @@ export class WhatsAppWebhookController {
     const changes = getChanges(req.body);
     let inboundEvents = 0;
     let updatedStatusCount = 0;
+    let freshStatusEvents = 0;
     let duplicates = 0;
 
     for (const change of changes) {
@@ -355,6 +357,8 @@ export class WhatsAppWebhookController {
             duplicates += 1;
             continue;
           }
+
+          freshStatusEvents += 1;
 
           const { message, changed } = await updateMessageStatus(status, req.body);
 
@@ -388,6 +392,16 @@ export class WhatsAppWebhookController {
           log.error({ err, waMessageId: message.id, type: message.type }, 'Failed to process WhatsApp inbound message');
         }
       }
+    }
+
+    // Mirror the raw payload to Chatwoot so agents see the full thread (free text,
+    // button clicks, and delivery receipts — Chatwoot needs the receipts for its own
+    // agent-sent messages, since Meta only delivers to this single webhook URL).
+    // The backend remains the sole executor of the transactional flow above; this is
+    // display-only. Skipped entirely on Meta redeliveries (every event deduplicated)
+    // and fire-and-forget so a Chatwoot outage never delays the 200 returned to Meta.
+    if (inboundEvents > 0 || freshStatusEvents > 0) {
+      void ChatwootForwardService.forwardWhatsAppPayload(req.body);
     }
 
     log.info(

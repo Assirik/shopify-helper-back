@@ -33,11 +33,17 @@ export interface IRegionDeliveryFee {
   amount: number;
 }
 
+/** Auteur peuplé de la dernière modification (`populate('updatedBy', 'userName')`). */
+export interface IUpdatedByUser {
+  _id: Types.ObjectId;
+  userName: string;
+}
+
 export interface IDeliveryFeeConfig extends Document {
   key: string;
   defaultFee: number;
   regionFees: IRegionDeliveryFee[];
-  updatedBy?: Types.ObjectId;
+  updatedBy?: Types.ObjectId | IUpdatedByUser | null;
   createdAt: Date;
   updatedAt: Date;
 }

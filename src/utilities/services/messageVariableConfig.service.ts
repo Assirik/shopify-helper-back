@@ -127,6 +127,13 @@ export class MessageVariableConfigService {
     return MessageVariableConfig.findOne({ key: MESSAGE_VARIABLE_CONFIG_KEY });
   }
 
+  // Variante pour l'API admin : `updatedBy` peuplé (userName). `getConfig` reste
+  // sans populate car `resolveForRegion` tourne aussi dans le worker, où le
+  // modèle User n'est pas forcément enregistré.
+  public static getConfigWithEditor() {
+    return MessageVariableConfigService.getConfig().populate('updatedBy', 'userName');
+  }
+
   public static async updateConfig(
     raw: unknown,
     updatedBy: string
@@ -177,7 +184,7 @@ export class MessageVariableConfigService {
         ...(Object.keys(unset).length > 0 ? { $unset: unset } : {})
       },
       { upsert: true, new: true, setDefaultsOnInsert: true }
-    );
+    ).populate('updatedBy', 'userName');
 
     return { config };
   }

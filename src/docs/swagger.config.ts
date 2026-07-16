@@ -481,6 +481,15 @@ const swaggerOptions: swaggerJSDoc.Options = {
             nonDakar: { type: 'string', nullable: true }
           }
         },
+        UpdatedByUser: {
+          type: 'object',
+          nullable: true,
+          description: 'Auteur de la dernière modification, peuplé depuis User (userName).',
+          properties: {
+            _id: objectId,
+            userName: { type: 'string' }
+          }
+        },
         MessageVariableConfig: {
           type: 'object',
           properties: {
@@ -488,7 +497,7 @@ const swaggerOptions: swaggerJSDoc.Options = {
             key: { type: 'string', enum: ['global'] },
             shippingNote: { $ref: '#/components/schemas/RegionVariant' },
             paymentMethod: { $ref: '#/components/schemas/RegionVariant' },
-            updatedBy: objectId,
+            updatedBy: { $ref: '#/components/schemas/UpdatedByUser' },
             createdAt: dateTime,
             updatedAt: dateTime
           }
