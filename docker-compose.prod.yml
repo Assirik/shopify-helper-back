@@ -1,0 +1,89 @@
+# shopify-helper (back) — production
+# Inspiré du compose Chatwoot : réseaux segmentés + egress + ingress Traefik.
+#
+# Secrets: REDIS_API_PASSWORD est une variable d'ENVIRONNEMENT SYSTÈME du VPS,
+# interpolée ici via ${...} au moment du `up` — elle ne doit PAS être dans .env.
+# Les autres réglages applicatifs (Mongo, Meta, Shopify, JWT, Termii…) restent
+# dans .env via env_file.
+#
+# NB: `${VAR:?message}` fait ÉCHOUER le déploiement si la variable manque
+# (garde-fou volontaire : mieux vaut un abort clair qu'un conteneur cassé).
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: shopify-helper-api
+    env_file: .env
+    # `environment:` prime sur env_file. On force NODE_ENV et on construit REDIS_URL
+    # ici pour que le mot de passe (env système) soit réellement injecté.
+    environment:
+      NODE_ENV: production
+      PORT: ${PORT:-3661}
+      REDIS_URL: redis://:${REDIS_API_PASSWORD:?REDIS_API_PASSWORD is required}@redis:6379
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - shopify-helper        # accès redis (réseau interne)
+      - shopify-helper-egress # sortie internet (Mongo Atlas, Meta Graph, Shopify, Termii, Chatwoot)
+      - proxy                 # ingress Traefik
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=proxy"
+      - "traefik.http.routers.shopify-helper.rule=Host(`${API_DOMAIN:?API_DOMAIN is required}`)"
+      - "traefik.http.routers.shopify-helper.entrypoints=websecure"
+      - "traefik.http.routers.shopify-helper.tls=true"
+      - "traefik.http.routers.shopify-helper.tls.certresolver=myresolver"
+      - "traefik.http.services.shopify-helper.loadbalancer.server.port=${PORT:-3661}"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:${PORT:-3661}/api/health >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 512m
+
+  redis:
+    image: redis:7-alpine
+    container_name: shopify-helper-redis
+    restart: unless-stopped
+    command:
+      [
+        "redis-server",
+        "--requirepass",
+        "${REDIS_API_PASSWORD:?REDIS_API_PASSWORD is required}",
+        "--appendonly",
+        "yes"
+      ]
+    environment:
+      REDIS_API_PASSWORD: ${REDIS_API_PASSWORD:?REDIS_API_PASSWORD is required}
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_API_PASSWORD\" ping | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks:
+      - shopify-helper
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 256m
+
+networks:
+  shopify-helper:
+    name: shopify-helper
+    internal: true          # redis isolé d'internet
+  shopify-helper-egress:
+    name: shopify-helper-egress
+  proxy:
+    external: true          # réseau partagé avec Traefik (docker network create proxy)
+
+volumes:
+  redis_data:

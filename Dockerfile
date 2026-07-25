@@ -14,5 +14,5 @@ COPY . .
 RUN npm run build
 
 # 5. Lancer en mode production (pas live-dev !)
-EXPOSE 3600
+EXPOSE 3661
 CMD ["npm", "run", "start"]
