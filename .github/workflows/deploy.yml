@@ -1,0 +1,57 @@
+name: Deploy (prod)
+
+# Déploiement automatique sur push vers `main`.
+# Le build/test tourne sur le runner GitHub (le VPS n'a ni Node ni npm) ;
+# le VPS ne fait que `git pull` + `docker compose up --build`.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {} # permet un déclenchement manuel depuis l'onglet Actions
+
+# Évite deux déploiements simultanés (le 2e attend / annule le précédent).
+concurrency:
+  group: deploy-prod
+  cancel-in-progress: false
+
+jobs:
+  build-test:
+    name: Build & test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - run: npm ci
+      - run: npm run build
+      - run: npm test
+
+  deploy:
+    name: Deploy sur le VPS
+    needs: build-test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Déploiement SSH
+        uses: appleboy/ssh-action@v1
+        # Ces secrets sont transmis dans la session SSH (via `envs:` ci-dessous)
+        # pour que `docker compose` les interpole, sans jamais les écrire sur le VPS.
+        env:
+          REDIS_API_PASSWORD: ${{ secrets.REDIS_API_PASSWORD }}
+          API_DOMAIN: ${{ secrets.API_DOMAIN }}
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          port: ${{ secrets.VPS_SSH_PORT || 22 }}
+          envs: REDIS_API_PASSWORD,API_DOMAIN
+          script: |
+            set -e
+            cd "${{ secrets.VPS_APP_PATH }}"
+            git fetch --all --prune
+            git checkout main
+            git reset --hard origin/main
+            docker compose -f docker-compose.prod.yml up -d --build
+            docker image prune -f
