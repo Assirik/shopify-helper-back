@@ -335,8 +335,14 @@ export class OrderController {
       return res.status(400).json({ error: 'InvalidAttentionReason' });
     }
 
-    const filters: Record<string, unknown> = {
+    const openOrdersFilter = {
       needsHelpdeskAttention: true,
+      operationalStatus: { $nin: [OrderOperationalStatus.DELIVERED, OrderOperationalStatus.RETURNED] },
+      customerConfirmationStatus: { $ne: CustomerConfirmationStatus.CANCELLED }
+    };
+
+    const filters: Record<string, unknown> = {
+      ...openOrdersFilter,
       attentionReasonCode: reason ? reason : { $in: Object.values(AttentionReasonCode) }
     };
 
@@ -349,7 +355,7 @@ export class OrderController {
       Order.aggregate<{ _id: AttentionReasonCode; count: number }>([
         {
           $match: {
-            needsHelpdeskAttention: true,
+            ...openOrdersFilter,
             attentionReasonCode: { $in: Object.values(AttentionReasonCode) }
           }
         },
