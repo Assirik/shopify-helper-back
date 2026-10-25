@@ -269,8 +269,10 @@ export class OrderFulfillmentService {
           codNetRemitted,
           codPaymentStatus,
           deliveredAt: now,
-          collectedAt: now
-        }
+          collectedAt: now,
+          needsHelpdeskAttention: false // Reset helpdesk flag on successful delivery
+        },
+        $unset: { attentionReason: '', attentionReasonCode: '', attentionRequiredAt: '' }
       },
       { new: true }
     );
@@ -370,8 +372,10 @@ export class OrderFulfillmentService {
       {
         $set: {
           operationalStatus: OrderOperationalStatus.RETURNED,
-          returnReason: trimmedReason
-        }
+          returnReason: trimmedReason,
+          needsHelpdeskAttention: false // Reset helpdesk flag on successful return
+        },
+        $unset: { attentionReason: '', attentionReasonCode: '', attentionRequiredAt: '' }
       },
       { new: true }
     );
