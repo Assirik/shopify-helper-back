@@ -2,10 +2,10 @@ import { afterEach, describe, expect, it, jest } from '@jest/globals';
 import { Types } from 'mongoose';
 import { Carrier } from '../../models/Carrier';
 import { Courier } from '../../models/Courier';
-import { OrderEvent } from '../../models/OrderEvent';
+import { OrderEvent, OrderEventType } from '../../models/OrderEvent';
 import { CodPaymentStatus, DeliveryChannel, Order, OrderOperationalStatus } from '../../models/Order';
 import { DeliveryFeeConfigService } from './deliveryFeeConfig.service';
-import { OrderFulfillmentError, OrderFulfillmentService } from './orderFulfillment.service';
+import { MAX_NOTE_LENGTH, OrderFulfillmentError, OrderFulfillmentService } from './orderFulfillment.service';
 
 afterEach(() => {
   jest.restoreAllMocks();
@@ -280,5 +280,63 @@ describe('order fulfillment service', () => {
       status: 400
     });
     expect(update).not.toHaveBeenCalled();
+  });
+
+  it('records a note event with its author and denormalizes the last note on the order', async () => {
+    const actorId = new Types.ObjectId();
+    const noteCreatedAt = new Date('2026-10-25T10:00:00.000Z');
+    jest.spyOn(Order, 'exists').mockResolvedValue({ _id: orderId } as never);
+    const createEvent = jest
+      .spyOn(OrderEvent, 'create')
+      .mockResolvedValue({ createdAt: noteCreatedAt } as never);
+    const update = jest
+      .spyOn(Order, 'findByIdAndUpdate')
+      .mockResolvedValue({ _id: orderId, lastNoteText: 'Livrer chez son frère' } as never);
+
+    await OrderFulfillmentService.addNote(orderId.toString(), '  Livrer chez son frère  ', actorId.toString());
+
+    expect(createEvent.mock.calls[0]?.[0]).toEqual(
+      expect.objectContaining({ type: OrderEventType.NOTE, note: 'Livrer chez son frère', actorId })
+    );
+    // L'aperçu reprend l'horodatage de l'événement : liste et timeline affichent la même date.
+    expect(update.mock.calls[0]?.[1]).toEqual({
+      $set: { lastNoteText: 'Livrer chez son frère', lastNoteAt: noteCreatedAt }
+    });
+    expect(createEvent.mock.invocationCallOrder[0]).toBeLessThan(update.mock.invocationCallOrder[0] ?? 0);
+  });
+
+  it('requires a note text', async () => {
+    const update = jest.spyOn(Order, 'findByIdAndUpdate');
+
+    await expect(OrderFulfillmentService.addNote(orderId.toString(), '   ')).rejects.toMatchObject({
+      code: 'NoteTextRequired',
+      status: 400
+    });
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  it('accepts a note at the length limit and rejects a longer one', async () => {
+    jest.spyOn(Order, 'exists').mockResolvedValue({ _id: orderId } as never);
+    jest.spyOn(OrderEvent, 'create').mockResolvedValue({ createdAt: new Date() } as never);
+    const update = jest.spyOn(Order, 'findByIdAndUpdate').mockResolvedValue({ _id: orderId } as never);
+
+    await OrderFulfillmentService.addNote(orderId.toString(), 'a'.repeat(MAX_NOTE_LENGTH));
+    expect(update).toHaveBeenCalledTimes(1);
+
+    await expect(
+      OrderFulfillmentService.addNote(orderId.toString(), 'a'.repeat(MAX_NOTE_LENGTH + 1))
+    ).rejects.toMatchObject({ code: 'NoteTextTooLong', status: 400 });
+    expect(update).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns OrderNotFound when noting an unknown order', async () => {
+    jest.spyOn(Order, 'exists').mockResolvedValue(null as never);
+    const createEvent = jest.spyOn(OrderEvent, 'create');
+
+    await expect(OrderFulfillmentService.addNote(orderId.toString(), 'Reporter à samedi')).rejects.toMatchObject({
+      code: 'OrderNotFound',
+      status: 404
+    });
+    expect(createEvent).not.toHaveBeenCalled();
   });
 });

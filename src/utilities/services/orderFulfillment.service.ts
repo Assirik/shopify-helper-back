@@ -38,6 +38,8 @@ export interface DeliverOrderInput {
   note?: string;
 }
 
+export const MAX_NOTE_LENGTH = 5000;
+
 const ensureObjectId = (orderId: string) => {
   if (!Types.ObjectId.isValid(orderId)) {
     throw new OrderFulfillmentError('OrderNotFound', 'Order not found', 404);
@@ -397,5 +399,45 @@ export class OrderFulfillmentService {
     });
 
     return order;
+  }
+
+  // Note libre : l'événement NOTE garde auteur + horodatage (typage rétroactif futur),
+  // lastNoteText/lastNoteAt sont dénormalisés pour l'aperçu de la liste.
+  public static async addNote(orderId: string, text: string | undefined, actorId?: string) {
+    const trimmedText = text?.trim();
+    if (!trimmedText) {
+      throw new OrderFulfillmentError('NoteTextRequired', 'A note text is required', 400);
+    }
+    if (trimmedText.length > MAX_NOTE_LENGTH) {
+      throw new OrderFulfillmentError('NoteTextTooLong', `A note cannot exceed ${MAX_NOTE_LENGTH} characters`, 400);
+    }
+
+    ensureObjectId(orderId);
+
+    const exists = await Order.exists({ _id: orderId });
+    if (!exists) {
+      throw new OrderFulfillmentError('OrderNotFound', 'Order not found', 404);
+    }
+
+    // L'événement (historique, source de vérité) est écrit avant l'aperçu dénormalisé :
+    // un échec entre les deux ne peut pas laisser un aperçu absent de l'historique.
+    const event = await createEvent({
+      orderId: exists._id,
+      type: OrderEventType.NOTE,
+      actorId,
+      note: trimmedText
+    });
+
+    const order = await Order.findByIdAndUpdate(
+      orderId,
+      { $set: { lastNoteText: trimmedText, lastNoteAt: event.createdAt } },
+      { new: true }
+    );
+
+    if (!order) {
+      throw new OrderFulfillmentError('OrderNotFound', 'Order not found', 404);
+    }
+
+    return { order, event };
   }
 }
