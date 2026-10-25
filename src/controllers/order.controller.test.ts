@@ -131,6 +131,97 @@ describe('order controller list filters', () => {
     expect(buildOrderListFilters({ hideCompleted: 'false' }).filters).toEqual({});
     expect(buildOrderListFilters({}).filters).toEqual({});
   });
+
+  const phoneClause = {
+    $or: [
+      { customerPhoneE164: { $regex: '771234567', $options: 'i' } },
+      { customerPhoneRaw: { $regex: '771234567', $options: 'i' } }
+    ]
+  };
+
+  it('searches every supported field in a single $or nested under $and', () => {
+    const { filters } = buildOrderListFilters({ search: '  awa  ' });
+    const fields = [
+      'shopifyOrderName',
+      'customerName',
+      'customerPhoneE164',
+      'customerPhoneRaw',
+      'customerEmail',
+      'tags',
+      'lineItems.title',
+      'lineItems.sku'
+    ];
+
+    expect(filters).toEqual({
+      $and: [{ $or: fields.map(field => ({ [field]: { $regex: 'awa', $options: 'i' } })) }]
+    });
+  });
+
+  it.each([
+    [{ phone: '771234567' }, [phoneClause]],
+    [{ phone: '771234567', search: 'awa' }, [phoneClause, expect.objectContaining({ $or: expect.any(Array) })]]
+  ])('keeps the phone filter alongside the search for %p', (query, expected) => {
+    const { filters } = buildOrderListFilters(query);
+
+    expect(filters.$or).toBeUndefined();
+    expect(filters.$and).toEqual(expected);
+  });
+
+  it('escapes regex special characters in the search', () => {
+    const { filters } = buildOrderListFilters({ search: '#1156 (a+b)' });
+    const [clause] = filters.$and as { $or: Record<string, { $regex: string }>[] }[];
+
+    expect(clause?.$or[0]).toEqual({ shopifyOrderName: { $regex: '#1156 \\(a\\+b\\)', $options: 'i' } });
+  });
+
+  it('also matches phones on digits only when the search is typed with spaces', () => {
+    const { filters } = buildOrderListFilters({ search: '77 412 88 90' });
+    const [clause] = filters.$and as { $or: Record<string, unknown>[] }[];
+
+    expect(clause?.$or).toEqual(
+      expect.arrayContaining([
+        { customerPhoneE164: { $regex: '774128890', $options: 'i' } },
+        { customerPhoneRaw: { $regex: '774128890', $options: 'i' } }
+      ])
+    );
+  });
+
+  it.each(['awa', '#1156', '1156', 'SKU-2024-01'])('does not add a digits-only phone clause to %p', search => {
+    const { filters } = buildOrderListFilters({ search });
+    const [clause] = filters.$and as { $or: unknown[] }[];
+
+    expect(clause?.$or).toHaveLength(8);
+  });
+
+  it.each([
+    [{ hideCancelled: 'true' }, { customerConfirmationStatus: { $ne: CustomerConfirmationStatus.CANCELLED } }],
+    [{ hideCancelled: 'false' }, {}],
+    [{}, {}],
+    [
+      { hideCancelled: 'true', customerConfirmationStatus: CustomerConfirmationStatus.CANCELLED },
+      { customerConfirmationStatus: CustomerConfirmationStatus.CANCELLED }
+    ],
+    [
+      { hideCancelled: 'true', customerConfirmationStatus: CustomerConfirmationStatus.CONFIRMED },
+      { customerConfirmationStatus: CustomerConfirmationStatus.CONFIRMED }
+    ],
+    [
+      { hideCancelled: 'true', customerConfirmationStatus: 'unknown' },
+      { customerConfirmationStatus: { $ne: CustomerConfirmationStatus.CANCELLED } }
+    ]
+  ])('applies hideCancelled to %p', (query, expected) => {
+    expect(buildOrderListFilters(query).filters).toEqual(expected);
+  });
+
+  it('combines search, hideCancelled and hideCompleted without overwriting each other', () => {
+    const { filters } = buildOrderListFilters({ search: 'awa', hideCancelled: 'true', hideCompleted: 'true' });
+
+    expect(filters).toEqual({
+      $and: [expect.objectContaining({ $or: expect.any(Array) })],
+      customerConfirmationStatus: { $ne: CustomerConfirmationStatus.CANCELLED },
+      $nor: [{ operationalStatus: 'delivered', codPaymentStatus: 'paid' }]
+    });
+  });
 });
 
 describe('order controller optional amount parsing', () => {
