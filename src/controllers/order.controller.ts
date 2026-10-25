@@ -1,7 +1,7 @@
 import { Request, Response } from 'express';
 import { Types } from 'mongoose';
 import { Message } from '../models/Message';
-import { OrderEvent } from '../models/OrderEvent';
+import { IOrderEvent, OrderEvent } from '../models/OrderEvent';
 import {
   AttentionReasonCode,
   CodPaymentStatus,
@@ -212,6 +212,23 @@ const getOrderNoteAttribute = (order: IOrder, ...names: string[]) => {
   }
 
   return undefined;
+};
+
+type PopulatedActor = { _id: Types.ObjectId; userName?: string };
+
+/**
+ * Événement de timeline avec `actorId` peuplé (`populate('actorId', 'userName')`) :
+ * on renvoie l'id à plat + `actorName`, attendus par le front. Un auteur supprimé
+ * est peuplé à `null` et ressort sans id ni nom.
+ */
+export const toOrderEventResponse = (event: IOrderEvent) => {
+  const actor = event.actorId as unknown as PopulatedActor | null | undefined;
+
+  return {
+    ...event.toJSON(),
+    actorId: actor?._id?.toString(),
+    actorName: actor?.userName
+  };
 };
 
 /**
@@ -435,7 +452,7 @@ export class OrderController {
 
     const [messages, events] = await Promise.all([
       Message.find({ orderId: order._id }).sort({ createdAt: -1 }),
-      OrderEvent.find({ orderId: order._id }).sort({ createdAt: -1 })
+      OrderEvent.find({ orderId: order._id }).sort({ createdAt: -1 }).populate('actorId', 'userName')
     ]);
     const messageSummary = buildMessageSummary(messages);
 
@@ -453,7 +470,7 @@ export class OrderController {
         order: toOrderResponse(order),
         messages,
         messageSummary,
-        events,
+        events: events.map(toOrderEventResponse),
         capabilities: getOrderActionCapabilities(order)
       }
     });
@@ -640,6 +657,23 @@ export class OrderController {
       const order = await OrderFulfillmentService.markReturned(id, reason, req.userId);
 
       return res.status(200).json({ data: { order: toOrderResponse(order) } });
+    } catch (err) {
+      if (err instanceof OrderFulfillmentError) {
+        return res.status(err.status).json({ error: err.code });
+      }
+
+      throw err;
+    }
+  }
+
+  public static async addNote(req: Request, res: Response) {
+    const id = typeof req.params.id === 'string' ? req.params.id : '';
+    const text = typeof req.body?.text === 'string' ? req.body.text : undefined;
+
+    try {
+      const { order, event } = await OrderFulfillmentService.addNote(id, text, req.userId);
+
+      return res.status(201).json({ data: { order: toOrderResponse(order), event } });
     } catch (err) {
       if (err instanceof OrderFulfillmentError) {
         return res.status(err.status).json({ error: err.code });

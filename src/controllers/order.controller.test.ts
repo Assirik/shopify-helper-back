@@ -6,8 +6,10 @@ import {
   parseBulkOrderIds,
   parseOptionalAmount,
   toAttentionOrder,
+  toOrderEventResponse,
   toOrderResponse
 } from './order.controller';
+import { IOrderEvent, OrderEventType } from '../models/OrderEvent';
 
 jest.mock('../queues/notification.queue', () => ({
   enqueueConfirmationReminder: jest.fn(),
@@ -145,5 +147,27 @@ describe('order controller optional amount parsing', () => {
 
   it.each([null, '', '   ', 'abc', -1, NaN, {}])('rejects the invalid amount %p', value => {
     expect(parseOptionalAmount(value)).toEqual({ ok: false });
+  });
+});
+
+describe('order controller timeline events', () => {
+  const buildEvent = (actorId: unknown) =>
+    ({
+      actorId,
+      toJSON: () => ({ type: OrderEventType.NOTE, note: 'Livrer chez son frère', actorId })
+    }) as unknown as IOrderEvent;
+
+  it('flattens a populated author into actorId and actorName', () => {
+    const userId = new Types.ObjectId();
+
+    expect(toOrderEventResponse(buildEvent({ _id: userId, userName: 'awa' }))).toEqual(
+      expect.objectContaining({ note: 'Livrer chez son frère', actorId: userId.toString(), actorName: 'awa' })
+    );
+  });
+
+  it.each([null, undefined])('leaves the author empty when the actor is %p', actorId => {
+    expect(toOrderEventResponse(buildEvent(actorId))).toEqual(
+      expect.objectContaining({ actorId: undefined, actorName: undefined })
+    );
   });
 });

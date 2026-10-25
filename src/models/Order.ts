@@ -155,7 +155,9 @@ const OrderSchema = new Schema<IOrder>(
     carrierFeeAmount: { type: Number },
     codNetRemitted: { type: Number },
     codPaymentStatus: { type: String, enum: Object.values(CodPaymentStatus) },
-    collectedAt: { type: Date }
+    collectedAt: { type: Date },
+    lastNoteText: { type: String, trim: true },
+    lastNoteAt: { type: Date }
   },
   {
     timestamps: true
@@ -251,6 +253,8 @@ export interface IOrder extends Document {
   codNetRemitted?: number;
   codPaymentStatus?: CodPaymentStatus;
   collectedAt?: Date;
+  lastNoteText?: string;
+  lastNoteAt?: Date;
   createdAt: Date;
   updatedAt: Date;
 }

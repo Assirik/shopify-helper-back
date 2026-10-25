@@ -10,7 +10,8 @@ export enum OrderEventType {
   DELIVERED = 'delivered',
   DELIVERY_FAILED = 'delivery_failed',
   RETURNED = 'returned',
-  PAYMENT_RECORDED = 'payment_recorded'
+  PAYMENT_RECORDED = 'payment_recorded',
+  NOTE = 'note'
 }
 
 const OrderEventSchema = new Schema<IOrderEvent>(
