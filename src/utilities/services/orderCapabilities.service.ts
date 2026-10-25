@@ -16,6 +16,7 @@ export interface OrderActionCapabilities {
   canDeliver: boolean;
   canMarkFailed: boolean;
   canReturn: boolean;
+  canMarkUnreachable: boolean;
 }
 
 export const getOrderActionCapabilities = (
@@ -49,6 +50,8 @@ export const getOrderActionCapabilities = (
     canMarkFailed: canActOnActiveDelivery,
     canReturn:
       order.operationalStatus === OrderOperationalStatus.IN_DELIVERY ||
-      order.operationalStatus === OrderOperationalStatus.DELIVERY_FAILED
+      order.operationalStatus === OrderOperationalStatus.DELIVERY_FAILED,
+    // « Injoignable » appartient à la phase de confirmation : mêmes statuts que la confirmation admin.
+    canMarkUnreachable: CONFIRMABLE_BY_ADMIN.includes(order.customerConfirmationStatus)
   };
 };

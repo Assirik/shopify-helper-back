@@ -5,6 +5,7 @@ import { IOrderEvent, OrderEvent } from '../models/OrderEvent';
 import {
   AttentionReasonCode,
   CodPaymentStatus,
+  ConfirmationSource,
   CustomerConfirmationStatus,
   DeliveryChannel,
   IOrder,
@@ -13,7 +14,12 @@ import {
   OrderOperationalStatus
 } from '../models/Order';
 import { getOrderActionCapabilities } from '../utilities/services/orderCapabilities.service';
-import { OrderConfirmationError, OrderConfirmationService } from '../utilities/services/orderConfirmation.service';
+import {
+  ADMIN_CONFIRMATION_SOURCES,
+  AdminConfirmationSource,
+  OrderConfirmationError,
+  OrderConfirmationService
+} from '../utilities/services/orderConfirmation.service';
 import { OrderFulfillmentError, OrderFulfillmentService } from '../utilities/services/orderFulfillment.service';
 import { ReconciliationError, ReconciliationService } from '../utilities/services/reconciliation.service';
 import { resolveRegion } from '../utilities/reference/senegalRegions';
@@ -57,6 +63,16 @@ export const parseOptionalAmount = (value: unknown): { ok: true; value?: number 
   }
 
   return { ok: true, value: parsed };
+};
+
+// Source de confirmation déclarée par l'agent : omise => `admin` (comportement historique),
+// toute autre valeur que admin/phone_call => rejet.
+export const parseConfirmationSource = (
+  value: unknown
+): { ok: true; value: AdminConfirmationSource } | { ok: false } => {
+  if (value === undefined) return { ok: true, value: ConfirmationSource.ADMIN };
+  const source = ADMIN_CONFIRMATION_SOURCES.find(candidate => candidate === value);
+  return source ? { ok: true, value: source } : { ok: false };
 };
 
 const escapeRegExp = (value: string) => {
@@ -390,7 +406,8 @@ export class OrderController {
         free_text: 0,
         sms_only: 0,
         invalid_number: 0,
-        late_confirm: 0
+        late_confirm: 0,
+        unreachable: 0
       } as Record<'all' | AttentionReasonCode, number>
     );
 
@@ -478,15 +495,18 @@ export class OrderController {
 
   public static async confirm(req: Request, res: Response) {
     const id = typeof req.params.id === 'string' ? req.params.id : '';
+    const source = parseConfirmationSource(req.body?.source);
+    if (!source.ok) return res.status(400).json({ error: 'InvalidConfirmationSource' });
 
     try {
-      const result = await OrderConfirmationService.confirmByAdmin(id, req.userId);
+      const result = await OrderConfirmationService.confirmByAdmin(id, req.userId, source.value);
 
       log.info(
         {
           orderId: result.order._id,
           messageId: result.message._id,
-          jobId: result.job.id
+          jobId: result.job.id,
+          source: source.value
         },
         'Admin confirmed order'
       );
@@ -659,6 +679,25 @@ export class OrderController {
       return res.status(200).json({ data: { order: toOrderResponse(order) } });
     } catch (err) {
       if (err instanceof OrderFulfillmentError) {
+        return res.status(err.status).json({ error: err.code });
+      }
+
+      throw err;
+    }
+  }
+
+  public static async markUnreachable(req: Request, res: Response) {
+    const id = typeof req.params.id === 'string' ? req.params.id : '';
+    const note = typeof req.body?.note === 'string' ? req.body.note : undefined;
+
+    try {
+      const { order, event } = await OrderConfirmationService.markUnreachable(id, note, req.userId);
+
+      log.info({ orderId: order._id, hasNote: Boolean(note?.trim()) }, 'Admin marked order unreachable');
+
+      return res.status(200).json({ data: { order: toOrderResponse(order), event } });
+    } catch (err) {
+      if (err instanceof OrderConfirmationError) {
         return res.status(err.status).json({ error: err.code });
       }
 

@@ -21,7 +21,8 @@ export enum CustomerConfirmationStatus {
 
 export enum ConfirmationSource {
   WHATSAPP_BUTTON = 'whatsapp_button',
-  ADMIN = 'admin'
+  ADMIN = 'admin',
+  PHONE_CALL = 'phone_call'
 }
 
 export enum ReminderSource {
@@ -52,7 +53,8 @@ export enum AttentionReasonCode {
   FREE_TEXT = 'free_text',
   SMS_ONLY = 'sms_only',
   INVALID_NUMBER = 'invalid_number',
-  LATE_CONFIRM = 'late_confirm'
+  LATE_CONFIRM = 'late_confirm',
+  UNREACHABLE = 'unreachable'
 }
 
 const OrderLineItemSchema = new Schema<IOrderLineItem>(

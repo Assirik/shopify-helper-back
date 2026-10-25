@@ -18,6 +18,7 @@ import {
 import config from '../config/env.config';
 import log from '../logger/logger';
 import { CONFIRMABLE_BY_ADMIN, getOrderActionCapabilities } from './orderCapabilities.service';
+import { MAX_NOTE_LENGTH } from './orderFulfillment.service';
 
 export class OrderConfirmationError extends Error {
   public readonly code: string;
@@ -38,6 +39,12 @@ export interface WhatsAppButtonConfirmation {
 }
 
 export const MAX_CANCELLATION_REASON_LENGTH = 500;
+
+/** Sources qu'un agent peut déclarer en confirmant (le bouton WhatsApp est réservé au webhook). */
+export const ADMIN_CONFIRMATION_SOURCES = [ConfirmationSource.ADMIN, ConfirmationSource.PHONE_CALL] as const;
+export type AdminConfirmationSource = (typeof ADMIN_CONFIRMATION_SOURCES)[number];
+
+const DEFAULT_UNREACHABLE_NOTE = 'Client injoignable';
 
 const ensureObjectId = (orderId: string) => {
   if (!Types.ObjectId.isValid(orderId)) {
@@ -214,7 +221,11 @@ export class OrderConfirmationService {
     return { order, message: undefined, job: undefined, alreadyConfirmed: false, needsAttention: true };
   }
 
-  public static async confirmByAdmin(orderId: string, actorId?: string) {
+  public static async confirmByAdmin(
+    orderId: string,
+    actorId?: string,
+    source: AdminConfirmationSource = ConfirmationSource.ADMIN
+  ) {
     ensureObjectId(orderId);
 
     const now = new Date();
@@ -223,7 +234,7 @@ export class OrderConfirmationService {
       {
         $set: {
           customerConfirmationStatus: CustomerConfirmationStatus.CONFIRMED,
-          confirmationSource: ConfirmationSource.ADMIN,
+          confirmationSource: source,
           confirmedAt: now,
           needsHelpdeskAttention: false,
           operationalStatus: OrderOperationalStatus.TO_DELIVER
@@ -252,12 +263,64 @@ export class OrderConfirmationService {
       type: OrderEventType.CONFIRMED,
       toStatus: OrderOperationalStatus.TO_DELIVER,
       actorId,
-      metadata: { source: ConfirmationSource.ADMIN }
+      metadata: { source }
     });
 
     const { message, job } = await enqueueConfirmedTemplate(order._id);
 
     return { order, message, job };
+  }
+
+  // Appel sans réponse : la commande (re)vient dans « À traiter » avec le motif UNREACHABLE
+  // pour être relancée. La tentative est tracée en note (auteur + date) et en aperçu de liste.
+  public static async markUnreachable(orderId: string, note?: string, actorId?: string) {
+    ensureObjectId(orderId);
+
+    const trimmedNote = note?.trim();
+    if (trimmedNote && trimmedNote.length > MAX_NOTE_LENGTH) {
+      throw new OrderConfirmationError('NoteTextTooLong', `A note cannot exceed ${MAX_NOTE_LENGTH} characters`, 400);
+    }
+    const noteText = trimmedNote || DEFAULT_UNREACHABLE_NOTE;
+
+    const now = new Date();
+    const order = await Order.findOneAndUpdate(
+      { _id: orderId, customerConfirmationStatus: { $in: CONFIRMABLE_BY_ADMIN } },
+      {
+        $set: {
+          needsHelpdeskAttention: true,
+          attentionReasonCode: AttentionReasonCode.UNREACHABLE,
+          attentionReason: noteText,
+          attentionRequiredAt: now,
+          lastNoteText: noteText,
+          lastNoteAt: now
+        }
+      },
+      { new: true }
+    );
+
+    if (!order) {
+      const exists = await Order.exists({ _id: orderId });
+
+      if (!exists) {
+        throw new OrderConfirmationError('OrderNotFound', 'Order not found', 404);
+      }
+
+      throw new OrderConfirmationError(
+        'OrderUnreachableNotAllowed',
+        'Only orders awaiting confirmation can be marked unreachable',
+        409
+      );
+    }
+
+    const event = await createOrderEvent({
+      orderId: order._id,
+      type: OrderEventType.NOTE,
+      actorId,
+      note: noteText,
+      metadata: { attentionReasonCode: AttentionReasonCode.UNREACHABLE }
+    });
+
+    return { order, event };
   }
 
   public static async cancelByAdmin(orderId: string, reason?: string, actorId?: string) {
