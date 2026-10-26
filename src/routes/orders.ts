@@ -18,6 +18,7 @@ router.post('/:id/deliver', requireAuth, asyncHandler(OrderController.deliver));
 router.post('/:id/delivery-failed', requireAuth, asyncHandler(OrderController.markDeliveryFailed));
 router.post('/:id/return', requireAuth, asyncHandler(OrderController.markReturned));
 router.post('/:id/notes', requireAuth, asyncHandler(OrderController.addNote));
+router.post('/:id/mark-unreachable', requireAuth, asyncHandler(OrderController.markUnreachable));
 router.get('/:id', requireAuth, asyncHandler(OrderController.detail));
 
 export default router;

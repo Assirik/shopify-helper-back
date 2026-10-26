@@ -1,9 +1,10 @@
 import { describe, expect, it, jest } from '@jest/globals';
 import { Types } from 'mongoose';
-import { AttentionReasonCode, CustomerConfirmationStatus, IOrder } from '../models/Order';
+import { AttentionReasonCode, ConfirmationSource, CustomerConfirmationStatus, IOrder } from '../models/Order';
 import {
   buildOrderListFilters,
   parseBulkOrderIds,
+  parseConfirmationSource,
   parseOptionalAmount,
   toAttentionOrder,
   toOrderEventResponse,
@@ -85,7 +86,8 @@ describe('order controller attention contracts', () => {
           canDispatch: false,
           canDeliver: false,
           canMarkFailed: false,
-          canReturn: false
+          canReturn: false,
+          canMarkUnreachable: true
         }
       })
     );
@@ -238,6 +240,20 @@ describe('order controller optional amount parsing', () => {
 
   it.each([null, '', '   ', 'abc', -1, NaN, {}])('rejects the invalid amount %p', value => {
     expect(parseOptionalAmount(value)).toEqual({ ok: false });
+  });
+});
+
+describe('order controller confirmation source parsing', () => {
+  it('defaults to admin when the source is omitted', () => {
+    expect(parseConfirmationSource(undefined)).toEqual({ ok: true, value: ConfirmationSource.ADMIN });
+  });
+
+  it.each([ConfirmationSource.ADMIN, ConfirmationSource.PHONE_CALL])('accepts %p', source => {
+    expect(parseConfirmationSource(source)).toEqual({ ok: true, value: source });
+  });
+
+  it.each([ConfirmationSource.WHATSAPP_BUTTON, 'sms', '', null, 42])('rejects %p', source => {
+    expect(parseConfirmationSource(source)).toEqual({ ok: false });
   });
 });
 
