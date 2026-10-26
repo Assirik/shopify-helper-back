@@ -13,7 +13,12 @@ import {
   toOrderResponse
 } from './order.controller';
 import { IOrderEvent, OrderEventType } from '../models/OrderEvent';
-import { OrderConfirmationService } from '../utilities/services/orderConfirmation.service';
+import { Order } from '../models/Order';
+import {
+  OrderConfirmationError,
+  OrderConfirmationService
+} from '../utilities/services/orderConfirmation.service';
+import { OrderFulfillmentService } from '../utilities/services/orderFulfillment.service';
 
 jest.mock('../queues/notification.queue', () => ({
   enqueueConfirmationReminder: jest.fn(),
@@ -307,5 +312,191 @@ describe('order controller bulk actions', () => {
 
     expect(service).toHaveBeenCalledTimes(orderIds.length);
     orderIds.forEach(orderId => expect(service).toHaveBeenCalledWith(orderId, userId));
+  });
+});
+
+// Handlers HTTP du Lot 0 : on vérifie le contrat (statuts, codes d'erreur, arguments
+// transmis aux services) sans base de données, comme le reste de ce fichier.
+const mockResponse = () => {
+  const json = jest.fn((_body: unknown) => undefined);
+  const status = jest.fn((_code: number) => ({ json }));
+  return { res: { status } as unknown as Response, status, json };
+};
+
+const mockRequest = (input: { params?: Record<string, string>; body?: unknown; query?: unknown }) =>
+  ({ params: {}, query: {}, userId: new Types.ObjectId().toString(), ...input }) as unknown as Request;
+
+// `Order.find(...).sort().skip().limit()` sans base : la chaîne renvoie une liste vide.
+const mockOrderFind = () => {
+  const query = { sort: jest.fn(), skip: jest.fn(), limit: jest.fn() };
+  query.sort.mockReturnValue(query);
+  query.skip.mockReturnValue(query);
+  query.limit.mockResolvedValue([] as never);
+  return jest.spyOn(Order, 'find').mockReturnValue(query as never);
+};
+
+describe('order controller attention queue (Lot 0 · F1)', () => {
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  it('excludes delivered, returned and cancelled orders from the list, the total and the per-reason counts', async () => {
+    const find = mockOrderFind();
+    const count = jest.spyOn(Order, 'countDocuments').mockResolvedValue(0 as never);
+    const aggregate = jest.spyOn(Order, 'aggregate').mockResolvedValue([] as never);
+    const { res, status } = mockResponse();
+
+    await OrderController.attentionQueue(mockRequest({}), res);
+
+    const exclusions = {
+      needsHelpdeskAttention: true,
+      operationalStatus: { $nin: ['delivered', 'returned'] },
+      customerConfirmationStatus: { $ne: CustomerConfirmationStatus.CANCELLED }
+    };
+    expect(status).toHaveBeenCalledWith(200);
+    expect(find.mock.calls[0]?.[0]).toEqual(expect.objectContaining(exclusions));
+    expect(count.mock.calls[0]?.[0]).toEqual(expect.objectContaining(exclusions));
+    const pipeline = aggregate.mock.calls[0]?.[0] as { $match?: unknown }[];
+    expect(pipeline[0]?.$match).toEqual(expect.objectContaining(exclusions));
+  });
+
+  it('accepts the unreachable reason filter (F15)', async () => {
+    const find = mockOrderFind();
+    jest.spyOn(Order, 'countDocuments').mockResolvedValue(0 as never);
+    jest.spyOn(Order, 'aggregate').mockResolvedValue([] as never);
+    const { res, status } = mockResponse();
+
+    await OrderController.attentionQueue(mockRequest({ query: { reason: AttentionReasonCode.UNREACHABLE } }), res);
+
+    expect(status).toHaveBeenCalledWith(200);
+    expect(find.mock.calls[0]?.[0]).toEqual(
+      expect.objectContaining({ attentionReasonCode: AttentionReasonCode.UNREACHABLE })
+    );
+  });
+});
+
+describe('order controller notes endpoint (Lot 0 · F16)', () => {
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  it.each([undefined, '', '   ', 42])('answers 400 NoteTextRequired for the text %p', async text => {
+    const update = jest.spyOn(Order, 'findByIdAndUpdate');
+    const { res, status, json } = mockResponse();
+
+    await OrderController.addNote(
+      mockRequest({ params: { id: new Types.ObjectId().toString() }, body: { text } }),
+      res
+    );
+
+    expect(status).toHaveBeenCalledWith(400);
+    expect(json).toHaveBeenCalledWith({ error: 'NoteTextRequired' });
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  it('answers 201 with the order and the note event, authored by the signed-in user', async () => {
+    const orderId = new Types.ObjectId();
+    const event = { type: OrderEventType.NOTE, note: 'Reporter à samedi' };
+    const addNote = jest
+      .spyOn(OrderFulfillmentService, 'addNote')
+      .mockResolvedValue({ order: { _id: orderId, lastNoteText: 'Reporter à samedi' }, event } as never);
+    const req = mockRequest({ params: { id: orderId.toString() }, body: { text: 'Reporter à samedi' } });
+    const { res, status, json } = mockResponse();
+
+    await OrderController.addNote(req, res);
+
+    expect(addNote).toHaveBeenCalledWith(orderId.toString(), 'Reporter à samedi', req.userId);
+    expect(status).toHaveBeenCalledWith(201);
+    expect(json).toHaveBeenCalledWith({
+      data: { order: expect.objectContaining({ lastNoteText: 'Reporter à samedi' }), event }
+    });
+  });
+});
+
+describe('order controller confirmation source and unreachable (Lot 0 · F15)', () => {
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  it('rejects an unknown confirmation source before touching the order', async () => {
+    const confirm = jest.spyOn(OrderConfirmationService, 'confirmByAdmin');
+    const { res, status, json } = mockResponse();
+
+    await OrderController.confirm(
+      mockRequest({ params: { id: new Types.ObjectId().toString() }, body: { source: 'whatsapp_button' } }),
+      res
+    );
+
+    expect(status).toHaveBeenCalledWith(400);
+    expect(json).toHaveBeenCalledWith({ error: 'InvalidConfirmationSource' });
+    expect(confirm).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [{}, ConfirmationSource.ADMIN],
+    [{ source: ConfirmationSource.PHONE_CALL }, ConfirmationSource.PHONE_CALL]
+  ] as const)('confirms with body %p as source %p', async (body, expected) => {
+    const orderId = new Types.ObjectId();
+    const confirm = jest.spyOn(OrderConfirmationService, 'confirmByAdmin').mockResolvedValue({
+      order: { _id: orderId },
+      message: { _id: new Types.ObjectId() },
+      job: { id: 'job-1', queueName: 'notifications' }
+    } as never);
+    const req = mockRequest({ params: { id: orderId.toString() }, body });
+    const { res, status } = mockResponse();
+
+    await OrderController.confirm(req, res);
+
+    expect(confirm).toHaveBeenCalledWith(orderId.toString(), req.userId, expected);
+    expect(status).toHaveBeenCalledWith(202);
+  });
+
+  it('marks an order unreachable with the optional note and the signed-in user', async () => {
+    const orderId = new Types.ObjectId();
+    const markUnreachable = jest
+      .spyOn(OrderConfirmationService, 'markUnreachable')
+      .mockResolvedValue({ order: { _id: orderId }, event: {} } as never);
+    const req = mockRequest({ params: { id: orderId.toString() }, body: { note: 'Messagerie' } });
+    const { res, status } = mockResponse();
+
+    await OrderController.markUnreachable(req, res);
+
+    expect(markUnreachable).toHaveBeenCalledWith(orderId.toString(), 'Messagerie', req.userId);
+    expect(status).toHaveBeenCalledWith(200);
+  });
+
+  it('maps a refused unreachable transition to its error code', async () => {
+    jest
+      .spyOn(OrderConfirmationService, 'markUnreachable')
+      .mockRejectedValue(new OrderConfirmationError('OrderUnreachableNotAllowed', 'Not allowed', 409));
+    const { res, status, json } = mockResponse();
+
+    await OrderController.markUnreachable(mockRequest({ params: { id: new Types.ObjectId().toString() } }), res);
+
+    expect(status).toHaveBeenCalledWith(409);
+    expect(json).toHaveBeenCalledWith({ error: 'OrderUnreachableNotAllowed' });
+  });
+});
+
+describe('order controller list endpoint (Lot 0 · F20/F21)', () => {
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  it('queries orders with the search under $and, the phone filter kept and cancelled orders hidden', async () => {
+    const find = mockOrderFind();
+    jest.spyOn(Order, 'countDocuments').mockResolvedValue(0 as never);
+    const { res, status } = mockResponse();
+
+    await OrderController.list(
+      mockRequest({ query: { search: 'awa', phone: '771234567', hideCancelled: 'true' } }),
+      res
+    );
+
+    expect(status).toHaveBeenCalledWith(200);
+    const filters = find.mock.calls[0]?.[0] as unknown as Record<string, unknown>;
+    expect(filters.$or).toBeUndefined();
+    expect(filters.$and).toHaveLength(2);
+    expect(filters.customerConfirmationStatus).toEqual({ $ne: CustomerConfirmationStatus.CANCELLED });
   });
 });

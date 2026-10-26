@@ -339,4 +339,38 @@ describe('order fulfillment service', () => {
     });
     expect(createEvent).not.toHaveBeenCalled();
   });
+
+  describe('helpdesk attention on terminal transitions (Lot 0 · F1)', () => {
+    const clearedAttention = {
+      $set: expect.objectContaining({ needsHelpdeskAttention: false }),
+      $unset: { attentionReason: '', attentionReasonCode: '', attentionRequiredAt: '' }
+    };
+
+    it('clears the attention flag and its reason fields on delivery', async () => {
+      jest.spyOn(Order, 'findById').mockResolvedValue({
+        _id: orderId,
+        totalPrice: '10000',
+        deliveryRegionCode: 'SN_DK',
+        deliveryChannel: DeliveryChannel.INTERNAL,
+        assignedCourierId: courierId,
+        operationalStatus: OrderOperationalStatus.IN_DELIVERY
+      } as never);
+      jest.spyOn(DeliveryFeeConfigService, 'resolveDeliveryFee').mockResolvedValue(1500);
+      const update = jest.spyOn(Order, 'findOneAndUpdate').mockResolvedValue({ _id: orderId } as never);
+      jest.spyOn(OrderEvent, 'create').mockResolvedValue({} as never);
+
+      await OrderFulfillmentService.deliver(orderId.toString(), { collectedAmount: 10000 });
+
+      expect(update.mock.calls[0]?.[1]).toEqual(expect.objectContaining(clearedAttention));
+    });
+
+    it('clears the attention flag and its reason fields on return', async () => {
+      const update = jest.spyOn(Order, 'findOneAndUpdate').mockResolvedValue({ _id: orderId } as never);
+      jest.spyOn(OrderEvent, 'create').mockResolvedValue({} as never);
+
+      await OrderFulfillmentService.markReturned(orderId.toString(), 'Refusé à la livraison');
+
+      expect(update.mock.calls[0]?.[1]).toEqual(expect.objectContaining(clearedAttention));
+    });
+  });
 });
