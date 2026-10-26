@@ -354,7 +354,9 @@ export class OrderController {
     const orderIds = parseBulkOrderIds(req.body?.orderIds);
     if (!orderIds) return res.status(400).json({ error: 'InvalidOrderIds' });
 
-    const results = await runWithConcurrency(orderIds, orderId => OrderConfirmationService.confirmByAdmin(orderId));
+    const results = await runWithConcurrency(orderIds, orderId =>
+      OrderConfirmationService.confirmByAdmin(orderId, req.userId)
+    );
     const succeeded = results
       .filter(result => result.status === 'fulfilled')
       .map(result => ({ orderId: result.orderId }));
@@ -381,7 +383,9 @@ export class OrderController {
     const orderIds = parseBulkOrderIds(req.body?.orderIds);
     if (!orderIds) return res.status(400).json({ error: 'InvalidOrderIds' });
 
-    const results = await runWithConcurrency(orderIds, orderId => OrderConfirmationService.remindByAdmin(orderId));
+    const results = await runWithConcurrency(orderIds, orderId =>
+      OrderConfirmationService.remindByAdmin(orderId, req.userId)
+    );
     const succeeded = results
       .filter(result => result.status === 'fulfilled')
       .map(result => ({ orderId: result.orderId }));
