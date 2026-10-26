@@ -75,16 +75,49 @@ const createPagination = (page: number, limit: number, total: number) => {
 const MAX_BULK_ORDERS = 100;
 const BULK_CONCURRENCY = 5;
 
+// Champs couverts par la recherche unifiée (F20).
+const SEARCH_FIELDS = [
+  'shopifyOrderName',
+  'customerName',
+  'customerPhoneE164',
+  'customerPhoneRaw',
+  'customerEmail',
+  'tags',
+  'lineItems.title',
+  'lineItems.sku'
+];
+const PHONE_FIELDS = ['customerPhoneE164', 'customerPhoneRaw'];
+const PHONE_LIKE = /^[\d\s+().-]+$/;
+
+const containsInsensitive = (value: string) => ({ $regex: escapeRegExp(value), $options: 'i' });
+
+const buildSearchClause = (search: string) => {
+  const clauses: Record<string, unknown>[] = SEARCH_FIELDS.map(field => ({ [field]: containsInsensitive(search) }));
+
+  // « 77 412 88 90 » doit retrouver « +221774128890 » : on cherche aussi les chiffres seuls
+  // sur les téléphones, uniquement si la saisie ressemble à un numéro (pas « #1156 »).
+  const digits = search.replace(/\D/g, '');
+  if (PHONE_LIKE.test(search) && digits.length >= 4 && digits !== search) {
+    clauses.push(...PHONE_FIELDS.map(field => ({ [field]: containsInsensitive(digits) })));
+  }
+
+  return { $or: clauses };
+};
+
 export const buildOrderListFilters = (query: Pick<Request, 'query'>['query']) => {
   const status = toStringFilter(query.status);
   const customerConfirmationStatus = toStringFilter(query.customerConfirmationStatus);
   const operationalStatus = toStringFilter(query.operationalStatus);
   const orderName = toStringFilter(query.orderName);
   const phone = toStringFilter(query.phone);
+  const search = toStringFilter(query.search);
   const cod = toStringFilter(query.cod);
   const hideCompleted = toStringFilter(query.hideCompleted);
+  const hideCancelled = toStringFilter(query.hideCancelled);
 
   const filters: Record<string, unknown> = {};
+  // Chaque groupe `$or` va sous `$and` : deux `$or` au même niveau s'écraseraient.
+  const andClauses: Record<string, unknown>[] = [];
 
   if (status && Object.values(NotificationStatus).includes(status as NotificationStatus)) {
     filters.notificationStatus = status;
@@ -106,14 +139,24 @@ export const buildOrderListFilters = (query: Pick<Request, 'query'>['query']) =>
   }
 
   if (phone) {
-    filters.$or = [
-      { customerPhoneE164: { $regex: escapeRegExp(phone), $options: 'i' } },
-      { customerPhoneRaw: { $regex: escapeRegExp(phone), $options: 'i' } }
-    ];
+    andClauses.push({ $or: PHONE_FIELDS.map(field => ({ [field]: containsInsensitive(phone) })) });
+  }
+
+  if (search) {
+    andClauses.push(buildSearchClause(search));
+  }
+
+  if (andClauses.length) {
+    filters.$and = andClauses;
   }
 
   if (cod === 'true' || cod === 'false') {
     filters.isCashOnDelivery = cod === 'true';
+  }
+
+  // Un filtre de confirmation explicite (y compris « cancelled ») l'emporte sur le masquage.
+  if (hideCancelled === 'true' && !filters.customerConfirmationStatus) {
+    filters.customerConfirmationStatus = { $ne: CustomerConfirmationStatus.CANCELLED };
   }
 
   // Désencombrement : exclut les commandes dont tout le process est terminé
@@ -131,8 +174,10 @@ export const buildOrderListFilters = (query: Pick<Request, 'query'>['query']) =>
     operationalStatus,
     orderName,
     phone,
+    search,
     cod,
-    hideCompleted
+    hideCompleted,
+    hideCancelled
   };
 };
 
@@ -407,8 +452,17 @@ export class OrderController {
     const page = toPositiveInteger(req.query.page, 1);
     const limit = Math.min(toPositiveInteger(req.query.limit, DEFAULT_LIMIT), MAX_LIMIT);
     const skip = (page - 1) * limit;
-    const { filters, status, customerConfirmationStatus, operationalStatus, orderName, phone, cod } =
-      buildOrderListFilters(req.query);
+    const {
+      filters,
+      status,
+      customerConfirmationStatus,
+      operationalStatus,
+      orderName,
+      phone,
+      search,
+      cod,
+      hideCancelled
+    } = buildOrderListFilters(req.query);
 
     const [orders, total] = await Promise.all([
       Order.find(filters).sort({ createdAt: -1 }).skip(skip).limit(limit),
@@ -426,7 +480,9 @@ export class OrderController {
         operationalStatus,
         hasOrderNameFilter: Boolean(orderName),
         hasPhoneFilter: Boolean(phone),
-        hasCodFilter: cod === 'true' || cod === 'false'
+        hasSearchFilter: Boolean(search),
+        hasCodFilter: cod === 'true' || cod === 'false',
+        hideCancelled: hideCancelled === 'true'
       },
       'Listed orders'
     );
