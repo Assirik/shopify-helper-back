@@ -1,7 +1,9 @@
-import { describe, expect, it, jest } from '@jest/globals';
+import { afterEach, describe, expect, it, jest } from '@jest/globals';
+import { Request, Response } from 'express';
 import { Types } from 'mongoose';
 import { AttentionReasonCode, CustomerConfirmationStatus, IOrder } from '../models/Order';
 import {
+  OrderController,
   buildOrderListFilters,
   parseBulkOrderIds,
   parseOptionalAmount,
@@ -10,6 +12,7 @@ import {
   toOrderResponse
 } from './order.controller';
 import { IOrderEvent, OrderEventType } from '../models/OrderEvent';
+import { OrderConfirmationService } from '../utilities/services/orderConfirmation.service';
 
 jest.mock('../queues/notification.queue', () => ({
   enqueueConfirmationReminder: jest.fn(),
@@ -169,5 +172,33 @@ describe('order controller timeline events', () => {
     expect(toOrderEventResponse(buildEvent(actorId))).toEqual(
       expect.objectContaining({ actorId: undefined, actorName: undefined })
     );
+  });
+});
+
+describe('order controller bulk actions', () => {
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  const buildBulkCall = (orderIds: string[]) => {
+    const userId = new Types.ObjectId().toString();
+    const req = { body: { orderIds }, userId } as unknown as Request;
+    const json = jest.fn();
+    const res = { status: jest.fn(() => ({ json })) } as unknown as Response;
+    return { req, res, userId };
+  };
+
+  it.each([
+    ['bulkConfirm', 'confirmByAdmin'],
+    ['bulkRemind', 'remindByAdmin']
+  ] as const)('%s records the acting user as the author of every order event', async (handler, serviceMethod) => {
+    const orderIds = [new Types.ObjectId().toString(), new Types.ObjectId().toString()];
+    const service = jest.spyOn(OrderConfirmationService, serviceMethod).mockResolvedValue({} as never);
+    const { req, res, userId } = buildBulkCall(orderIds);
+
+    await OrderController[handler](req, res);
+
+    expect(service).toHaveBeenCalledTimes(orderIds.length);
+    orderIds.forEach(orderId => expect(service).toHaveBeenCalledWith(orderId, userId));
   });
 });
