@@ -13,6 +13,20 @@ const allowedOrigins =
 const jwtSecret = process.env.JWT_SECRET || 'change-me-in-env';
 const initialAdminBootstrapSecret = process.env.INITIAL_ADMIN_BOOTSTRAP_SECRET || '';
 
+export const DEFAULT_FX_XOF_EUR = 655.957;
+
+export const buildMetaCapiConfig = (env: NodeJS.ProcessEnv) => {
+  const fx = Number(env.META_CAPI_FX_XOF_EUR);
+  return {
+    enabled: env.META_CAPI_ENABLED === 'true',
+    datasetId: (env.META_CAPI_DATASET_ID || '').trim(),
+    accessToken: (env.META_CAPI_ACCESS_TOKEN || '').trim(),
+    graphApiVersion: (env.META_CAPI_GRAPH_API_VERSION || '').trim() || 'v26.0',
+    fxXofEur: Number.isFinite(fx) && fx > 0 ? fx : DEFAULT_FX_XOF_EUR,
+    testEventCode: (env.META_CAPI_TEST_EVENT_CODE || '').trim()
+  };
+};
+
 export default {
   port,
   apiEndpoint,
@@ -40,8 +54,9 @@ export default {
     webhookVerifyToken: process.env.META_WHATSAPP_WEBHOOK_VERIFY_TOKEN || '',
     templateLanguage:
       process.env.META_WHATSAPP_TEMPLATE_LANGUAGE || process.env.META_WHATSAPP_TEMPLATE_LANGUAGE_CODE || 'fr',
-    graphApiVersion: process.env.META_WHATSAPP_GRAPH_API_VERSION || 'v20.0'
+    graphApiVersion: process.env.META_WHATSAPP_GRAPH_API_VERSION || 'v26.0'
   },
+  metaCapi: buildMetaCapiConfig(process.env),
   chatwoot: {
     // Base URL of the self-hosted Chatwoot instance. Leave empty to disable forwarding.
     url: (process.env.CHATWOOT_URL || '').replace(/\/+$/, ''),
