@@ -10,6 +10,13 @@ export enum NotificationStatus {
   PARTIALLY_SENT = 'partially_sent'
 }
 
+export enum CapiPurchaseStatus {
+  PENDING = 'pending',
+  SENT = 'sent',
+  FAILED = 'failed',
+  SKIPPED = 'skipped'
+}
+
 export enum CustomerConfirmationStatus {
   PENDING = 'pending',
   CONFIRMED = 'confirmed',
@@ -128,6 +135,22 @@ const OrderSchema = new Schema<IOrder>(
     },
     confirmationSource: { type: String, enum: Object.values(ConfirmationSource) },
     confirmedAt: { type: Date },
+    fbclid: { type: String, trim: true },
+    adId: { type: String, trim: true },
+    campaignId: { type: String, trim: true },
+    adsetId: { type: String, trim: true },
+    utmSource: { type: String, trim: true },
+    utmMedium: { type: String, trim: true },
+    capiFbp: { type: String, trim: true },
+    capiFbc: { type: String, trim: true },
+    capiClientUserAgent: { type: String, trim: true },
+    capiEventSourceUrl: { type: String, trim: true },
+    capiValueEur: { type: Number },
+    capiFxRate: { type: Number },
+    capiPurchaseStatus: { type: String, enum: Object.values(CapiPurchaseStatus) },
+    capiPurchaseSentAt: { type: Date },
+    capiEventId: { type: String, trim: true },
+    capiPurchaseError: { type: String, trim: true },
     confirmationCancelledAt: { type: Date },
     expiredAt: { type: Date },
     confirmationCancelReason: { type: String, trim: true },
@@ -175,6 +198,7 @@ OrderSchema.index({ operationalStatus: 1, createdAt: -1 });
 OrderSchema.index({ assignedCourierId: 1, deliveredAt: 1 });
 OrderSchema.index({ assignedCarrierId: 1, deliveredAt: 1 });
 OrderSchema.index({ deliveredAt: 1 });
+OrderSchema.index({ capiPurchaseStatus: 1, confirmedAt: 1 });
 OrderSchema.index({ shopifyOrderName: 'text', customerPhoneE164: 'text', customerPhoneRaw: 'text' });
 
 OrderSchema.set('toJSON', {
@@ -225,6 +249,22 @@ export interface IOrder extends Document {
   customerConfirmationStatus: CustomerConfirmationStatus;
   confirmationSource?: ConfirmationSource;
   confirmedAt?: Date;
+  fbclid?: string;
+  adId?: string;
+  campaignId?: string;
+  adsetId?: string;
+  utmSource?: string;
+  utmMedium?: string;
+  capiFbp?: string;
+  capiFbc?: string;
+  capiClientUserAgent?: string;
+  capiEventSourceUrl?: string;
+  capiValueEur?: number;
+  capiFxRate?: number;
+  capiPurchaseStatus?: CapiPurchaseStatus;
+  capiPurchaseSentAt?: Date;
+  capiEventId?: string;
+  capiPurchaseError?: string;
   confirmationCancelledAt?: Date;
   expiredAt?: Date;
   confirmationCancelReason?: string;
