@@ -144,7 +144,10 @@ export const CONFIRMABLE_BY_BUTTON = [
 // Pre-filled WhatsApp message sent right after the EasySell form:
 // "Je confirme ma commande #1234". Recognised when the text contains "confirm"
 // (case and accent insensitive) and at least one `#<digits>` order reference.
+// A negation (the whole word "pas": "ne … pas", "n'… pas") or a cancellation ("annul…")
+// disqualifies it: such a text follows the regular free-text handling.
 const PREFILLED_CONFIRMATION_KEYWORD = 'confirm';
+const PREFILLED_CONFIRMATION_DISQUALIFIER = /\bpas\b|annul/;
 const ORDER_REFERENCE_PATTERN = /#(\d+)/g;
 
 const foldText = (text: string) =>
@@ -158,7 +161,9 @@ const foldText = (text: string) =>
  * message, in order of appearance, or an empty list when the text is not one.
  */
 export const parsePrefilledConfirmationText = (text?: string | null): string[] => {
-  if (!text || !foldText(text).includes(PREFILLED_CONFIRMATION_KEYWORD)) {
+  const folded = text ? foldText(text) : '';
+
+  if (!text || !folded.includes(PREFILLED_CONFIRMATION_KEYWORD) || PREFILLED_CONFIRMATION_DISQUALIFIER.test(folded)) {
     return [];
   }
 

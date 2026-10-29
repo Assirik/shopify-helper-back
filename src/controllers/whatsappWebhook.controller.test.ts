@@ -163,7 +163,9 @@ describe('WhatsApp webhook: pre-filled confirmation (C5.6b)', () => {
   it.each([
     ['a question about the order', 'Où en est ma commande #1234 ?'],
     ['an unknown reference', 'Je confirme ma commande #9999'],
-    ['a confirmation without reference', 'Je confirme ma commande']
+    ['a confirmation without reference', 'Je confirme ma commande'],
+    ['a negated confirmation', 'Je ne confirme pas ma commande #1234'],
+    ['a cancellation', "je confirme l'annulation de #1234"]
   ])('keeps the regular free-text handling for %s', async (_label, body) => {
     mockOrderLookups(order);
     const update = jest.spyOn(Order, 'findOneAndUpdate');

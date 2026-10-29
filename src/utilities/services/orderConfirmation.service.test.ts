@@ -301,6 +301,27 @@ describe('pre-filled WhatsApp confirmation (C5.6b)', () => {
       expect(parsePrefilledConfirmationText(text)).toEqual([]);
     });
 
+    it.each([
+      'Je ne confirme pas ma commande #1234',
+      'je confirme pas #1234',
+      "Je n'confirme pas ma commande #1234",
+      'Annulez, je confirme pas #1234',
+      "je confirme l'annulation de #1234",
+      'JE NE CONFIRME PAS #1234',
+      'Je confirme, mais ANNULÉ #1234'
+    ])('does not recognise the negation or cancellation %p', text => {
+      expect(parsePrefilledConfirmationText(text)).toEqual([]);
+    });
+
+    it.each([
+      'Je confirme ma commande #1234',
+      'JE CONFIRME MA COMMANDE #1234',
+      'Je confirme ma commande #1234, passage le soir svp',
+      'Je confirme #1234, je repasse demain'
+    ])('still recognises %p (no whole word "pas", no "annul")', text => {
+      expect(parsePrefilledConfirmationText(text)).toEqual(['#1234']);
+    });
+
     it('keeps every reference in order of appearance, without duplicates', () => {
       expect(parsePrefilledConfirmationText('Je confirme #99 et #1234, oui #99')).toEqual(['#99', '#1234']);
     });
