@@ -61,7 +61,8 @@ export enum AttentionReasonCode {
   SMS_ONLY = 'sms_only',
   INVALID_NUMBER = 'invalid_number',
   LATE_CONFIRM = 'late_confirm',
-  UNREACHABLE = 'unreachable'
+  UNREACHABLE = 'unreachable',
+  PHONE_MISMATCH = 'phone_mismatch'
 }
 
 const OrderLineItemSchema = new Schema<IOrderLineItem>(

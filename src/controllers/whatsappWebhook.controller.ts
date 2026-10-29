@@ -308,12 +308,55 @@ const handleCustomerReaction = async (message: MetaWhatsAppMessagePayload, rawPa
   });
 };
 
+// Pre-filled "Je confirme ma commande #1234" text. Returns undefined when the message is
+// not one (or targets no confirmable order) so the regular reaction handling applies.
+const handlePrefilledConfirmation = async (message: MetaWhatsAppMessagePayload, rawPayload: unknown) => {
+  if (message.type !== 'text') {
+    return undefined;
+  }
+
+  const text = message.text?.body?.trim();
+  const result = await OrderConfirmationService.confirmByPrefilledMessage({
+    from: message.from,
+    text,
+    waMessageId: message.id
+  });
+
+  if (result.outcome === 'not_applicable') {
+    return undefined;
+  }
+
+  if (result.outcome === 'phone_mismatch') {
+    log.warn(
+      { orderId: result.order._id, waMessageId: message.id },
+      'Pre-filled WhatsApp confirmation sent from a different phone number'
+    );
+  }
+
+  return InboundWhatsAppEvent.create({
+    waMessageId: message.id,
+    from: message.from,
+    type: message.type,
+    text,
+    orderId: result.order._id,
+    rawPayload,
+    processedStatus:
+      result.outcome === 'confirmed' ? InboundWhatsAppEventStatus.PROCESSED : InboundWhatsAppEventStatus.NEEDS_ATTENTION
+  });
+};
+
 const handleInboundMessage = async (message: MetaWhatsAppMessagePayload, rawPayload: unknown) => {
   const buttonPayload = extractButtonPayload(message);
   const buttonText = extractButtonText(message);
 
   if (buttonPayload) {
     return handleConfirmButton(message, buttonPayload, buttonText, rawPayload);
+  }
+
+  const prefilledEvent = await handlePrefilledConfirmation(message, rawPayload);
+
+  if (prefilledEvent) {
+    return prefilledEvent;
   }
 
   return handleCustomerReaction(message, rawPayload);

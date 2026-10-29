@@ -11,7 +11,13 @@ import {
 } from '../../models/Order';
 import config from '../config/env.config';
 import { CONFIRMABLE_BY_ADMIN, getOrderActionCapabilities } from './orderCapabilities.service';
-import { OrderConfirmationService } from './orderConfirmation.service';
+import {
+  CONFIRMABLE_BY_BUTTON,
+  OrderConfirmationService,
+  PHONE_MISMATCH_ATTENTION_REASON,
+  isSenderOrderPhone,
+  parsePrefilledConfirmationText
+} from './orderConfirmation.service';
 import { MAX_NOTE_LENGTH } from './orderFulfillment.service';
 
 jest.mock('../../queues/notification.queue', () => ({
@@ -262,5 +268,302 @@ describe('mark order unreachable', () => {
 
     await expect(OrderConfirmationService.markUnreachable(orderId.toString())).rejects.toMatchObject({ code, status });
     expect(createEvent).not.toHaveBeenCalled();
+  });
+});
+
+describe('pre-filled WhatsApp confirmation (C5.6b)', () => {
+  const orderId = new Types.ObjectId();
+  const orderPhone = '+221776986780';
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  describe('recognition', () => {
+    it.each([
+      'Je confirme ma commande #1234',
+      'je CONFIRME ma commande #1234',
+      'CONFIRMÉ #1234',
+      'Confirmé, commande #1234 merci',
+      'confirmation #1234'
+    ])('recognises %p', text => {
+      expect(parsePrefilledConfirmationText(text)).toEqual(['#1234']);
+    });
+
+    it.each([
+      ['Où en est ma commande #1234 ?'],
+      ['Bonjour, ma commande #1234'],
+      ['Je confirme ma commande'],
+      ['Je confirme ma commande 1234'],
+      [''],
+      [undefined]
+    ])('does not recognise %p', text => {
+      expect(parsePrefilledConfirmationText(text)).toEqual([]);
+    });
+
+    it('keeps every reference in order of appearance, without duplicates', () => {
+      expect(parsePrefilledConfirmationText('Je confirme #99 et #1234, oui #99')).toEqual(['#99', '#1234']);
+    });
+  });
+
+  describe('sender vs order phone comparison', () => {
+    it.each(['221776986780', '+221776986780', '776986780', '+221 77 698 67 80', '77-698-67-80'])(
+      'matches the sender %p',
+      sender => {
+        expect(isSenderOrderPhone(sender, orderPhone)).toEqual({ matches: true, senderE164: orderPhone });
+      }
+    );
+
+    it.each([
+      ['221771112233', orderPhone, '+221771112233'],
+      ['33612345678', orderPhone, undefined],
+      [undefined, orderPhone, undefined],
+      ['221776986780', undefined, '+221776986780']
+    ])('does not match the sender %p against %p', (sender, phone, senderE164) => {
+      expect(isSenderOrderPhone(sender, phone)).toEqual({ matches: false, senderE164 });
+    });
+  });
+
+  const pendingOrder = (overrides: Record<string, unknown> = {}) => ({
+    _id: orderId,
+    shopifyOrderName: '#1234',
+    customerPhoneE164: orderPhone,
+    customerConfirmationStatus: CustomerConfirmationStatus.PENDING,
+    ...overrides
+  });
+
+  const mockFindOne = (orders: Record<string, unknown>) =>
+    jest
+      .spyOn(Order, 'findOne')
+      .mockImplementation(((filter: { shopifyOrderName?: string }) =>
+        Promise.resolve(orders[filter.shopifyOrderName || ''] ?? null)) as never);
+
+  it.each(['221776986780', '776986780', '+221 77 698 67 80'])(
+    'confirms through the button path with source whatsapp_button when the sender %p is the order phone',
+    async from => {
+      mockFindOne({ '#1234': pendingOrder() });
+      const update = jest
+        .spyOn(Order, 'findOneAndUpdate')
+        .mockResolvedValue({ _id: orderId, customerConfirmationStatus: CustomerConfirmationStatus.CONFIRMED } as never);
+      const createEvent = jest.spyOn(OrderEvent, 'create').mockResolvedValue({} as never);
+      const createMessage = jest.spyOn(Message, 'create').mockResolvedValue({ _id: new Types.ObjectId() } as never);
+
+      const result = await OrderConfirmationService.confirmByPrefilledMessage({
+        from,
+        text: ' Je confirme ma commande #1234 ',
+        waMessageId: 'wamid.1'
+      });
+
+      expect(result.outcome).toBe('confirmed');
+      expect(update.mock.calls[0]?.[0]).toEqual({
+        _id: orderId.toString(),
+        customerConfirmationStatus: { $in: CONFIRMABLE_BY_BUTTON }
+      });
+      expect(update.mock.calls[0]?.[1]).toEqual(
+        expect.objectContaining({
+          $set: expect.objectContaining({
+            customerConfirmationStatus: CustomerConfirmationStatus.CONFIRMED,
+            confirmationSource: ConfirmationSource.WHATSAPP_BUTTON,
+            lastCustomerMessageText: 'Je confirme ma commande #1234',
+            confirmationPayload: { buttonText: 'Je confirme ma commande #1234', waMessageId: 'wamid.1' }
+          })
+        })
+      );
+      expect(createEvent.mock.calls[0]?.[0]).toEqual(
+        expect.objectContaining({
+          type: OrderEventType.CONFIRMED,
+          metadata: { source: ConfirmationSource.WHATSAPP_BUTTON }
+        })
+      );
+      expect(createMessage).toHaveBeenCalledTimes(1);
+    }
+  );
+
+  it('flags phone_mismatch without confirming when the sender differs from the order phone', async () => {
+    mockFindOne({ '#1234': pendingOrder() });
+    const confirmByButton = jest.spyOn(OrderConfirmationService, 'confirmByWhatsAppButton');
+    const update = jest.spyOn(Order, 'findOneAndUpdate').mockResolvedValue({ _id: orderId } as never);
+    const createEvent = jest.spyOn(OrderEvent, 'create').mockResolvedValue({} as never);
+    const createMessage = jest.spyOn(Message, 'create');
+
+    const result = await OrderConfirmationService.confirmByPrefilledMessage({
+      from: '221771112233',
+      text: 'Je confirme ma commande #1234',
+      waMessageId: 'wamid.2'
+    });
+
+    expect(result).toEqual(expect.objectContaining({ outcome: 'phone_mismatch', senderE164: '+221771112233' }));
+    expect(confirmByButton).not.toHaveBeenCalled();
+    expect(createMessage).not.toHaveBeenCalled();
+    expect(update.mock.calls[0]?.[0]).toEqual({
+      _id: orderId,
+      customerConfirmationStatus: { $in: CONFIRMABLE_BY_BUTTON },
+      attentionReasonCode: { $ne: AttentionReasonCode.PHONE_MISMATCH }
+    });
+    expect(update.mock.calls[0]?.[1]).toEqual({
+      $set: {
+        needsHelpdeskAttention: true,
+        attentionReasonCode: AttentionReasonCode.PHONE_MISMATCH,
+        attentionReason: PHONE_MISMATCH_ATTENTION_REASON,
+        attentionRequiredAt: expect.any(Date),
+        lastCustomerMessageAt: expect.any(Date),
+        lastCustomerMessageText: 'Je confirme ma commande #1234'
+      }
+    });
+    expect(createEvent).toHaveBeenCalledTimes(1);
+    expect(createEvent.mock.calls[0]?.[0]).toEqual(
+      expect.objectContaining({
+        orderId,
+        type: OrderEventType.PHONE_MISMATCH,
+        metadata: { senderE164: '+221771112233', waMessageId: 'wamid.2' }
+      })
+    );
+  });
+
+  it('uses the first reference that matches an existing order', async () => {
+    const findOne = mockFindOne({ '#1234': pendingOrder() });
+    jest.spyOn(Order, 'findOneAndUpdate').mockResolvedValue({ _id: orderId } as never);
+    jest.spyOn(OrderEvent, 'create').mockResolvedValue({} as never);
+    jest.spyOn(Message, 'create').mockResolvedValue({ _id: new Types.ObjectId() } as never);
+
+    const result = await OrderConfirmationService.confirmByPrefilledMessage({
+      from: '221776986780',
+      text: 'Je confirme #99 puis #1234'
+    });
+
+    expect(findOne.mock.calls.map(call => call[0])).toEqual([
+      { shopifyOrderName: '#99' },
+      { shopifyOrderName: '#1234' }
+    ]);
+    expect(result.outcome).toBe('confirmed');
+  });
+
+  it.each([
+    ['an unknown reference', 'Je confirme ma commande #9999'],
+    ['a text without "confirm"', 'Où en est ma commande #1234 ?'],
+    ['a text without reference', 'Je confirme ma commande']
+  ])('leaves %s to the regular handling', async (_label, text) => {
+    mockFindOne({ '#1234': pendingOrder() });
+    const update = jest.spyOn(Order, 'findOneAndUpdate');
+    const createEvent = jest.spyOn(OrderEvent, 'create');
+
+    const result = await OrderConfirmationService.confirmByPrefilledMessage({ from: '221776986780', text });
+
+    expect(result).toEqual({ outcome: 'not_applicable' });
+    expect(update).not.toHaveBeenCalled();
+    expect(createEvent).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['confirmed', { customerConfirmationStatus: CustomerConfirmationStatus.CONFIRMED }],
+    ['cancelled', { customerConfirmationStatus: CustomerConfirmationStatus.CANCELLED }],
+    ['expired', { customerConfirmationStatus: CustomerConfirmationStatus.EXPIRED }],
+    ['cancelled on Shopify', { shopifyCancelledAt: new Date() }],
+    ['delivered', { operationalStatus: OrderOperationalStatus.DELIVERED }],
+    ['returned', { operationalStatus: OrderOperationalStatus.RETURNED }]
+  ])('does not transition an order already %s, whatever the sender', async (_label, overrides) => {
+    for (const from of ['221776986780', '221771112233']) {
+      mockFindOne({ '#1234': pendingOrder(overrides) });
+      const update = jest.spyOn(Order, 'findOneAndUpdate');
+      const createEvent = jest.spyOn(OrderEvent, 'create');
+
+      const result = await OrderConfirmationService.confirmByPrefilledMessage({
+        from,
+        text: 'Je confirme ma commande #1234'
+      });
+
+      expect(result).toEqual({ outcome: 'not_applicable' });
+      expect(update).not.toHaveBeenCalled();
+      expect(createEvent).not.toHaveBeenCalled();
+      jest.restoreAllMocks();
+    }
+  });
+
+  it('does not record a mismatch event when a concurrent transition won the write', async () => {
+    mockFindOne({ '#1234': pendingOrder() });
+    jest.spyOn(Order, 'findOneAndUpdate').mockResolvedValue(null as never);
+    jest
+      .spyOn(Order, 'findById')
+      .mockResolvedValue(pendingOrder({ customerConfirmationStatus: CustomerConfirmationStatus.CANCELLED }) as never);
+    const createEvent = jest.spyOn(OrderEvent, 'create');
+
+    const result = await OrderConfirmationService.confirmByPrefilledMessage({
+      from: '221771112233',
+      text: 'Je confirme ma commande #1234'
+    });
+
+    expect(result).toEqual({ outcome: 'not_applicable' });
+    expect(createEvent).not.toHaveBeenCalled();
+  });
+
+  it('never re-opens an order cancelled between the read and the confirmation write', async () => {
+    mockFindOne({ '#1234': pendingOrder() });
+    const update = jest.spyOn(Order, 'findOneAndUpdate').mockResolvedValue(null as never);
+    const save = jest.fn();
+    const findById = jest
+      .spyOn(Order, 'findById')
+      .mockResolvedValue(pendingOrder({ customerConfirmationStatus: CustomerConfirmationStatus.CANCELLED, save }) as never);
+    const confirmByButton = jest.spyOn(OrderConfirmationService, 'confirmByWhatsAppButton');
+    const createEvent = jest.spyOn(OrderEvent, 'create');
+    const createMessage = jest.spyOn(Message, 'create');
+
+    const result = await OrderConfirmationService.confirmByPrefilledMessage({
+      from: '221776986780',
+      text: 'Je confirme ma commande #1234'
+    });
+
+    expect(result).toEqual({ outcome: 'not_applicable' });
+    expect(update).toHaveBeenCalledTimes(1);
+    expect(findById).toHaveBeenCalledWith(orderId);
+    expect(confirmByButton).not.toHaveBeenCalled();
+    expect(save).not.toHaveBeenCalled();
+    expect(createEvent).not.toHaveBeenCalled();
+    expect(createMessage).not.toHaveBeenCalled();
+  });
+
+  it('records a single phone_mismatch event for two concurrent deliveries of the same message', async () => {
+    // In-memory order honouring the conditional write, as MongoDB would.
+    const state: Record<string, unknown> = pendingOrder();
+    mockFindOne({ '#1234': state });
+    jest.spyOn(Order, 'findOneAndUpdate').mockImplementation(((
+      filter: { attentionReasonCode: { $ne: string } },
+      update: { $set: Record<string, unknown> }
+    ) =>
+      Promise.resolve().then(() => {
+        if (state.attentionReasonCode === filter.attentionReasonCode.$ne) {
+          return null;
+        }
+        Object.assign(state, update.$set);
+        return { ...state };
+      })) as never);
+    jest.spyOn(Order, 'findById').mockImplementation((() => Promise.resolve({ ...state })) as never);
+    const freshOrders = jest.spyOn(Order, 'findOne');
+    const createEvent = jest.spyOn(OrderEvent, 'create').mockResolvedValue({} as never);
+    const input = { from: '221771112233', text: 'Je confirme ma commande #1234', waMessageId: 'wamid.dup' };
+
+    const results = await Promise.all([
+      OrderConfirmationService.confirmByPrefilledMessage(input),
+      OrderConfirmationService.confirmByPrefilledMessage(input)
+    ]);
+
+    expect(freshOrders).toHaveBeenCalledTimes(2);
+    expect(createEvent).toHaveBeenCalledTimes(1);
+    expect(createEvent.mock.calls[0]?.[0]).toEqual(expect.objectContaining({ type: OrderEventType.PHONE_MISMATCH }));
+    expect(results.map(result => result.outcome)).toEqual(['phone_mismatch', 'phone_mismatch']);
+    expect(state.attentionReasonCode).toBe(AttentionReasonCode.PHONE_MISMATCH);
+  });
+
+  it('still reports the mismatch when the phone_mismatch event cannot be recorded', async () => {
+    mockFindOne({ '#1234': pendingOrder() });
+    jest.spyOn(Order, 'findOneAndUpdate').mockResolvedValue({ _id: orderId } as never);
+    const createEvent = jest.spyOn(OrderEvent, 'create').mockRejectedValue(new Error('mongo down') as never);
+
+    const result = await OrderConfirmationService.confirmByPrefilledMessage({
+      from: '221771112233',
+      text: 'Je confirme ma commande #1234'
+    });
+
+    expect(createEvent).toHaveBeenCalledTimes(1);
+    expect(result).toEqual(expect.objectContaining({ outcome: 'phone_mismatch' }));
   });
 });

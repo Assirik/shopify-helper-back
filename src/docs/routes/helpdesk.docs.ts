@@ -63,7 +63,7 @@
  *     summary: Lister la file de décisions humaines
  *     security: [{ bearerAuth: [] }]
  *     parameters:
- *       - { in: query, name: reason, schema: { type: string, enum: [free_text, sms_only, invalid_number, late_confirm] } }
+ *       - { in: query, name: reason, schema: { type: string, enum: [free_text, sms_only, invalid_number, late_confirm, phone_mismatch] } }
  *       - { in: query, name: page, schema: { type: integer, minimum: 1, default: 1 } }
  *       - { in: query, name: limit, schema: { type: integer, minimum: 1, maximum: 100, default: 20 } }
  *     responses:

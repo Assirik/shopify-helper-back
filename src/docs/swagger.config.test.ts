@@ -132,8 +132,10 @@ describe('Swagger MVP specification', () => {
       'free_text',
       'sms_only',
       'invalid_number',
-      'late_confirm'
+      'late_confirm',
+      'phone_mismatch'
     ]);
+    expect(document.components.schemas.AttentionCounts.required).toContain('phone_mismatch');
     expect(document.components.schemas.BulkOrderInput.properties.orderIds.maxItems).toBe(100);
     expect(paths['/api/orders/bulk/confirm'].post.responses).toHaveProperty('207');
   });

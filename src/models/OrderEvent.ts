@@ -14,7 +14,8 @@ export enum OrderEventType {
   NOTE = 'note',
   CAPI_PURCHASE_SENT = 'capi_purchase_sent',
   CAPI_PURCHASE_FAILED = 'capi_purchase_failed',
-  CAPI_PURCHASE_SKIPPED = 'capi_purchase_skipped'
+  CAPI_PURCHASE_SKIPPED = 'capi_purchase_skipped',
+  PHONE_MISMATCH = 'phone_mismatch'
 }
 
 const OrderEventSchema = new Schema<IOrderEvent>(
