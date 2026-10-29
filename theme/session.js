@@ -46,11 +46,18 @@
     }
   }
 
-  // Clic sur une publicité Meta sans cookie _fbc : on le pose, comme le fait Meta.
+  // Identifiant de clic stocké dans _fbc (fb.1.<horodatage>.<fbclid>) : tout ce qui suit le 3e point.
+  function storedClickId(cookie) {
+    var parts = String(cookie || '').split('.');
+    return parts.length > 3 ? parts.slice(3).join('.') : null;
+  }
+
+  // Arrivée par une publicité Meta : on pose _fbc, ou on le remplace si le clic est différent
+  // de celui qu'il contient (ancien clic), comme le fait Meta.
   function ensureClickCookie() {
     try {
       var clickId = readClickId();
-      if (clickId && !readCookie('_fbc')) {
+      if (clickId && storedClickId(readCookie('_fbc')) !== clickId) {
         document.cookie =
           '_fbc=fb.1.' + Date.now() + '.' + clickId +
           '; path=/; max-age=' + COOKIE_MAX_AGE + '; SameSite=Lax';
@@ -100,12 +107,14 @@
     return !best || phoneRank(best) >= rank;
   }
 
-  function send(field) {
+  // `force` : envoi au submit, jamais dédoublonné (le serveur peut avoir expiré l'enregistrement
+  // et un cookie a pu apparaître depuis). Sans `force` (saisie), un numéro déjà envoyé est ignoré.
+  function send(field, force) {
     try {
       var value = field && typeof field.value === 'string' ? field.value.trim() : '';
       if (countDigits(value) < MIN_DIGITS) return;
       var digits = value.replace(/\D/g, '');
-      if (digits === lastSentDigits) return;
+      if (!force && digits === lastSentDigits) return;
 
       var body = JSON.stringify({
         phone: value,
@@ -164,7 +173,7 @@
       for (var i = 0; i < fields.length; i++) {
         if (countDigits(fields[i].value) >= MIN_DIGITS) {
           cancelPending();
-          send(fields[i]);
+          send(fields[i], true);
           return;
         }
       }

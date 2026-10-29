@@ -33,8 +33,8 @@ avale toutes ses erreurs.
    seconde : une requête `POST` vers `/api/session` apparaît, avec la réponse `204`.
 3. Dans le corps de la requête : `phone`, `fbp`, `fbc`, `fbclid`, `userAgent`, `pageUrl`.
    Avec `?fbclid=TEST`, `fbc` vaut `fb.1.<horodatage>.TEST`.
-4. Ressaisir le même numéro n'envoie rien de nouveau ; envoyer le formulaire provoque un envoi
-   immédiat si le numéro a changé depuis le dernier.
+4. Ressaisir le même numéro n'envoie rien de nouveau ; envoyer le formulaire provoque toujours
+   un envoi immédiat, même pour un numéro déjà envoyé.
 
 ## Pourquoi le nom de la route est neutre
 
