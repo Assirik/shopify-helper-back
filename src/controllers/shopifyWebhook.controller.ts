@@ -5,6 +5,7 @@ import { PhoneNormalizationService } from '../utilities/services/phoneNormalizat
 import { Customer } from '../models/Customer';
 import { Message, MessageChannel, MessageProvider, MessageStatus, TemplatePurpose } from '../models/Message';
 import { AttentionReasonCode, NotificationStatus, Order } from '../models/Order';
+import { BrowserSession } from '../models/BrowserSession';
 import { Product } from '../models/Product';
 import { WebhookEvent, WebhookEventStatus } from '../models/WebhookEvent';
 import { enqueueOrderConfirmation } from '../queues/notification.queue';
@@ -320,6 +321,78 @@ const getPayloadHash = (req: Request) => {
   return crypto.createHash('sha256').update(body).digest('hex');
 };
 
+// Browser signals (POST /api/session) are linked to the order when the capture happened
+// between 30 min before and 5 min after the order creation (clock skew tolerance).
+export const BROWSER_SESSION_LINK_WINDOW_BEFORE_MS = 30 * 60 * 1000;
+export const BROWSER_SESSION_LINK_WINDOW_AFTER_MS = 5 * 60 * 1000;
+// The lookup must never hold the ingestion: server-side limit on the query, plus an overall
+// deadline in case the driver itself hangs (pool exhausted, network stall).
+export const BROWSER_SESSION_QUERY_MAX_TIME_MS = 1000;
+export const BROWSER_SESSION_LOOKUP_TIMEOUT_MS = 1500;
+
+export interface BrowserSessionCapiFields {
+  capiFbp?: string;
+  capiFbc?: string;
+  capiClientUserAgent?: string;
+  capiEventSourceUrl?: string;
+}
+
+// Rejects when the promise does not settle within `ms`; the timer never outlives the call.
+const withTimeout = <T>(promise: Promise<T>, ms: number) =>
+  new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`Timed out after ${ms} ms`)), ms);
+    promise.then(
+      value => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      err => {
+        clearTimeout(timer);
+        reject(err);
+      }
+    );
+  });
+
+const getOrderCreatedAt = (payload: ShopifyOrderPayload) => {
+  const createdAt = payload.created_at ? new Date(payload.created_at) : new Date();
+  return Number.isNaN(createdAt.getTime()) ? new Date() : createdAt;
+};
+
+// Latest capture for the same phone (one record per phone), kept only inside the window.
+export const findBrowserSessionCapiFields = async (
+  phoneE164: string | undefined,
+  orderCreatedAt: Date
+): Promise<{ linked: boolean; fields: BrowserSessionCapiFields }> => {
+  if (!phoneE164) {
+    return { linked: false, fields: {} };
+  }
+
+  const session = await BrowserSession.findOne({ phoneE164 }).maxTimeMS(BROWSER_SESSION_QUERY_MAX_TIME_MS).lean();
+
+  if (!session?.updatedAt) {
+    return { linked: false, fields: {} };
+  }
+
+  const capturedAt = new Date(session.updatedAt).getTime();
+  const createdAt = orderCreatedAt.getTime();
+
+  if (
+    capturedAt < createdAt - BROWSER_SESSION_LINK_WINDOW_BEFORE_MS ||
+    capturedAt > createdAt + BROWSER_SESSION_LINK_WINDOW_AFTER_MS
+  ) {
+    return { linked: false, fields: {} };
+  }
+
+  const fields: BrowserSessionCapiFields = {
+    ...(session.fbp ? { capiFbp: session.fbp } : {}),
+    ...(session.fbc ? { capiFbc: session.fbc } : {}),
+    ...(session.userAgent ? { capiClientUserAgent: session.userAgent } : {}),
+    ...(session.pageUrl ? { capiEventSourceUrl: session.pageUrl } : {})
+  };
+
+  return { linked: Object.keys(fields).length > 0, fields };
+};
+
 // Prépare le catalogue produit futur à partir des commandes reçues.
 // Ce n'est pas encore une gestion de stock: on garde seulement la dernière vue
 // connue du produit/variant et un compteur total commandé.
@@ -612,6 +685,22 @@ export class ShopifyWebhookController {
       'Upserted customer from Shopify order'
     );
 
+    // 6b. Browser signals captured by the theme script (C5.12a).
+    // Filled only on creation: a replayed webhook stops earlier (steps 2 and 4) so it can
+    // never overwrite existing values. A failure here never blocks the ingestion.
+    let browserSessionLink: Awaited<ReturnType<typeof findBrowserSessionCapiFields>> = { linked: false, fields: {} };
+    let browserSessionLookupFailed = false;
+
+    try {
+      browserSessionLink = await withTimeout(
+        findBrowserSessionCapiFields(phone.e164, getOrderCreatedAt(payload)),
+        BROWSER_SESSION_LOOKUP_TIMEOUT_MS
+      );
+    } catch (err) {
+      browserSessionLookupFailed = true;
+      log.warn({ err, shopifyOrderId }, 'Browser session lookup failed, order ingested without browser signals');
+    }
+
     // 7. Création de la commande enrichie.
     // Elle garde les infos utiles pour le dashboard, les notifications et le futur stock.
     const order = await Order.create({
@@ -645,6 +734,7 @@ export class ShopifyWebhookController {
       financialStatus: payload.financial_status || undefined,
       fulfillmentStatus: payload.fulfillment_status || undefined,
       notificationStatus,
+      ...browserSessionLink.fields,
       ...(!phone.isValid && !skipNotificationReason
         ? {
             needsHelpdeskAttention: true,
@@ -677,6 +767,17 @@ export class ShopifyWebhookController {
         shippingPrice: order.shippingPrice
       },
       'Created order from Shopify webhook'
+    );
+
+    // Tracks the browser session → order link rate.
+    log.info(
+      {
+        orderId: order._id,
+        shopifyOrderId,
+        browserSessionLinked: browserSessionLink.linked,
+        browserSessionLookupFailed
+      },
+      'Browser session link checked'
     );
 
     // 9. Audit webhook après succès d'ingestion.

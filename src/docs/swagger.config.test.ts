@@ -33,7 +33,8 @@ const EXPECTED_OPERATIONS: Record<string, HttpMethod[]> = {
   '/api/webhooks/shopify/orders-create': ['post'],
   '/api/webhooks/whatsapp': ['get', 'post'],
   '/api/whatsapp/templates': ['get'],
-  '/api/whatsapp/message-config': ['get', 'put']
+  '/api/whatsapp/message-config': ['get', 'put'],
+  '/api/session': ['post']
 };
 
 const PROTECTED_OPERATIONS: Array<[string, HttpMethod]> = [

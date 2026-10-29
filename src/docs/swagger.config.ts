@@ -42,7 +42,8 @@ const swaggerOptions: swaggerJSDoc.Options = {
       { name: 'Shopify Webhooks', description: 'Ingestion signée des commandes Shopify' },
       { name: 'WhatsApp Webhooks', description: 'Vérification et événements entrants Meta' },
       { name: 'WhatsApp Templates', description: 'Catalogue des templates Meta' },
-      { name: 'Message Config', description: 'Variables régionales des messages' }
+      { name: 'Message Config', description: 'Variables régionales des messages' },
+      { name: 'Browser Session', description: 'Capture des infos navigateur par le script du thème' }
     ],
     components: {
       securitySchemes: {

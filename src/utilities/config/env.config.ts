@@ -27,6 +27,14 @@ export const buildMetaCapiConfig = (env: NodeJS.ProcessEnv) => {
   };
 };
 
+// Origins (shop storefront domains) allowed to post browser signals to POST /api/session.
+// Empty list => the route rejects every request.
+export const parseSessionCaptureOrigins = (value?: string) =>
+  (value || '')
+    .split(',')
+    .map(origin => origin.trim().toLowerCase().replace(/\/+$/, ''))
+    .filter(origin => origin.length > 0);
+
 export default {
   port,
   apiEndpoint,
@@ -57,6 +65,9 @@ export default {
     graphApiVersion: process.env.META_WHATSAPP_GRAPH_API_VERSION || 'v26.0'
   },
   metaCapi: buildMetaCapiConfig(process.env),
+  sessionCapture: {
+    allowedOrigins: parseSessionCaptureOrigins(process.env.SESSION_CAPTURE_ALLOWED_ORIGINS)
+  },
   chatwoot: {
     // Base URL of the self-hosted Chatwoot instance. Leave empty to disable forwarding.
     url: (process.env.CHATWOOT_URL || '').replace(/\/+$/, ''),
