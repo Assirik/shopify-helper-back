@@ -18,6 +18,8 @@ import {
   isSenderOrderPhone,
   parsePrefilledConfirmationText
 } from './orderConfirmation.service';
+import { enqueueOrderConfirmed } from '../../queues/notification.queue';
+import log from '../logger/logger';
 import { MAX_NOTE_LENGTH } from './orderFulfillment.service';
 
 jest.mock('../../queues/notification.queue', () => ({
@@ -378,7 +380,9 @@ describe('pre-filled WhatsApp confirmation (C5.6b)', () => {
       expect(result.outcome).toBe('confirmed');
       expect(update.mock.calls[0]?.[0]).toEqual({
         _id: orderId.toString(),
-        customerConfirmationStatus: { $in: CONFIRMABLE_BY_BUTTON }
+        customerConfirmationStatus: { $in: CONFIRMABLE_BY_BUTTON },
+        shopifyCancelledAt: null,
+        operationalStatus: { $nin: [OrderOperationalStatus.DELIVERED, OrderOperationalStatus.RETURNED] }
       });
       expect(update.mock.calls[0]?.[1]).toEqual(
         expect.objectContaining({
@@ -419,7 +423,9 @@ describe('pre-filled WhatsApp confirmation (C5.6b)', () => {
     expect(update.mock.calls[0]?.[0]).toEqual({
       _id: orderId,
       customerConfirmationStatus: { $in: CONFIRMABLE_BY_BUTTON },
-      attentionReasonCode: { $ne: AttentionReasonCode.PHONE_MISMATCH }
+      attentionReasonCode: { $ne: AttentionReasonCode.PHONE_MISMATCH },
+      shopifyCancelledAt: null,
+      operationalStatus: { $nin: [OrderOperationalStatus.DELIVERED, OrderOperationalStatus.RETURNED] }
     });
     expect(update.mock.calls[0]?.[1]).toEqual({
       $set: {
@@ -586,5 +592,151 @@ describe('pre-filled WhatsApp confirmation (C5.6b)', () => {
 
     expect(createEvent).toHaveBeenCalledTimes(1);
     expect(result).toEqual(expect.objectContaining({ outcome: 'phone_mismatch' }));
+  });
+
+  describe('write-time guard (state changed between the read and the write)', () => {
+    // Evaluates the operators the service writes with, using MongoDB semantics: `null`
+    // and `$nin` / `$ne` also match a missing field.
+    const matchesFilter = (doc: Record<string, unknown>, filter: Record<string, unknown>) =>
+      Object.entries(filter).every(([key, condition]) => {
+        const value = doc[key];
+
+        if (condition === null) {
+          return value === null || value === undefined;
+        }
+
+        if (condition && typeof condition === 'object' && !(condition instanceof Types.ObjectId)) {
+          const ops = condition as { $in?: unknown[]; $nin?: unknown[]; $ne?: unknown };
+
+          if (ops.$in) {
+            return ops.$in.includes(value);
+          }
+
+          if (ops.$nin) {
+            return !ops.$nin.includes(value ?? null);
+          }
+
+          return value !== ops.$ne;
+        }
+
+        return String(value) === String(condition);
+      });
+
+    // `Order.findOne` returns the stale read; the writes and re-reads see the current state.
+    const mockStaleRead = (state: Record<string, unknown>) => {
+      mockFindOne({ '#1234': pendingOrder() });
+      const update = jest.spyOn(Order, 'findOneAndUpdate').mockImplementation(((
+        filter: Record<string, unknown>,
+        change: { $set: Record<string, unknown> }
+      ) =>
+        Promise.resolve().then(() => {
+          if (!matchesFilter(state, filter)) {
+            return null;
+          }
+          Object.assign(state, change.$set);
+          return { ...state };
+        })) as never);
+      jest.spyOn(Order, 'findById').mockImplementation((() => Promise.resolve({ ...state })) as never);
+
+      return update;
+    };
+
+    it.each([
+      ['delivered', { operationalStatus: OrderOperationalStatus.DELIVERED, deliveredAt: new Date() }],
+      ['returned', { operationalStatus: OrderOperationalStatus.RETURNED }],
+      ['cancelled on Shopify', { shopifyCancelledAt: new Date() }]
+    ])('does not confirm nor flag an order %s in the meantime', async (_label, change) => {
+      for (const from of ['221776986780', '221771112233']) {
+        const state: Record<string, unknown> = { ...pendingOrder(), ...change };
+        const update = mockStaleRead(state);
+        const createEvent = jest.spyOn(OrderEvent, 'create');
+        const createMessage = jest.spyOn(Message, 'create');
+
+        const result = await OrderConfirmationService.confirmByPrefilledMessage({
+          from,
+          text: 'Je confirme ma commande #1234'
+        });
+
+        expect(result).toEqual({ outcome: 'not_applicable' });
+        expect(update).toHaveBeenCalledTimes(1);
+        expect(state).toEqual({ ...pendingOrder(), ...change });
+        expect(createEvent).not.toHaveBeenCalled();
+        expect(createMessage).not.toHaveBeenCalled();
+        jest.restoreAllMocks();
+      }
+    });
+
+    it.each([
+      ['without operationalStatus nor shopifyCancelledAt', {}],
+      ['with null operationalStatus and shopifyCancelledAt', { operationalStatus: null, shopifyCancelledAt: null }]
+    ])('still confirms an order %s', async (_label, fields) => {
+      const state: Record<string, unknown> = { ...pendingOrder(), ...fields };
+      mockStaleRead(state);
+      jest.spyOn(OrderEvent, 'create').mockResolvedValue({} as never);
+      jest.spyOn(Message, 'create').mockResolvedValue({ _id: new Types.ObjectId() } as never);
+
+      const result = await OrderConfirmationService.confirmByPrefilledMessage({
+        from: '221776986780',
+        text: 'Je confirme ma commande #1234'
+      });
+
+      expect(result.outcome).toBe('confirmed');
+      expect(state.customerConfirmationStatus).toBe(CustomerConfirmationStatus.CONFIRMED);
+      expect(state.operationalStatus).toBe(OrderOperationalStatus.TO_DELIVER);
+    });
+
+    it('still flags phone_mismatch on an order without operationalStatus', async () => {
+      const state: Record<string, unknown> = pendingOrder();
+      mockStaleRead(state);
+      jest.spyOn(OrderEvent, 'create').mockResolvedValue({} as never);
+
+      const result = await OrderConfirmationService.confirmByPrefilledMessage({
+        from: '221771112233',
+        text: 'Je confirme ma commande #1234'
+      });
+
+      expect(result.outcome).toBe('phone_mismatch');
+      expect(state.attentionReasonCode).toBe(AttentionReasonCode.PHONE_MISMATCH);
+    });
+  });
+
+  it('keeps the Confirm button write filter free of the pre-filled guard', async () => {
+    const update = jest.spyOn(Order, 'findOneAndUpdate').mockResolvedValue({ _id: orderId } as never);
+    jest.spyOn(OrderEvent, 'create').mockResolvedValue({} as never);
+    jest.spyOn(Message, 'create').mockResolvedValue({ _id: new Types.ObjectId() } as never);
+
+    await OrderConfirmationService.confirmByWhatsAppButton(orderId.toString(), {
+      buttonPayload: `CONFIRM_ORDER:${orderId.toString()}`,
+      buttonText: 'Confirmer'
+    });
+
+    expect(update.mock.calls[0]?.[0]).toEqual({
+      _id: orderId.toString(),
+      customerConfirmationStatus: { $in: CONFIRMABLE_BY_BUTTON }
+    });
+  });
+
+  it('keeps the order confirmed and logs the error when the confirmed template cannot be enqueued', async () => {
+    mockFindOne({ '#1234': pendingOrder() });
+    const confirmedOrder = { _id: orderId, customerConfirmationStatus: CustomerConfirmationStatus.CONFIRMED };
+    const update = jest.spyOn(Order, 'findOneAndUpdate').mockResolvedValue(confirmedOrder as never);
+    jest.spyOn(OrderEvent, 'create').mockResolvedValue({} as never);
+    jest.spyOn(Message, 'create').mockResolvedValue({ _id: new Types.ObjectId() } as never);
+    const findById = jest.spyOn(Order, 'findById');
+    const logError = jest.spyOn(log, 'error').mockImplementation((() => undefined) as never);
+    jest.mocked(enqueueOrderConfirmed).mockRejectedValueOnce(new Error('redis down'));
+
+    const result = await OrderConfirmationService.confirmByPrefilledMessage({
+      from: '221776986780',
+      text: 'Je confirme ma commande #1234'
+    });
+
+    expect(result).toEqual({ outcome: 'confirmed', order: confirmedOrder });
+    expect(update).toHaveBeenCalledTimes(1);
+    expect(findById).not.toHaveBeenCalled();
+    expect(logError).toHaveBeenCalledWith(
+      expect.objectContaining({ orderId, err: expect.any(Error) }),
+      expect.any(String)
+    );
   });
 });

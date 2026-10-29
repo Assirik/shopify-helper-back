@@ -6,7 +6,10 @@ import { AttentionReasonCode, CustomerConfirmationStatus, Order, OrderOperationa
 import config from '../utilities/config/env.config';
 import log from '../utilities/logger/logger';
 import { ChatwootForwardService } from '../utilities/services/chatwootForward.service';
-import { OrderConfirmationService } from '../utilities/services/orderConfirmation.service';
+import {
+  OrderConfirmationService,
+  PrefilledConfirmationResult
+} from '../utilities/services/orderConfirmation.service';
 import { PhoneNormalizationService } from '../utilities/services/phoneNormalization.service';
 
 interface MetaWhatsAppButtonPayload {
@@ -316,11 +319,24 @@ const handlePrefilledConfirmation = async (message: MetaWhatsAppMessagePayload, 
   }
 
   const text = message.text?.body?.trim();
-  const result = await OrderConfirmationService.confirmByPrefilledMessage({
-    from: message.from,
-    text,
-    waMessageId: message.id
-  });
+  let result: PrefilledConfirmationResult;
+
+  try {
+    result = await OrderConfirmationService.confirmByPrefilledMessage({
+      from: message.from,
+      text,
+      waMessageId: message.id
+    });
+  } catch (err) {
+    // The service absorbs failures that follow an order write, so an error here comes from
+    // a read or a write that did not apply (barring a write lost in a network error): the
+    // regular handling still records and mirrors the message.
+    log.error(
+      { err, waMessageId: message.id },
+      'Pre-filled WhatsApp confirmation failed, falling back to the regular handling'
+    );
+    return undefined;
+  }
 
   if (result.outcome === 'not_applicable') {
     return undefined;

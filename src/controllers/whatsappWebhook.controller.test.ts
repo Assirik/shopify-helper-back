@@ -10,6 +10,8 @@ import {
   Order
 } from '../models/Order';
 import { OrderEvent, OrderEventType } from '../models/OrderEvent';
+import { enqueueOrderConfirmed } from '../queues/notification.queue';
+import log from '../utilities/logger/logger';
 import { ChatwootForwardService } from '../utilities/services/chatwootForward.service';
 import { WhatsAppWebhookController } from './whatsappWebhook.controller';
 
@@ -204,6 +206,60 @@ describe('WhatsApp webhook: pre-filled confirmation (C5.6b)', () => {
     const set = (freeText.mock.calls[0]?.[1] as { $set: Record<string, unknown> }).$set;
     expect(set).toEqual(expect.objectContaining({ attentionReasonCode: AttentionReasonCode.FREE_TEXT }));
     expect(set).not.toHaveProperty('customerConfirmationStatus');
+    expect(forward).toHaveBeenCalledWith(req.body);
+  });
+
+  it('keeps the order confirmed, records and mirrors the message when the confirmed template cannot be enqueued', async () => {
+    mockOrderLookups(order);
+    const update = jest
+      .spyOn(Order, 'findOneAndUpdate')
+      .mockResolvedValue({ _id: orderId, customerConfirmationStatus: CustomerConfirmationStatus.CONFIRMED } as never);
+    const freeText = jest.spyOn(Order, 'findByIdAndUpdate');
+    jest.spyOn(OrderEvent, 'create').mockResolvedValue({} as never);
+    jest.spyOn(Message, 'create').mockResolvedValue({ _id: new Types.ObjectId() } as never);
+    const logError = jest.spyOn(log, 'error').mockImplementation((() => undefined) as never);
+    jest.mocked(enqueueOrderConfirmed).mockRejectedValueOnce(new Error('redis down'));
+    const req = webhookRequest(textMessage('221776986780', 'Je confirme ma commande #1234'));
+    const { res, status, json } = mockResponse();
+
+    await WhatsAppWebhookController.receive(req, res);
+
+    expect(status).toHaveBeenCalledWith(200);
+    expect(update).toHaveBeenCalledTimes(1);
+    expect(freeText).not.toHaveBeenCalled();
+    expect(logError).toHaveBeenCalledWith(expect.objectContaining({ orderId }), expect.any(String));
+    expect(inboundEvent()).toEqual(
+      expect.objectContaining({ orderId, processedStatus: InboundWhatsAppEventStatus.PROCESSED })
+    );
+    expect(json).toHaveBeenCalledWith(expect.objectContaining({ inboundEvents: 1 }));
+    expect(forward).toHaveBeenCalledWith(req.body);
+  });
+
+  it('falls back to the regular handling when the pre-filled lookup fails before any write', async () => {
+    jest.spyOn(Order, 'findOne').mockImplementation(((filter: Record<string, unknown>) => {
+      if ('shopifyOrderName' in filter) {
+        return Promise.reject(new Error('mongo timeout'));
+      }
+
+      return { sort: () => Promise.resolve(order) };
+    }) as never);
+    const update = jest.spyOn(Order, 'findOneAndUpdate');
+    const freeText = jest.spyOn(Order, 'findByIdAndUpdate').mockResolvedValue({} as never);
+    jest.spyOn(log, 'error').mockImplementation((() => undefined) as never);
+    const req = webhookRequest(textMessage('221776986780', 'Je confirme ma commande #1234'));
+    const { res, status, json } = mockResponse();
+
+    await WhatsAppWebhookController.receive(req, res);
+
+    expect(status).toHaveBeenCalledWith(200);
+    expect(update).not.toHaveBeenCalled();
+    expect(freeText).toHaveBeenCalledWith(orderId, {
+      $set: expect.objectContaining({ attentionReasonCode: AttentionReasonCode.FREE_TEXT })
+    });
+    expect(inboundEvent()).toEqual(
+      expect.objectContaining({ orderId, processedStatus: InboundWhatsAppEventStatus.NEEDS_ATTENTION })
+    );
+    expect(json).toHaveBeenCalledWith(expect.objectContaining({ inboundEvents: 1 }));
     expect(forward).toHaveBeenCalledWith(req.body);
   });
 

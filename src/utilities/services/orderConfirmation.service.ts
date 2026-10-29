@@ -196,6 +196,15 @@ const acceptsPrefilledConfirmation = (order: IOrder) =>
   !order.shopifyCancelledAt &&
   !(order.operationalStatus && TERMINAL_OPERATIONAL_STATUSES.includes(order.operationalStatus));
 
+// Write-time counterpart of `acceptsPrefilledConfirmation` (the confirmation status is
+// already in every write filter): an order delivered, returned or cancelled on Shopify
+// between the read and the write is left untouched. In MongoDB both `null` and `$nin`
+// also match a missing field, so an order without these fields stays eligible.
+const PREFILLED_WRITE_GUARD = {
+  shopifyCancelledAt: null,
+  operationalStatus: { $nin: TERMINAL_OPERATIONAL_STATUSES }
+};
+
 export interface PrefilledConfirmationInput {
   from?: string;
   text?: string;
@@ -236,10 +245,17 @@ const createOrderEvent = (input: {
 // Atomic confirm shared by the Confirm button and the pre-filled message: only one writer
 // can flip a confirmable status to CONFIRMED, so the confirmed template is enqueued at most
 // once even with concurrent admin/button actions. Returns null when the write did not apply.
-const applyWhatsAppConfirmation = async (orderId: string, payload: WhatsAppButtonConfirmation, now: Date) => {
+// `extraFilter` adds write-time conditions (pre-filled message only, the button has none).
+const writeWhatsAppConfirmation = (
+  orderId: string,
+  payload: WhatsAppButtonConfirmation,
+  now: Date,
+  extraFilter: Record<string, unknown> = {}
+) => {
   const lastCustomerMessageText = payload.buttonText || payload.buttonPayload || 'CONFIRM_ORDER';
-  const confirmed = await Order.findOneAndUpdate(
-    { _id: orderId, customerConfirmationStatus: { $in: CONFIRMABLE_BY_BUTTON } },
+
+  return Order.findOneAndUpdate(
+    { ...extraFilter, _id: orderId, customerConfirmationStatus: { $in: CONFIRMABLE_BY_BUTTON } },
     {
       $set: {
         customerConfirmationStatus: CustomerConfirmationStatus.CONFIRMED,
@@ -255,18 +271,28 @@ const applyWhatsAppConfirmation = async (orderId: string, payload: WhatsAppButto
     },
     { new: true }
   );
+};
 
-  if (!confirmed) {
-    return null;
-  }
-
+// Effects of a WhatsApp confirmation once written: CONFIRMED event + confirmed template.
+const recordWhatsAppConfirmation = async (confirmed: IOrder) => {
   await createOrderEvent({
     orderId: confirmed._id,
     type: OrderEventType.CONFIRMED,
     toStatus: OrderOperationalStatus.TO_DELIVER,
     metadata: { source: ConfirmationSource.WHATSAPP_BUTTON }
   });
-  const { message, job } = await enqueueConfirmedTemplate(confirmed._id);
+
+  return enqueueConfirmedTemplate(confirmed._id);
+};
+
+const applyWhatsAppConfirmation = async (orderId: string, payload: WhatsAppButtonConfirmation, now: Date) => {
+  const confirmed = await writeWhatsAppConfirmation(orderId, payload, now);
+
+  if (!confirmed) {
+    return null;
+  }
+
+  const { message, job } = await recordWhatsAppConfirmation(confirmed);
 
   return { order: confirmed, message, job };
 };
@@ -332,17 +358,29 @@ export class OrderConfirmationService {
     const { matches, senderE164 } = isSenderOrderPhone(input.from, order.customerPhoneE164);
 
     if (matches) {
-      const confirmed = await applyWhatsAppConfirmation(
+      const confirmed = await writeWhatsAppConfirmation(
         order._id.toString(),
         { buttonText: text, waMessageId: input.waMessageId },
-        new Date()
+        new Date(),
+        PREFILLED_WRITE_GUARD
       );
 
       if (confirmed) {
-        return { outcome: 'confirmed', order: confirmed.order };
+        // The order is confirmed and stays so: a failed event or template enqueue (Redis
+        // down) must not stop the inbound message from being recorded and mirrored.
+        try {
+          await recordWhatsAppConfirmation(confirmed);
+        } catch (err) {
+          log.error(
+            { err, orderId: confirmed._id },
+            'Pre-filled WhatsApp confirmation applied but its event or confirmed template failed'
+          );
+        }
+
+        return { outcome: 'confirmed', order: confirmed };
       }
 
-      // A concurrent transition (confirmation, cancellation, expiration) won the write.
+      // A concurrent transition (confirmation, cancellation, expiration, delivery) won the write.
       // Unlike the button, the late-confirmation fallback is NOT applied here: it would
       // re-open a cancelled order to `needs_attention`, letting a later text confirm it.
       const current = await Order.findById(order._id);
@@ -361,6 +399,7 @@ export class OrderConfirmationService {
     // confirmation status is left as is so the pending-order reminders keep running.
     const flagged = await Order.findOneAndUpdate(
       {
+        ...PREFILLED_WRITE_GUARD,
         _id: order._id,
         customerConfirmationStatus: { $in: CONFIRMABLE_BY_BUTTON },
         attentionReasonCode: { $ne: AttentionReasonCode.PHONE_MISMATCH }
