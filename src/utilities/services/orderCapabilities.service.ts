@@ -8,6 +8,10 @@ export const CONFIRMABLE_BY_ADMIN = [
   CustomerConfirmationStatus.EXPIRED
 ];
 
+// Closed orders: never asked for confirmation nor reminded again. Defined here (a leaf module)
+// so the confirmation service and the notification worker share it without an import cycle.
+export const TERMINAL_OPERATIONAL_STATUSES = [OrderOperationalStatus.DELIVERED, OrderOperationalStatus.RETURNED];
+
 export interface OrderActionCapabilities {
   canConfirm: boolean;
   canRemind: boolean;
@@ -22,7 +26,12 @@ export interface OrderActionCapabilities {
 export const getOrderActionCapabilities = (
   order: Pick<
     IOrder,
-    'customerConfirmationStatus' | 'reminderCount' | 'lastReminderAt' | 'customerPhoneE164' | 'operationalStatus'
+    | 'customerConfirmationStatus'
+    | 'reminderCount'
+    | 'lastReminderAt'
+    | 'customerPhoneE164'
+    | 'operationalStatus'
+    | 'shopifyCancelledAt'
   >,
   now = Date.now()
 ): OrderActionCapabilities => {
@@ -42,7 +51,10 @@ export const getOrderActionCapabilities = (
       order.customerConfirmationStatus === CustomerConfirmationStatus.PENDING &&
       Boolean(order.customerPhoneE164) &&
       (order.reminderCount || 0) < config.confirmation.maxReminders &&
-      reminderCooldownElapsed,
+      reminderCooldownElapsed &&
+      // Same exclusions as `remindByAdmin`: the API answers 409 for these orders.
+      !order.shopifyCancelledAt &&
+      !(order.operationalStatus && TERMINAL_OPERATIONAL_STATUSES.includes(order.operationalStatus)),
     canCancel:
       order.customerConfirmationStatus !== CustomerConfirmationStatus.CANCELLED && !isTerminalOperationalStatus,
     canDispatch,
