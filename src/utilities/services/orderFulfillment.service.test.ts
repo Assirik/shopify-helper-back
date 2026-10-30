@@ -4,8 +4,13 @@ import { Carrier } from '../../models/Carrier';
 import { Courier } from '../../models/Courier';
 import { OrderEvent, OrderEventType } from '../../models/OrderEvent';
 import { CodPaymentStatus, DeliveryChannel, Order, OrderOperationalStatus } from '../../models/Order';
+import { triggerCapiPurchase } from './capiPurchase.service';
 import { DeliveryFeeConfigService } from './deliveryFeeConfig.service';
 import { MAX_NOTE_LENGTH, OrderFulfillmentError, OrderFulfillmentService } from './orderFulfillment.service';
+
+jest.mock('./capiPurchase.service', () => ({
+  triggerCapiPurchase: jest.fn(async () => undefined)
+}));
 
 afterEach(() => {
   jest.restoreAllMocks();
@@ -205,6 +210,39 @@ describe('order fulfillment service', () => {
 
     // Aucune écriture : pas de donnée incohérente persistée.
     expect(update).not.toHaveBeenCalled();
+  });
+
+  describe('Meta Purchase fallback (C5.5)', () => {
+    const inDeliveryOrder = {
+      _id: orderId,
+      totalPrice: '25000',
+      deliveryChannel: DeliveryChannel.INTERNAL,
+      operationalStatus: OrderOperationalStatus.IN_DELIVERY
+    };
+
+    it('triggers the Purchase once after a successful delivery', async () => {
+      jest.spyOn(Order, 'findById').mockResolvedValue(inDeliveryOrder as never);
+      jest
+        .spyOn(Order, 'findOneAndUpdate')
+        .mockResolvedValue({ ...inDeliveryOrder, operationalStatus: OrderOperationalStatus.DELIVERED } as never);
+      jest.spyOn(OrderEvent, 'create').mockResolvedValue({} as never);
+
+      await OrderFulfillmentService.deliver(orderId.toString(), { collectedAmount: 25000 });
+
+      expect(triggerCapiPurchase).toHaveBeenCalledTimes(1);
+      expect(triggerCapiPurchase).toHaveBeenCalledWith(orderId, 'delivery');
+    });
+
+    it('does not trigger the Purchase when the delivery write did not apply', async () => {
+      jest.spyOn(Order, 'findById').mockResolvedValue(inDeliveryOrder as never);
+      jest.spyOn(Order, 'findOneAndUpdate').mockResolvedValue(null as never);
+
+      await expect(OrderFulfillmentService.deliver(orderId.toString(), { collectedAmount: 25000 })).rejects.toMatchObject({
+        code: 'OrderDeliverNotAllowed',
+        status: 409
+      });
+      expect(triggerCapiPurchase).not.toHaveBeenCalled();
+    });
   });
 
   it('blocks deliver from any status other than in_delivery', async () => {

@@ -10,6 +10,7 @@ import {
   OrderOperationalStatus
 } from '../../models/Order';
 import config from '../config/env.config';
+import { triggerCapiPurchase } from './capiPurchase.service';
 import { DeliveryFeeConfigService } from './deliveryFeeConfig.service';
 
 export class OrderFulfillmentError extends Error {
@@ -282,6 +283,9 @@ export class OrderFulfillmentService {
     if (!order) {
       throw new OrderFulfillmentError('OrderDeliverNotAllowed', 'Order cannot be delivered from its current status', 409);
     }
+
+    // Fallback for an order never confirmed: no-op when the Purchase was already triggered.
+    void triggerCapiPurchase(order._id, 'delivery');
 
     const metadata = {
       expectedAmount: codExpectedAmount,

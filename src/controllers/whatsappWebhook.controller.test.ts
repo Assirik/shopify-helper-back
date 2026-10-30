@@ -21,6 +21,10 @@ jest.mock('../queues/notification.queue', () => ({
   enqueueOrderConfirmed: jest.fn()
 }));
 
+jest.mock('../utilities/services/capiPurchase.service', () => ({
+  triggerCapiPurchase: jest.fn(async () => undefined)
+}));
+
 const ORDER_PHONE = '+221776986780';
 const OTHER_SENDER = '221771112233';
 

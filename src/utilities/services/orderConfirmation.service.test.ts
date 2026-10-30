@@ -20,12 +20,17 @@ import {
 } from './orderConfirmation.service';
 import { enqueueOrderConfirmed } from '../../queues/notification.queue';
 import log from '../logger/logger';
+import { triggerCapiPurchase } from './capiPurchase.service';
 import { MAX_NOTE_LENGTH } from './orderFulfillment.service';
 
 jest.mock('../../queues/notification.queue', () => ({
   enqueueConfirmationReminder: jest.fn(),
   enqueueOrderCancelled: jest.fn(),
   enqueueOrderConfirmed: jest.fn()
+}));
+
+jest.mock('./capiPurchase.service', () => ({
+  triggerCapiPurchase: jest.fn(async () => undefined)
 }));
 
 describe('order action capabilities', () => {
@@ -738,5 +743,107 @@ describe('pre-filled WhatsApp confirmation (C5.6b)', () => {
       expect.objectContaining({ orderId, err: expect.any(Error) }),
       expect.any(String)
     );
+  });
+});
+
+describe('Meta Purchase trigger on confirmation (C5.5)', () => {
+  const orderId = new Types.ObjectId();
+  const orderPhone = '+221776986780';
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  const mockConfirmedWrite = () => {
+    const update = jest
+      .spyOn(Order, 'findOneAndUpdate')
+      .mockResolvedValue({ _id: orderId, customerConfirmationStatus: CustomerConfirmationStatus.CONFIRMED } as never);
+    jest.spyOn(OrderEvent, 'create').mockResolvedValue({} as never);
+    jest.spyOn(Message, 'create').mockResolvedValue({ _id: new Types.ObjectId() } as never);
+    return update;
+  };
+
+  const mockPrefilledOrder = () =>
+    jest.spyOn(Order, 'findOne').mockResolvedValue({
+      _id: orderId,
+      shopifyOrderName: '#1234',
+      customerPhoneE164: orderPhone,
+      customerConfirmationStatus: CustomerConfirmationStatus.PENDING
+    } as never);
+
+  it('triggers once after a Confirm button confirmation', async () => {
+    mockConfirmedWrite();
+
+    await OrderConfirmationService.confirmByWhatsAppButton(orderId.toString(), { buttonText: 'Confirmer' });
+
+    expect(triggerCapiPurchase).toHaveBeenCalledTimes(1);
+    expect(triggerCapiPurchase).toHaveBeenCalledWith(orderId, 'confirmation');
+  });
+
+  it('triggers once after a pre-filled message confirmation', async () => {
+    mockPrefilledOrder();
+    mockConfirmedWrite();
+
+    const result = await OrderConfirmationService.confirmByPrefilledMessage({
+      from: '221776986780',
+      text: 'Je confirme ma commande #1234'
+    });
+
+    expect(result.outcome).toBe('confirmed');
+    expect(triggerCapiPurchase).toHaveBeenCalledTimes(1);
+    expect(triggerCapiPurchase).toHaveBeenCalledWith(orderId, 'confirmation');
+  });
+
+  it.each([ConfirmationSource.ADMIN, ConfirmationSource.PHONE_CALL] as const)(
+    'triggers once after an agent confirmation (source %s)',
+    async source => {
+      mockConfirmedWrite();
+
+      await OrderConfirmationService.confirmByAdmin(orderId.toString(), undefined, source);
+
+      expect(triggerCapiPurchase).toHaveBeenCalledTimes(1);
+      expect(triggerCapiPurchase).toHaveBeenCalledWith(orderId, 'confirmation');
+    }
+  );
+
+  it('does not trigger when the button write did not apply (already confirmed)', async () => {
+    jest.spyOn(Order, 'findOneAndUpdate').mockResolvedValue(null as never);
+    jest.spyOn(Order, 'findById').mockResolvedValue({
+      _id: orderId,
+      customerConfirmationStatus: CustomerConfirmationStatus.CONFIRMED
+    } as never);
+
+    const result = await OrderConfirmationService.confirmByWhatsAppButton(orderId.toString(), { buttonText: 'Confirmer' });
+
+    expect(result.alreadyConfirmed).toBe(true);
+    expect(triggerCapiPurchase).not.toHaveBeenCalled();
+  });
+
+  it('does not trigger when the pre-filled write lost a concurrent transition', async () => {
+    mockPrefilledOrder();
+    jest.spyOn(Order, 'findOneAndUpdate').mockResolvedValue(null as never);
+    jest.spyOn(Order, 'findById').mockResolvedValue({
+      _id: orderId,
+      customerConfirmationStatus: CustomerConfirmationStatus.CANCELLED
+    } as never);
+
+    const result = await OrderConfirmationService.confirmByPrefilledMessage({
+      from: '221776986780',
+      text: 'Je confirme ma commande #1234'
+    });
+
+    expect(result).toEqual({ outcome: 'not_applicable' });
+    expect(triggerCapiPurchase).not.toHaveBeenCalled();
+  });
+
+  it('does not trigger when the agent confirmation is refused', async () => {
+    jest.spyOn(Order, 'findOneAndUpdate').mockResolvedValue(null as never);
+    jest.spyOn(Order, 'exists').mockResolvedValue({ _id: orderId } as never);
+
+    await expect(OrderConfirmationService.confirmByAdmin(orderId.toString())).rejects.toMatchObject({
+      code: 'OrderConfirmationNotAllowed',
+      status: 409
+    });
+    expect(triggerCapiPurchase).not.toHaveBeenCalled();
   });
 });
