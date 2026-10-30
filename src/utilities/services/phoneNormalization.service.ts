@@ -6,7 +6,8 @@ export interface PhoneNormalizationResult {
 }
 
 const SENEGAL_COUNTRY_CODE = '221';
-const SENEGAL_MOBILE_PREFIXES = new Set(['70', '75', '76', '77', '78']);
+// Les mobiles commencent par 70, 71, 72, 75, 76, 77, 78 ou 79
+const SENEGAL_MOBILE_PREFIXES = new Set(['70', '71', '72', '75', '76', '77', '78', '79']);
 const LOCAL_MOBILE_LENGTH = 9;
 const INTERNATIONAL_MOBILE_LENGTH = SENEGAL_COUNTRY_CODE.length + LOCAL_MOBILE_LENGTH;
 
