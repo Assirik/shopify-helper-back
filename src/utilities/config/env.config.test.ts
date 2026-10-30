@@ -1,5 +1,5 @@
 import { describe, expect, it } from '@jest/globals';
-import { buildMetaCapiConfig, DEFAULT_FX_XOF_EUR } from './env.config';
+import { buildMetaCapiConfig, DEFAULT_FX_XOF_EUR, parseSessionCaptureOrigins } from './env.config';
 import { checkCapiStartup } from './capiStartup';
 
 describe('buildMetaCapiConfig', () => {
@@ -67,5 +67,19 @@ describe('checkCapiStartup', () => {
   });
   it('passes when enabled and complete', () => {
     expect(checkCapiStartup({ enabled: true, datasetId: 'd', accessToken: 't' })).toBeNull();
+  });
+});
+
+describe('parseSessionCaptureOrigins', () => {
+  it('returns an empty list when the variable is absent or blank', () => {
+    expect(parseSessionCaptureOrigins(undefined)).toEqual([]);
+    expect(parseSessionCaptureOrigins(' , ')).toEqual([]);
+  });
+
+  it('trims, lowercases and drops trailing slashes', () => {
+    expect(parseSessionCaptureOrigins(' https://Shop.example.com/ ,https://www.shop.example.com')).toEqual([
+      'https://shop.example.com',
+      'https://www.shop.example.com'
+    ]);
   });
 });

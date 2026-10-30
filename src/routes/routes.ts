@@ -12,6 +12,7 @@ import messageConfig from './messageConfig';
 import couriers from './couriers';
 import carriers from './carriers';
 import deliveryFees from './deliveryFees';
+import browserSession from './browserSession';
 
 const router = express.Router();
 
@@ -28,5 +29,6 @@ router.use('/api/carriers', carriers);
 router.use('/api/delivery-fees', deliveryFees);
 router.use('/api/messages', messages);
 router.use('/api/dashboard', dashboard);
+router.use('/api/session', browserSession);
 
 export default router;

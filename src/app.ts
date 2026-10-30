@@ -9,6 +9,9 @@ import { errorHandler } from './middlewares/errorHandler';
 import log from './utilities/logger/logger';
 
 const app = express();
+// Behind one reverse proxy: req.ip is the client address from X-Forwarded-For, not the proxy's.
+// Anything further left in that header is client-supplied and is ignored.
+app.set('trust proxy', 1);
 
 const captureRawBody = (req: IncomingMessage, _res: ServerResponse, buffer: Buffer) => {
   if (buffer.length) {
