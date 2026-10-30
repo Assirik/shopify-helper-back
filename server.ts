@@ -12,6 +12,7 @@ import {
   stopMaintenanceWorker,
   stopNotificationWorker
 } from './src/workers/notification.worker';
+import { startCapiPurchaseWorker, stopCapiPurchaseWorker } from './src/workers/capiPurchase.worker';
 
 const capiError = checkCapiStartup(config.metaCapi);
 if (capiError) {
@@ -71,6 +72,7 @@ server.listen(port, async () => {
   await DatabaseService.connectWithRetry();
   startNotificationWorker();
   startMaintenanceWorker();
+  startCapiPurchaseWorker();
 
   try {
     await scheduleConfirmationSweep(config.confirmation.sweepIntervalMinutes);
@@ -85,6 +87,7 @@ const shutdown = async (signal: string) => {
 
   await stopNotificationWorker();
   await stopMaintenanceWorker();
+  await stopCapiPurchaseWorker();
   server.close(() => {
     log.info('HTTP server closed');
     process.exit(0);
