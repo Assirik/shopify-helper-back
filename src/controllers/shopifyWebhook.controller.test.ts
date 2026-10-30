@@ -121,7 +121,8 @@ const LINKED_FIELDS = {
   capiFbp: 'fb.1.1730000000000.111',
   capiFbc: 'fb.1.1730000000000.abc',
   capiClientUserAgent: 'Mozilla/5.0 (Test)',
-  capiEventSourceUrl: 'https://shop.example.com/products/x'
+  capiEventSourceUrl: 'https://shop.example.com/products/x',
+  fbclid: 'abc'
 };
 
 describe('findBrowserSessionCapiFields', () => {
@@ -153,7 +154,7 @@ describe('findBrowserSessionCapiFields', () => {
   });
 
   it('copies only the fields that were captured', async () => {
-    mockBrowserSessionLookup(browserSession(ORDER_CREATED_AT, { fbp: undefined, fbc: undefined }));
+    mockBrowserSessionLookup(browserSession(ORDER_CREATED_AT, { fbp: undefined, fbc: undefined, fbclid: undefined }));
 
     await expect(findBrowserSessionCapiFields('+221776986780', ORDER_CREATED_AT)).resolves.toEqual({
       linked: true,
@@ -212,11 +213,11 @@ describe('ShopifyWebhookController.ordersCreate — browser session link', () =>
   let orderFindOne: ReturnType<typeof jest.spyOn>;
   let logInfo: ReturnType<typeof jest.spyOn>;
 
-  const callOrdersCreate = async () => {
+  const callOrdersCreate = async (body: Record<string, unknown> = payload) => {
     const headers: Record<string, string> = { 'x-shopify-webhook-id': `wh-${Math.random()}` };
     const req = {
-      body: payload,
-      rawBody: Buffer.from(JSON.stringify(payload)),
+      body,
+      rawBody: Buffer.from(JSON.stringify(body)),
       get: (name: string) => headers[name.toLowerCase()]
     } as unknown as Request;
     const res = {
@@ -271,6 +272,58 @@ describe('ShopifyWebhookController.ordersCreate — browser session link', () =>
     expect(res.statusCode).toBe(202);
     expect(orderCreate.mock.calls[0]?.[0]).toEqual(expect.objectContaining(LINKED_FIELDS));
     expect(linkLogLine()).toEqual(expect.objectContaining({ browserSessionLinked: true, browserSessionLookupFailed: false }));
+  });
+
+  it('reads the ad origin from utm_* attributes and the full_url fbclid over the session one', async () => {
+    mockBrowserSessionLookup(browserSession(new Date(ORDER_CREATED_AT.getTime() - 2 * MINUTE)));
+    const withNotes = { ...payload, note_attributes: [
+      { name: 'utm_campaign', value: ' c1 ' },
+      { name: 'utm_term', value: 'as1' },
+      { name: 'utm_content', value: 'ad1' },
+      { name: 'utm_source', value: 'facebook' },
+      { name: 'utm_medium', value: 'paid' },
+      { name: 'full_url', value: 'https://shop.example.com/p?fbclid=URLCLID&utm_campaign=other' }
+    ] };
+
+    const res = await callOrdersCreate(withNotes);
+
+    expect(res.statusCode).toBe(202);
+    expect(orderCreate.mock.calls[0]?.[0]).toEqual(
+      expect.objectContaining({
+        campaignId: 'c1',
+        adsetId: 'as1',
+        adId: 'ad1',
+        utmSource: 'facebook',
+        utmMedium: 'paid',
+        fbclid: 'URLCLID',
+        capiFbc: LINKED_FIELDS.capiFbc
+      })
+    );
+  });
+
+  it('falls back to the session fbclid when full_url has none, and leaves ad fields empty', async () => {
+    mockBrowserSessionLookup(browserSession(new Date(ORDER_CREATED_AT.getTime() - 2 * MINUTE)));
+
+    const res = await callOrdersCreate({ ...payload, note_attributes: [{ name: 'full_url', value: '/relative?x=1' }] });
+
+    expect(res.statusCode).toBe(202);
+    const created = orderCreate.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(created.fbclid).toBe('abc');
+    for (const field of ['adId', 'campaignId', 'adsetId', 'utmSource', 'utmMedium']) {
+      expect(created).not.toHaveProperty(field);
+    }
+  });
+
+  it('ingests an organic order without ad fields', async () => {
+    mockBrowserSessionLookup(null);
+
+    const res = await callOrdersCreate({ ...payload, note_attributes: [{ name: 'utm_source', value: '   ' }] });
+
+    expect(res.statusCode).toBe(202);
+    const created = orderCreate.mock.calls[0]?.[0] as Record<string, unknown>;
+    for (const field of ['fbclid', 'adId', 'campaignId', 'adsetId', 'utmSource', 'utmMedium']) {
+      expect(created).not.toHaveProperty(field);
+    }
   });
 
   it('ingests the order unchanged when no capture exists', async () => {

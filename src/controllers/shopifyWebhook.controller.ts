@@ -12,6 +12,7 @@ import { enqueueOrderConfirmation } from '../queues/notification.queue';
 import { resolveRegion } from '../utilities/reference/senegalRegions';
 import log from '../utilities/logger/logger';
 import { splitFullName } from '../utilities/services/nameParser';
+import { parseAdAttribution } from '../utilities/services/adAttribution';
 
 /**
  * Types locaux pour les champs Shopify utilisés par le MVP.
@@ -335,6 +336,8 @@ export interface BrowserSessionCapiFields {
   capiFbc?: string;
   capiClientUserAgent?: string;
   capiEventSourceUrl?: string;
+  // Session fallback for Order.fbclid (the order's full_url takes precedence).
+  fbclid?: string;
 }
 
 // Rejects when the promise does not settle within `ms`; the timer never outlives the call.
@@ -387,7 +390,8 @@ export const findBrowserSessionCapiFields = async (
     ...(session.fbp ? { capiFbp: session.fbp } : {}),
     ...(session.fbc ? { capiFbc: session.fbc } : {}),
     ...(session.userAgent ? { capiClientUserAgent: session.userAgent } : {}),
-    ...(session.pageUrl ? { capiEventSourceUrl: session.pageUrl } : {})
+    ...(session.pageUrl ? { capiEventSourceUrl: session.pageUrl } : {}),
+    ...(session.fbclid ? { fbclid: session.fbclid } : {})
   };
 
   return { linked: Object.keys(fields).length > 0, fields };
@@ -701,6 +705,9 @@ export class ShopifyWebhookController {
       log.warn({ err, shopifyOrderId }, 'Browser session lookup failed, order ingested without browser signals');
     }
 
+    // Advertising origin (C5.2): utm_* attributes first, full_url as fallback.
+    const adAttribution = parseAdAttribution(noteAttributes);
+
     // 7. Création de la commande enrichie.
     // Elle garde les infos utiles pour le dashboard, les notifications et le futur stock.
     const order = await Order.create({
@@ -734,7 +741,9 @@ export class ShopifyWebhookController {
       financialStatus: payload.financial_status || undefined,
       fulfillmentStatus: payload.fulfillment_status || undefined,
       notificationStatus,
+      // Spread after the session: the order's own full_url fbclid wins, the session's is the fallback.
       ...browserSessionLink.fields,
+      ...adAttribution,
       ...(!phone.isValid && !skipNotificationReason
         ? {
             needsHelpdeskAttention: true,
