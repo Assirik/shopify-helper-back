@@ -1,7 +1,14 @@
 import { Job, Worker } from 'bullmq';
 import { Customer, ICustomer } from '../models/Customer';
 import { Message, MessageChannel, MessageProvider, MessageStatus, TemplatePurpose } from '../models/Message';
-import { AttentionReasonCode, CustomerConfirmationStatus, IOrder, NotificationStatus, Order } from '../models/Order';
+import {
+  AttentionReasonCode,
+  CustomerConfirmationStatus,
+  IOrder,
+  NotificationStatus,
+  Order,
+  OrderOperationalStatus
+} from '../models/Order';
 import { createOrderConfirmationButtonPayload, MetaWhatsAppProvider } from '../providers/metaWhatsApp.provider';
 import { OrderConfirmationInput, ProviderError, TemplateVariable } from '../providers/messaging.provider';
 import { buildOrderConfirmationSmsText, TermiiSmsProvider } from '../providers/termiiSms.provider';
@@ -10,11 +17,14 @@ import {
   MAINTENANCE_QUEUE_NAME,
   NOTIFICATION_QUEUE_NAME,
   SEND_CONFIRMATION_REMINDER_JOB,
+  SEND_INITIAL_CONFIRMATION_REQUEST_JOB,
   SEND_ORDER_CANCELLED_JOB,
   SEND_ORDER_CONFIRMED_JOB,
   SEND_ORDER_CONFIRMATION_JOB,
+  InitialConfirmationRequestJobData,
   SendOrderConfirmationJobData,
   enqueueOrderConfirmation,
+  getInitialConfirmationSendJobId,
   getRedisConnection
 } from '../queues/notification.queue';
 import config from '../utilities/config/env.config';
@@ -364,6 +374,124 @@ const processOrderConfirmation = async (job: Job<SendOrderConfirmationJobData>) 
   return result;
 };
 
+const TERMINAL_OPERATIONAL_STATUSES = [OrderOperationalStatus.DELIVERED, OrderOperationalStatus.RETURNED];
+
+// Why the delayed initial request must not be sent, or null when it must. Attention flags
+// (e.g. `phone_mismatch`) are deliberately ignored: such an order is still pending.
+export const getInitialConfirmationSkipReason = (
+  order: Pick<IOrder, 'customerConfirmationStatus' | 'shopifyCancelledAt' | 'operationalStatus' | 'reminderCount'>
+) => {
+  if (order.customerConfirmationStatus !== CustomerConfirmationStatus.PENDING) {
+    return 'not_pending';
+  }
+
+  // A reminder (admin or bulk) sent during the delay already was the first contact.
+  if ((order.reminderCount || 0) > 0) {
+    return 'already_reminded';
+  }
+
+  if (order.shopifyCancelledAt) {
+    return 'cancelled_on_shopify';
+  }
+
+  if (order.operationalStatus && TERMINAL_OPERATIONAL_STATUSES.includes(order.operationalStatus)) {
+    return 'terminal_operational_status';
+  }
+
+  return null;
+};
+
+// Settles the initial request status of an order whose delayed request will never be sent.
+// Conditional write: a status already set by the send flow is never overwritten.
+const settlePendingInitialNotification = async (
+  orderId: string,
+  notificationStatus: NotificationStatus.SKIPPED | NotificationStatus.FAILED
+) => {
+  return Order.updateOne(
+    { _id: orderId, notificationStatus: NotificationStatus.PENDING },
+    { $set: { notificationStatus } }
+  );
+};
+
+// Delayed first confirmation request (C5.6a): runs once the configured delay has expired and
+// hands over to the regular flow (same job, same worker, same SMS fallback) only when the
+// order is still pending. It never touches `reminderCount`.
+export const processInitialConfirmationRequest = async (job: Job<InitialConfirmationRequestJobData>) => {
+  const { orderId } = job.data;
+  const order = await Order.findById(orderId);
+
+  if (!order) {
+    log.warn({ jobId: job.id, orderId }, 'Order not found for delayed initial confirmation request, nothing sent');
+    return;
+  }
+
+  const skipReason = getInitialConfirmationSkipReason(order);
+
+  if (skipReason) {
+    log.info(
+      {
+        jobId: job.id,
+        orderId,
+        skipReason,
+        customerConfirmationStatus: order.customerConfirmationStatus,
+        operationalStatus: order.operationalStatus
+      },
+      'Delayed initial confirmation request skipped, order no longer pending'
+    );
+    await settlePendingInitialNotification(orderId, NotificationStatus.SKIPPED);
+    return;
+  }
+
+  // Retry-safe: reuse the request a previous attempt created but could not hand over;
+  // a request already picked by the send flow is never handed over twice.
+  const existing = await Message.findOne({
+    orderId: order._id,
+    channel: MessageChannel.WHATSAPP,
+    templatePurpose: TemplatePurpose.ORDER_CONFIRMATION_REQUEST
+  });
+
+  if (existing && existing.status !== MessageStatus.QUEUED) {
+    log.info(
+      { jobId: job.id, orderId, messageId: existing._id, status: existing.status },
+      'Initial confirmation request already handed over, skipping duplicate job'
+    );
+    return;
+  }
+
+  const message =
+    existing ||
+    (await Message.create({
+      orderId: order._id,
+      channel: MessageChannel.WHATSAPP,
+      provider: MessageProvider.META,
+      status: MessageStatus.QUEUED,
+      templateName: config.metaWhatsApp.templateName,
+      templatePurpose: TemplatePurpose.ORDER_CONFIRMATION_REQUEST
+    }));
+
+  // Deterministic id: a replay of this job after the hand-over never adds a second send.
+  const confirmationJob = await enqueueOrderConfirmation(
+    {
+      orderId: order._id.toString(),
+      messageId: message._id.toString(),
+      channel: MessageChannel.WHATSAPP
+    },
+    { jobId: getInitialConfirmationSendJobId(message._id.toString()) }
+  );
+
+  log.info(
+    {
+      jobId: job.id,
+      orderId,
+      messageId: message._id,
+      confirmationJobId: confirmationJob.id
+    },
+    'Delayed initial confirmation request handed over to the send flow'
+  );
+
+  return { messageId: message._id.toString(), confirmationJobId: confirmationJob.id };
+};
+
 const processOrderCancelled = async (job: Job<SendOrderConfirmationJobData>) => {
   const { result } = await sendMetaTemplate(job, config.metaWhatsApp.cancelledTemplateName, TemplatePurpose.ORDER_CANCELLED);
 
@@ -539,6 +667,13 @@ const handleJobFailure = async (
     return;
   }
 
+  // The delayed initial job carries no Message: only the order's initial request status is
+  // settled (the automatic reminders still apply).
+  if (job.name === SEND_INITIAL_CONFIRMATION_REQUEST_JOB) {
+    await settlePendingInitialNotification(orderId, NotificationStatus.FAILED);
+    return;
+  }
+
   const errorCode = err instanceof ProviderError ? err.code : 'PROVIDER_ERROR';
 
   await Message.findByIdAndUpdate(messageId, {
@@ -607,6 +742,10 @@ export const startNotificationWorker = () => {
 
         if (job.name === SEND_CONFIRMATION_REMINDER_JOB) {
           return processConfirmationReminder(job);
+        }
+
+        if (job.name === SEND_INITIAL_CONFIRMATION_REQUEST_JOB) {
+          return processInitialConfirmationRequest(job as unknown as Job<InitialConfirmationRequestJobData>);
         }
 
         throw new Error(`Unsupported notification job: ${job.name}`);

@@ -8,7 +8,7 @@ import { AttentionReasonCode, NotificationStatus, Order } from '../models/Order'
 import { BrowserSession } from '../models/BrowserSession';
 import { Product } from '../models/Product';
 import { WebhookEvent, WebhookEventStatus } from '../models/WebhookEvent';
-import { enqueueOrderConfirmation } from '../queues/notification.queue';
+import { scheduleInitialConfirmationRequest } from '../queues/notification.queue';
 import { resolveRegion } from '../utilities/reference/senegalRegions';
 import log from '../utilities/logger/logger';
 import { splitFullName } from '../utilities/services/nameParser';
@@ -848,45 +848,32 @@ export class ShopifyWebhookController {
       });
     }
 
-    // 11. Message WhatsApp initial.
-    // Le provider réel ne sera appelé que par le worker BullMQ, pas dans le webhook.
-    const message = await Message.create({
-      orderId: order._id,
-      channel: MessageChannel.WHATSAPP,
-      provider: MessageProvider.META,
-      status: MessageStatus.QUEUED,
-      templateName: config.metaWhatsApp.templateName,
-      templatePurpose: TemplatePurpose.ORDER_CONFIRMATION_REQUEST
-    });
+    // 11. Delayed initial WhatsApp confirmation request (C5.6a).
+    // The customer often confirms within a minute through the pre-filled EasySell message, so
+    // no Message is created here: a delayed job (deterministic jobId) re-checks the order when
+    // the delay expires and only then creates the Message and hands over to the send flow.
+    // A scheduling failure (Redis down) never fails the ingestion.
+    let scheduledJobId: string | undefined;
 
-    log.info(
-      {
-        orderId: order._id,
-        messageId: message._id,
-        channel: message.channel,
-        provider: message.provider,
-        status: message.status
-      },
-      'Created queued WhatsApp message'
-    );
+    try {
+      const job = await scheduleInitialConfirmationRequest(order._id.toString());
+      scheduledJobId = job.id;
 
-    // 12. Enqueue asynchrone.
-    // Le webhook peut répondre vite: l'envoi WhatsApp/SMS sera traité hors requête HTTP.
-    const job = await enqueueOrderConfirmation({
-      orderId: order._id.toString(),
-      messageId: message._id.toString(),
-      channel: MessageChannel.WHATSAPP
-    });
-
-    log.info(
-      {
-        orderId: order._id,
-        messageId: message._id,
-        jobId: job.id,
-        queueName: job.queueName
-      },
-      'Enqueued order confirmation notification job'
-    );
+      log.info(
+        {
+          orderId: order._id,
+          jobId: job.id,
+          queueName: job.queueName,
+          delayMinutes: config.confirmation.initialRequestDelayMinutes
+        },
+        'Scheduled delayed initial confirmation request'
+      );
+    } catch (err) {
+      log.error(
+        { err, orderId: order._id, shopifyOrderId },
+        'Failed to schedule the initial confirmation request; order ingested without it'
+      );
+    }
 
     // Réponse volontairement courte: IDs de suivi pour debug/dashboard.
     return res.status(202).json({
@@ -894,9 +881,8 @@ export class ShopifyWebhookController {
       orderId: order._id,
       customerId: customer._id,
       webhookEventId: webhookEvent._id,
-      messageId: message._id,
-      jobId: job.id,
-      notificationQueued: true,
+      jobId: scheduledJobId,
+      notificationQueued: Boolean(scheduledJobId),
       phoneValid: true
     });
   }

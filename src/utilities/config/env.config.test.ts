@@ -1,5 +1,10 @@
 import { describe, expect, it } from '@jest/globals';
-import { buildMetaCapiConfig, DEFAULT_FX_XOF_EUR, parseSessionCaptureOrigins } from './env.config';
+import {
+  buildMetaCapiConfig,
+  DEFAULT_FX_XOF_EUR,
+  parseInitialConfirmationRequestDelayMinutes,
+  parseSessionCaptureOrigins
+} from './env.config';
 import { checkCapiStartup } from './capiStartup';
 
 describe('buildMetaCapiConfig', () => {
@@ -81,5 +86,23 @@ describe('parseSessionCaptureOrigins', () => {
       'https://shop.example.com',
       'https://www.shop.example.com'
     ]);
+  });
+});
+
+describe('parseInitialConfirmationRequestDelayMinutes', () => {
+  it('defaults to 5 minutes when the variable is absent or invalid', () => {
+    expect(parseInitialConfirmationRequestDelayMinutes(undefined)).toBe(5);
+    expect(parseInitialConfirmationRequestDelayMinutes('')).toBe(5);
+    expect(parseInitialConfirmationRequestDelayMinutes('abc')).toBe(5);
+    expect(parseInitialConfirmationRequestDelayMinutes('Infinity')).toBe(5);
+  });
+
+  it.each(['4', '1', '0', '-3', '4.9'])('raises %p to the 5 minute minimum', value => {
+    expect(parseInitialConfirmationRequestDelayMinutes(value)).toBe(5);
+  });
+
+  it('keeps a longer delay', () => {
+    expect(parseInitialConfirmationRequestDelayMinutes('5')).toBe(5);
+    expect(parseInitialConfirmationRequestDelayMinutes('10')).toBe(10);
   });
 });

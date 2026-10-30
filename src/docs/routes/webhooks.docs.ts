@@ -5,7 +5,7 @@
  *     tags: [Shopify Webhooks]
  *     operationId: receiveShopifyOrder
  *     summary: Ingérer une commande Shopify
- *     description: Webhook public authentifié par HMAC SHA-256 calculé sur le corps brut. Les doublons sont acquittés sans recréer la commande.
+ *     description: Webhook public authentifié par HMAC SHA-256 calculé sur le corps brut. Les doublons sont acquittés sans recréer la commande. La demande de confirmation WhatsApp n'est pas envoyée tout de suite ; elle est programmée après CONFIRMATION_INITIAL_REQUEST_DELAY_MINUTES (5 min minimum) et ne part que si la commande est toujours en attente à l'échéance.
  *     parameters:
  *       - in: header
  *         name: X-Shopify-Hmac-Sha256
@@ -51,9 +51,18 @@
  *                 orderId: { type: string, pattern: '^[a-fA-F0-9]{24}$' }
  *                 customerId: { type: string, pattern: '^[a-fA-F0-9]{24}$' }
  *                 webhookEventId: { type: string, pattern: '^[a-fA-F0-9]{24}$' }
- *                 messageId: { type: string, pattern: '^[a-fA-F0-9]{24}$' }
- *                 jobId: { type: string, nullable: true }
- *                 notificationQueued: { type: boolean }
+ *                 messageId:
+ *                   type: string
+ *                   pattern: '^[a-fA-F0-9]{24}$'
+ *                   description: Présent seulement quand aucune demande n'est programmée (téléphone invalide, commande test ou annulée) — message tracé en échec.
+ *                 jobId:
+ *                   type: string
+ *                   nullable: true
+ *                   example: confirm-initial-6650f0c2a1b2c3d4e5f60718
+ *                   description: Identifiant du job différé de demande de confirmation. Absent si sa programmation a échoué.
+ *                 notificationQueued:
+ *                   type: boolean
+ *                   description: Vrai quand la demande de confirmation différée est programmée.
  *                 phoneValid: { type: boolean }
  *                 errorReason: { type: string }
  *       400:
