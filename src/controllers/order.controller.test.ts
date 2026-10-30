@@ -373,6 +373,51 @@ describe('order controller attention queue (Lot 0 · F1)', () => {
       expect.objectContaining({ attentionReasonCode: AttentionReasonCode.UNREACHABLE })
     );
   });
+
+  it('accepts the phone_mismatch reason filter and counts it (C5.6b)', async () => {
+    const find = mockOrderFind();
+    const count = jest.spyOn(Order, 'countDocuments').mockResolvedValue(2 as never);
+    jest.spyOn(Order, 'aggregate').mockResolvedValue([
+      { _id: AttentionReasonCode.PHONE_MISMATCH, count: 2 },
+      { _id: AttentionReasonCode.FREE_TEXT, count: 3 }
+    ] as never);
+    const { res, status, json } = mockResponse();
+
+    await OrderController.attentionQueue(mockRequest({ query: { reason: 'phone_mismatch' } }), res);
+
+    expect(status).toHaveBeenCalledWith(200);
+    expect(find.mock.calls[0]?.[0]).toEqual(
+      expect.objectContaining({ attentionReasonCode: AttentionReasonCode.PHONE_MISMATCH })
+    );
+    expect(count.mock.calls[0]?.[0]).toEqual(
+      expect.objectContaining({ attentionReasonCode: AttentionReasonCode.PHONE_MISMATCH })
+    );
+    expect(json.mock.calls[0]?.[0]).toEqual(
+      expect.objectContaining({
+        counts: {
+          all: 5,
+          free_text: 3,
+          sms_only: 0,
+          invalid_number: 0,
+          late_confirm: 0,
+          unreachable: 0,
+          phone_mismatch: 2
+        }
+      })
+    );
+  });
+
+  it('includes phone_mismatch orders in the unfiltered queue (C5.6b)', async () => {
+    const find = mockOrderFind();
+    jest.spyOn(Order, 'countDocuments').mockResolvedValue(0 as never);
+    jest.spyOn(Order, 'aggregate').mockResolvedValue([] as never);
+    const { res } = mockResponse();
+
+    await OrderController.attentionQueue(mockRequest({}), res);
+
+    const filter = find.mock.calls[0]?.[0] as unknown as { attentionReasonCode: { $in: string[] } };
+    expect(filter.attentionReasonCode.$in).toContain('phone_mismatch');
+  });
 });
 
 describe('order controller notes endpoint (Lot 0 · F16)', () => {

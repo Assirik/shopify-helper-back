@@ -19,6 +19,7 @@ import config from '../config/env.config';
 import log from '../logger/logger';
 import { CONFIRMABLE_BY_ADMIN, getOrderActionCapabilities } from './orderCapabilities.service';
 import { MAX_NOTE_LENGTH } from './orderFulfillment.service';
+import { PhoneNormalizationService } from './phoneNormalization.service';
 
 export class OrderConfirmationError extends Error {
   public readonly code: string;
@@ -134,11 +135,89 @@ const dispatchReminderMessage = async (orderId: Types.ObjectId) => {
   return { message, job };
 };
 
-const CONFIRMABLE_BY_BUTTON = [
+export const CONFIRMABLE_BY_BUTTON = [
   CustomerConfirmationStatus.PENDING,
   CustomerConfirmationStatus.NEEDS_ATTENTION,
   CustomerConfirmationStatus.SMS_ONLY
 ];
+
+// Pre-filled WhatsApp message sent right after the EasySell form:
+// "Je confirme ma commande #1234". Recognised when the text contains "confirm"
+// (case and accent insensitive) and at least one `#<digits>` order reference.
+// A negation (the whole word "pas": "ne … pas", "n'… pas") or a cancellation ("annul…")
+// disqualifies it: such a text follows the regular free-text handling.
+const PREFILLED_CONFIRMATION_KEYWORD = 'confirm';
+const PREFILLED_CONFIRMATION_DISQUALIFIER = /\bpas\b|annul/;
+const ORDER_REFERENCE_PATTERN = /#(\d+)/g;
+
+const foldText = (text: string) =>
+  text
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
+
+/**
+ * Returns the candidate Shopify order names (`#1234`) of a pre-filled confirmation
+ * message, in order of appearance, or an empty list when the text is not one.
+ */
+export const parsePrefilledConfirmationText = (text?: string | null): string[] => {
+  const folded = text ? foldText(text) : '';
+
+  if (!text || !folded.includes(PREFILLED_CONFIRMATION_KEYWORD) || PREFILLED_CONFIRMATION_DISQUALIFIER.test(folded)) {
+    return [];
+  }
+
+  const names = Array.from(text.matchAll(ORDER_REFERENCE_PATTERN), match => `#${match[1]}`);
+
+  return Array.from(new Set(names));
+};
+
+/**
+ * Single comparison point between a WhatsApp sender and the order phone. Both sides go
+ * through the Senegal normalizer, so `221776986780`, `+221 77 698 67 80` and
+ * `776986780` all match `+221776986780`. An invalid or missing phone never matches.
+ */
+export const isSenderOrderPhone = (sender?: string | null, orderPhoneE164?: string | null) => {
+  const senderPhone = PhoneNormalizationService.normalizeSenegalPhone(sender);
+  const orderPhone = PhoneNormalizationService.normalizeSenegalPhone(orderPhoneE164);
+
+  return {
+    matches: Boolean(senderPhone.e164 && orderPhone.e164 && senderPhone.e164 === orderPhone.e164),
+    senderE164: senderPhone.e164
+  };
+};
+
+const TERMINAL_OPERATIONAL_STATUSES = [OrderOperationalStatus.DELIVERED, OrderOperationalStatus.RETURNED];
+
+// Already confirmed, cancelled (here or on Shopify), expired or closed orders are left to
+// the regular inbound-message handling: the pre-filled message never transitions them.
+const acceptsPrefilledConfirmation = (order: IOrder) =>
+  CONFIRMABLE_BY_BUTTON.includes(order.customerConfirmationStatus) &&
+  !order.shopifyCancelledAt &&
+  !(order.operationalStatus && TERMINAL_OPERATIONAL_STATUSES.includes(order.operationalStatus));
+
+// Write-time counterpart of `acceptsPrefilledConfirmation` (the confirmation status is
+// already in every write filter): an order delivered, returned or cancelled on Shopify
+// between the read and the write is left untouched. In MongoDB both `null` and `$nin`
+// also match a missing field, so an order without these fields stays eligible.
+const PREFILLED_WRITE_GUARD = {
+  shopifyCancelledAt: null,
+  operationalStatus: { $nin: TERMINAL_OPERATIONAL_STATUSES }
+};
+
+export interface PrefilledConfirmationInput {
+  from?: string;
+  text?: string;
+  waMessageId?: string;
+}
+
+export type PrefilledConfirmationResult =
+  | { outcome: 'not_applicable' }
+  | { outcome: 'confirmed'; order: IOrder }
+  | { outcome: 'phone_mismatch'; order: IOrder; senderE164?: string };
+
+export const PHONE_MISMATCH_ATTENTION_REASON =
+  'Confirmation WhatsApp envoyée depuis un numéro différent de celui de la commande';
 
 const toActorObjectId = (actorId?: string) =>
   actorId && Types.ObjectId.isValid(actorId) ? new Types.ObjectId(actorId) : undefined;
@@ -163,42 +242,71 @@ const createOrderEvent = (input: {
   });
 };
 
+// Atomic confirm shared by the Confirm button and the pre-filled message: only one writer
+// can flip a confirmable status to CONFIRMED, so the confirmed template is enqueued at most
+// once even with concurrent admin/button actions. Returns null when the write did not apply.
+// `extraFilter` adds write-time conditions (pre-filled message only, the button has none).
+const writeWhatsAppConfirmation = (
+  orderId: string,
+  payload: WhatsAppButtonConfirmation,
+  now: Date,
+  extraFilter: Record<string, unknown> = {}
+) => {
+  const lastCustomerMessageText = payload.buttonText || payload.buttonPayload || 'CONFIRM_ORDER';
+
+  return Order.findOneAndUpdate(
+    { ...extraFilter, _id: orderId, customerConfirmationStatus: { $in: CONFIRMABLE_BY_BUTTON } },
+    {
+      $set: {
+        customerConfirmationStatus: CustomerConfirmationStatus.CONFIRMED,
+        confirmationSource: ConfirmationSource.WHATSAPP_BUTTON,
+        confirmedAt: now,
+        lastCustomerMessageAt: now,
+        lastCustomerMessageText,
+        confirmationPayload: payload,
+        needsHelpdeskAttention: false,
+        operationalStatus: OrderOperationalStatus.TO_DELIVER
+      },
+      $unset: { attentionReason: '', attentionReasonCode: '', attentionRequiredAt: '' }
+    },
+    { new: true }
+  );
+};
+
+// Effects of a WhatsApp confirmation once written: CONFIRMED event + confirmed template.
+const recordWhatsAppConfirmation = async (confirmed: IOrder) => {
+  await createOrderEvent({
+    orderId: confirmed._id,
+    type: OrderEventType.CONFIRMED,
+    toStatus: OrderOperationalStatus.TO_DELIVER,
+    metadata: { source: ConfirmationSource.WHATSAPP_BUTTON }
+  });
+
+  return enqueueConfirmedTemplate(confirmed._id);
+};
+
+const applyWhatsAppConfirmation = async (orderId: string, payload: WhatsAppButtonConfirmation, now: Date) => {
+  const confirmed = await writeWhatsAppConfirmation(orderId, payload, now);
+
+  if (!confirmed) {
+    return null;
+  }
+
+  const { message, job } = await recordWhatsAppConfirmation(confirmed);
+
+  return { order: confirmed, message, job };
+};
+
 export class OrderConfirmationService {
   public static async confirmByWhatsAppButton(orderId: string, payload: WhatsAppButtonConfirmation) {
     ensureObjectId(orderId);
 
     const lastCustomerMessageText = payload.buttonText || payload.buttonPayload || 'CONFIRM_ORDER';
     const now = new Date();
-
-    // Atomic confirm: only one writer can flip a confirmable status to CONFIRMED, so the
-    // confirmed template is enqueued at most once even with concurrent admin/button actions.
-    const confirmed = await Order.findOneAndUpdate(
-      { _id: orderId, customerConfirmationStatus: { $in: CONFIRMABLE_BY_BUTTON } },
-      {
-        $set: {
-          customerConfirmationStatus: CustomerConfirmationStatus.CONFIRMED,
-          confirmationSource: ConfirmationSource.WHATSAPP_BUTTON,
-          confirmedAt: now,
-          lastCustomerMessageAt: now,
-          lastCustomerMessageText,
-          confirmationPayload: payload,
-          needsHelpdeskAttention: false,
-          operationalStatus: OrderOperationalStatus.TO_DELIVER
-        },
-        $unset: { attentionReason: '', attentionReasonCode: '', attentionRequiredAt: '' }
-      },
-      { new: true }
-    );
+    const confirmed = await applyWhatsAppConfirmation(orderId, payload, now);
 
     if (confirmed) {
-      await createOrderEvent({
-        orderId: confirmed._id,
-        type: OrderEventType.CONFIRMED,
-        toStatus: OrderOperationalStatus.TO_DELIVER,
-        metadata: { source: ConfirmationSource.WHATSAPP_BUTTON }
-      });
-      const { message, job } = await enqueueConfirmedTemplate(confirmed._id);
-      return { order: confirmed, message, job, alreadyConfirmed: false, needsAttention: false };
+      return { ...confirmed, alreadyConfirmed: false, needsAttention: false };
     }
 
     const order = await getOrderOrThrow(orderId);
@@ -219,6 +327,125 @@ export class OrderConfirmationService {
     await order.save();
 
     return { order, message: undefined, job: undefined, alreadyConfirmed: false, needsAttention: true };
+  }
+
+  /**
+   * Handles the pre-filled "Je confirme ma commande #1234" message. Same sender as the
+   * order phone: confirmed through the exact button path (source `whatsapp_button`).
+   * Different sender: no confirmation, the order goes to the helpdesk queue with the
+   * `phone_mismatch` reason and a `phone_mismatch` event is recorded for counting.
+   * `not_applicable` means the caller keeps its regular handling of the message.
+   */
+  public static async confirmByPrefilledMessage(
+    input: PrefilledConfirmationInput
+  ): Promise<PrefilledConfirmationResult> {
+    const text = input.text?.trim();
+    const orderNames = parsePrefilledConfirmationText(text);
+    let order: IOrder | null = null;
+
+    for (const shopifyOrderName of orderNames) {
+      order = await Order.findOne({ shopifyOrderName });
+
+      if (order) {
+        break;
+      }
+    }
+
+    if (!order || !acceptsPrefilledConfirmation(order)) {
+      return { outcome: 'not_applicable' };
+    }
+
+    const { matches, senderE164 } = isSenderOrderPhone(input.from, order.customerPhoneE164);
+
+    if (matches) {
+      const confirmed = await writeWhatsAppConfirmation(
+        order._id.toString(),
+        { buttonText: text, waMessageId: input.waMessageId },
+        new Date(),
+        PREFILLED_WRITE_GUARD
+      );
+
+      if (confirmed) {
+        // The order is confirmed and stays so: a failed event or template enqueue (Redis
+        // down) must not stop the inbound message from being recorded and mirrored.
+        try {
+          await recordWhatsAppConfirmation(confirmed);
+        } catch (err) {
+          log.error(
+            { err, orderId: confirmed._id },
+            'Pre-filled WhatsApp confirmation applied but its event or confirmed template failed'
+          );
+        }
+
+        return { outcome: 'confirmed', order: confirmed };
+      }
+
+      // A concurrent transition (confirmation, cancellation, expiration, delivery) won the write.
+      // Unlike the button, the late-confirmation fallback is NOT applied here: it would
+      // re-open a cancelled order to `needs_attention`, letting a later text confirm it.
+      const current = await Order.findById(order._id);
+      log.info(
+        { orderId: order._id, customerConfirmationStatus: current?.customerConfirmationStatus },
+        'Pre-filled WhatsApp confirmation lost a concurrent transition'
+      );
+
+      return { outcome: 'not_applicable' };
+    }
+
+    const now = new Date();
+    // Conditional write: a concurrent confirmation or cancellation wins and the message
+    // then falls back to the regular handling. An order already flagged phone_mismatch is
+    // not written again, so a single phone_mismatch event exists per order. The
+    // confirmation status is left as is so the pending-order reminders keep running.
+    const flagged = await Order.findOneAndUpdate(
+      {
+        ...PREFILLED_WRITE_GUARD,
+        _id: order._id,
+        customerConfirmationStatus: { $in: CONFIRMABLE_BY_BUTTON },
+        attentionReasonCode: { $ne: AttentionReasonCode.PHONE_MISMATCH }
+      },
+      {
+        $set: {
+          needsHelpdeskAttention: true,
+          attentionReasonCode: AttentionReasonCode.PHONE_MISMATCH,
+          attentionReason: PHONE_MISMATCH_ATTENTION_REASON,
+          attentionRequiredAt: now,
+          lastCustomerMessageAt: now,
+          lastCustomerMessageText: text
+        }
+      },
+      { new: true }
+    );
+
+    if (!flagged) {
+      // Already flagged (repeated or concurrent message): keep the phone_mismatch reason
+      // instead of letting the regular handling overwrite it, without a second event.
+      const current = await Order.findById(order._id);
+
+      if (
+        current &&
+        acceptsPrefilledConfirmation(current) &&
+        current.attentionReasonCode === AttentionReasonCode.PHONE_MISMATCH
+      ) {
+        return { outcome: 'phone_mismatch', order: current, senderE164 };
+      }
+
+      return { outcome: 'not_applicable' };
+    }
+
+    // The order is already flagged: a failed audit event must not stop the inbound
+    // message from being recorded and mirrored to Chatwoot.
+    try {
+      await createOrderEvent({
+        orderId: flagged._id,
+        type: OrderEventType.PHONE_MISMATCH,
+        metadata: { senderE164: senderE164 ?? null, waMessageId: input.waMessageId }
+      });
+    } catch (err) {
+      log.error({ err, orderId: flagged._id }, 'Failed to record phone_mismatch order event');
+    }
+
+    return { outcome: 'phone_mismatch', order: flagged, senderE164 };
   }
 
   public static async confirmByAdmin(
