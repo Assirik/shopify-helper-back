@@ -62,6 +62,9 @@ export interface MetaCapiErrorDetails {
   metaCode?: number;
   metaSubcode?: number;
   fbtraceId?: string;
+  // Graph `error_user_title` / `error_user_msg`: kept for classification only, never logged.
+  metaUserTitle?: string;
+  metaUserMessage?: string;
   retryable: boolean;
 }
 
@@ -70,6 +73,8 @@ export class MetaCapiError extends Error {
   public readonly metaCode?: number;
   public readonly metaSubcode?: number;
   public readonly fbtraceId?: string;
+  public readonly metaUserTitle?: string;
+  public readonly metaUserMessage?: string;
   public readonly retryable: boolean;
 
   constructor(message: string, details: MetaCapiErrorDetails) {
@@ -79,6 +84,8 @@ export class MetaCapiError extends Error {
     this.metaCode = details.metaCode;
     this.metaSubcode = details.metaSubcode;
     this.fbtraceId = details.fbtraceId;
+    this.metaUserTitle = details.metaUserTitle;
+    this.metaUserMessage = details.metaUserMessage;
     this.retryable = details.retryable;
   }
 }
@@ -231,6 +238,8 @@ interface MetaErrorBody {
     message?: string;
     code?: number;
     error_subcode?: number;
+    error_user_title?: string;
+    error_user_msg?: string;
     fbtrace_id?: string;
   };
 }
@@ -274,6 +283,8 @@ export const sendPurchase = async (order: IOrder): Promise<CapiSendResult> => {
         metaCode: metaError?.code,
         metaSubcode: metaError?.error_subcode,
         fbtraceId: metaError?.fbtrace_id,
+        metaUserTitle: metaError?.error_user_title,
+        metaUserMessage: metaError?.error_user_msg,
         retryable
       });
     }
