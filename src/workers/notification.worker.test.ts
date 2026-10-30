@@ -50,6 +50,9 @@ import {
 import { Message, MessageChannel, MessageProvider, MessageStatus, TemplatePurpose } from '../models/Message';
 import { enqueueOrderConfirmation } from '../queues/notification.queue';
 import log from '../utilities/logger/logger';
+import { MetaWhatsAppProvider } from '../providers/metaWhatsApp.provider';
+import { ChatwootOutboundMirrorService } from '../utilities/services/chatwootOutboundMirror.service';
+import { MessageVariableConfigService } from '../utilities/services/messageVariableConfig.service';
 import {
   buildTemplateVariables,
   getOrderDeliveryRegion,
@@ -111,6 +114,7 @@ describe('notification worker message variables', () => {
 
 const INITIAL_JOB = 'send-initial-confirmation-request';
 const CONFIRMATION_JOB = 'send-order-confirmation';
+const REMINDER_JOB = 'send-confirmation-reminder';
 
 const flushPromises = async () => {
   for (let i = 0; i < 5; i += 1) {
@@ -321,6 +325,137 @@ describe('delayed initial confirmation request (C5.6a)', () => {
       expect(write).not.toHaveBeenCalled();
     }
     expect(enqueueOrderConfirmation).not.toHaveBeenCalled();
+  });
+
+  // C5.15: the scheduling timed out at ingestion, then the hung add landed after all.
+  const notScheduledFlag = {
+    notificationStatus: NotificationStatus.FAILED,
+    needsHelpdeskAttention: true,
+    attentionReasonCode: AttentionReasonCode.NOTIFICATION_NOT_SCHEDULED,
+    attentionReason: 'Demande de confirmation non programmée',
+    attentionRequiredAt: new Date('2026-10-30T10:00:00.000Z')
+  };
+
+  it('clears the notification_not_scheduled reason when the late request is handed over (C5.15)', async () => {
+    orderFindById.mockResolvedValue(storedOrder(notScheduledFlag) as never);
+
+    await processInitialConfirmationRequest(initialJob() as never);
+
+    expectHandedOver();
+    expect(orderUpdateOne).toHaveBeenCalledTimes(1);
+    expect(orderUpdateOne.mock.calls[0]).toEqual([
+      { _id: orderId.toString(), attentionReasonCode: AttentionReasonCode.NOTIFICATION_NOT_SCHEDULED },
+      {
+        $set: { needsHelpdeskAttention: false },
+        $unset: { attentionReason: '', attentionReasonCode: '', attentionRequiredAt: '' }
+      }
+    ]);
+    // Cleared only after the hand-over.
+    expect((enqueueOrderConfirmation as jest.Mock).mock.invocationCallOrder[0]).toBeLessThan(
+      orderUpdateOne.mock.invocationCallOrder[0] as number
+    );
+  });
+
+  it('still hands over when clearing the notification_not_scheduled reason fails (C5.15)', async () => {
+    orderFindById.mockResolvedValue(storedOrder(notScheduledFlag) as never);
+    orderUpdateOne.mockRejectedValue(new Error('Mongo down') as never);
+
+    await expect(processInitialConfirmationRequest(initialJob() as never)).resolves.toEqual(
+      expect.objectContaining({ messageId: messageId.toString() })
+    );
+
+    expectHandedOver();
+    expect(log.error).toHaveBeenCalledWith(
+      expect.objectContaining({ orderId: orderId.toString() }),
+      'Failed to clear notification_not_scheduled attention'
+    );
+  });
+
+  it('keeps any other reason when the request is handed over (C5.15)', async () => {
+    orderFindById.mockResolvedValue(
+      storedOrder({
+        needsHelpdeskAttention: true,
+        attentionReasonCode: AttentionReasonCode.PHONE_MISMATCH,
+        attentionReason: 'Pre-filled confirmation from another phone'
+      }) as never
+    );
+
+    await processInitialConfirmationRequest(initialJob() as never);
+
+    expectHandedOver();
+    for (const write of orderWrites) {
+      expect(write).not.toHaveBeenCalled();
+    }
+  });
+
+  const clearNotScheduledCall = [
+    { _id: orderId.toString(), attentionReasonCode: AttentionReasonCode.NOTIFICATION_NOT_SCHEDULED },
+    {
+      $set: { needsHelpdeskAttention: false },
+      $unset: { attentionReason: '', attentionReasonCode: '', attentionRequiredAt: '' }
+    }
+  ];
+
+  it.each([
+    ['already reminded (the reminder clears it only once sent)', { reminderCount: 1 }],
+    ['confirmed', { customerConfirmationStatus: CustomerConfirmationStatus.CONFIRMED }],
+    ['cancelled here', { customerConfirmationStatus: CustomerConfirmationStatus.CANCELLED }],
+    ['expired', { customerConfirmationStatus: CustomerConfirmationStatus.EXPIRED }],
+    ['cancelled on Shopify', { shopifyCancelledAt: new Date('2026-10-30T10:00:00.000Z') }],
+    ['delivered', { operationalStatus: OrderOperationalStatus.DELIVERED }]
+  ])('keeps the notification_not_scheduled reason when the late request is skipped for an order %s (C5.15)', async (_label, overrides) => {
+    orderFindById.mockResolvedValue(storedOrder({ ...notScheduledFlag, ...overrides }) as never);
+
+    await processInitialConfirmationRequest(initialJob() as never);
+
+    expectNothingSent();
+    expectInitialStatusSettledAs(NotificationStatus.SKIPPED);
+  });
+
+  it('keeps the notification_not_scheduled reason when the request was already picked by the send flow (C5.15)', async () => {
+    orderFindById.mockResolvedValue(storedOrder(notScheduledFlag) as never);
+    messageFindOne.mockResolvedValue({ _id: messageId, status: MessageStatus.SENT } as never);
+
+    await processInitialConfirmationRequest(initialJob() as never);
+
+    expectNothingSent();
+    expect(orderUpdateOne).not.toHaveBeenCalled();
+  });
+
+  describe('confirmation reminder (C5.15)', () => {
+    const reminderJob = () => ({
+      id: 'reminder-1',
+      name: REMINDER_JOB,
+      data: { orderId: orderId.toString(), messageId: messageId.toString(), channel: MessageChannel.WHATSAPP }
+    });
+    let sendTemplate: ReturnType<typeof jest.spyOn>;
+
+    beforeEach(() => {
+      orderFindById.mockResolvedValue({ ...buildOrder(), ...storedOrder(notScheduledFlag) } as never);
+      jest.spyOn(Message, 'findById').mockResolvedValue(null as never);
+      jest.spyOn(Message, 'findByIdAndUpdate').mockResolvedValue({ _id: messageId, attemptCount: 1 } as never);
+      jest.spyOn(MessageVariableConfigService, 'resolveForRegion').mockResolvedValue({} as never);
+      jest.spyOn(ChatwootOutboundMirrorService, 'mirrorTemplateMessage').mockResolvedValue(undefined as never);
+      sendTemplate = jest
+        .spyOn(MetaWhatsAppProvider.prototype, 'sendOrderConfirmation')
+        .mockResolvedValue({ providerMessageId: 'wamid.reminder', response: {} } as never);
+    });
+
+    it('clears the notification_not_scheduled reason once the reminder is sent', async () => {
+      await mockWorkerRegistry.processor?.(reminderJob());
+
+      expect(sendTemplate).toHaveBeenCalledTimes(1);
+      expect(orderUpdateOne).toHaveBeenCalledTimes(1);
+      expect(orderUpdateOne.mock.calls[0]).toEqual(clearNotScheduledCall);
+    });
+
+    it('keeps the reason when the reminder fails', async () => {
+      sendTemplate.mockRejectedValue(new Error('Meta down') as never);
+
+      await expect(mockWorkerRegistry.processor?.(reminderJob())).rejects.toThrow('Meta down');
+
+      expect(orderUpdateOne).not.toHaveBeenCalled();
+    });
   });
 
   it('leaves the initial request status alone while the delayed job will retry', async () => {

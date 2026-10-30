@@ -401,10 +401,60 @@ describe('order controller attention queue (Lot 0 · F1)', () => {
           invalid_number: 0,
           late_confirm: 0,
           unreachable: 0,
-          phone_mismatch: 2
+          phone_mismatch: 2,
+          notification_not_scheduled: 0
         }
       })
     );
+  });
+
+  it('accepts the notification_not_scheduled reason filter and counts it (C5.15)', async () => {
+    const find = mockOrderFind();
+    const count = jest.spyOn(Order, 'countDocuments').mockResolvedValue(4 as never);
+    jest.spyOn(Order, 'aggregate').mockResolvedValue([
+      { _id: AttentionReasonCode.NOTIFICATION_NOT_SCHEDULED, count: 4 },
+      { _id: AttentionReasonCode.INVALID_NUMBER, count: 1 }
+    ] as never);
+    const { res, status, json } = mockResponse();
+
+    await OrderController.attentionQueue(mockRequest({ query: { reason: 'notification_not_scheduled' } }), res);
+
+    expect(status).toHaveBeenCalledWith(200);
+    expect(find.mock.calls[0]?.[0]).toEqual(
+      expect.objectContaining({ attentionReasonCode: AttentionReasonCode.NOTIFICATION_NOT_SCHEDULED })
+    );
+    expect(count.mock.calls[0]?.[0]).toEqual(
+      expect.objectContaining({ attentionReasonCode: AttentionReasonCode.NOTIFICATION_NOT_SCHEDULED })
+    );
+    expect(json.mock.calls[0]?.[0]).toEqual(
+      expect.objectContaining({
+        counts: {
+          all: 5,
+          free_text: 0,
+          sms_only: 0,
+          invalid_number: 1,
+          late_confirm: 0,
+          unreachable: 0,
+          phone_mismatch: 0,
+          notification_not_scheduled: 4
+        }
+      })
+    );
+  });
+
+  it('includes notification_not_scheduled orders in the unfiltered queue and the counts (C5.15)', async () => {
+    const find = mockOrderFind();
+    jest.spyOn(Order, 'countDocuments').mockResolvedValue(0 as never);
+    const aggregate = jest.spyOn(Order, 'aggregate').mockResolvedValue([] as never);
+    const { res, json } = mockResponse();
+
+    await OrderController.attentionQueue(mockRequest({}), res);
+
+    const filter = find.mock.calls[0]?.[0] as unknown as { attentionReasonCode: { $in: string[] } };
+    expect(filter.attentionReasonCode.$in).toContain('notification_not_scheduled');
+    const pipeline = aggregate.mock.calls[0]?.[0] as unknown as Array<{ $match?: { attentionReasonCode: { $in: string[] } } }>;
+    expect(pipeline[0]?.$match?.attentionReasonCode.$in).toContain('notification_not_scheduled');
+    expect((json.mock.calls[0]?.[0] as { counts: Record<string, number> }).counts).toHaveProperty('notification_not_scheduled', 0);
   });
 
   it('includes phone_mismatch orders in the unfiltered queue (C5.6b)', async () => {
