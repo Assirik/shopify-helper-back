@@ -39,6 +39,10 @@ jest.mock('../queues/notification.queue', () => ({
   getRedisConnection: jest.fn()
 }));
 
+jest.mock('../utilities/services/capiPurchase.service', () => ({
+  triggerCapiPurchase: jest.fn(async () => undefined)
+}));
+
 import {
   AttentionReasonCode,
   CustomerConfirmationStatus,

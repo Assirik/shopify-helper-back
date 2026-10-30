@@ -17,6 +17,7 @@ import {
 } from '../../queues/notification.queue';
 import config from '../config/env.config';
 import log from '../logger/logger';
+import { triggerCapiPurchase } from './capiPurchase.service';
 import { CONFIRMABLE_BY_ADMIN, getOrderActionCapabilities } from './orderCapabilities.service';
 import { MAX_NOTE_LENGTH } from './orderFulfillment.service';
 import { PhoneNormalizationService } from './phoneNormalization.service';
@@ -246,7 +247,8 @@ const createOrderEvent = (input: {
 // can flip a confirmable status to CONFIRMED, so the confirmed template is enqueued at most
 // once even with concurrent admin/button actions. Returns null when the write did not apply.
 // `extraFilter` adds write-time conditions (pre-filled message only, the button has none).
-const writeWhatsAppConfirmation = (
+// A write that applied triggers the Meta Purchase (fire-and-forget, never awaited).
+const writeWhatsAppConfirmation = async (
   orderId: string,
   payload: WhatsAppButtonConfirmation,
   now: Date,
@@ -254,7 +256,7 @@ const writeWhatsAppConfirmation = (
 ) => {
   const lastCustomerMessageText = payload.buttonText || payload.buttonPayload || 'CONFIRM_ORDER';
 
-  return Order.findOneAndUpdate(
+  const confirmed = await Order.findOneAndUpdate(
     { ...extraFilter, _id: orderId, customerConfirmationStatus: { $in: CONFIRMABLE_BY_BUTTON } },
     {
       $set: {
@@ -271,6 +273,12 @@ const writeWhatsAppConfirmation = (
     },
     { new: true }
   );
+
+  if (confirmed) {
+    void triggerCapiPurchase(confirmed._id, 'confirmation');
+  }
+
+  return confirmed;
 };
 
 // Effects of a WhatsApp confirmation once written: CONFIRMED event + confirmed template.
@@ -484,6 +492,8 @@ export class OrderConfirmationService {
         409
       );
     }
+
+    void triggerCapiPurchase(order._id, 'confirmation');
 
     await createOrderEvent({
       orderId: order._id,

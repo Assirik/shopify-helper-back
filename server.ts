@@ -6,6 +6,7 @@ import { checkCapiStartup } from './src/utilities/config/capiStartup';
 import log from './src/utilities/logger/logger';
 import { DatabaseService } from './src/utilities/services/database.service';
 import { scheduleConfirmationSweep } from './src/queues/notification.queue';
+import { CAPI_PURCHASE_SWEEP_INTERVAL_MS, scheduleCapiPurchaseSweep } from './src/queues/capi.queue';
 import {
   startMaintenanceWorker,
   startNotificationWorker,
@@ -13,6 +14,7 @@ import {
   stopNotificationWorker
 } from './src/workers/notification.worker';
 import { startCapiPurchaseWorker, stopCapiPurchaseWorker } from './src/workers/capiPurchase.worker';
+import { startCapiPurchaseSweepWorker, stopCapiPurchaseSweepWorker } from './src/workers/capiPurchaseSweep.worker';
 
 const capiError = checkCapiStartup(config.metaCapi);
 if (capiError) {
@@ -73,12 +75,20 @@ server.listen(port, async () => {
   startNotificationWorker();
   startMaintenanceWorker();
   startCapiPurchaseWorker();
+  startCapiPurchaseSweepWorker();
 
   try {
     await scheduleConfirmationSweep(config.confirmation.sweepIntervalMinutes);
     log.info({ intervalMinutes: config.confirmation.sweepIntervalMinutes }, 'Confirmation sweep scheduled');
   } catch (err) {
     log.error({ err }, 'Failed to schedule confirmation sweep');
+  }
+
+  try {
+    await scheduleCapiPurchaseSweep();
+    log.info({ intervalMinutes: CAPI_PURCHASE_SWEEP_INTERVAL_MS / 60_000 }, 'CAPI purchase sweep scheduled');
+  } catch (err) {
+    log.error({ err }, 'Failed to schedule CAPI purchase sweep');
   }
 });
 
@@ -88,6 +98,7 @@ const shutdown = async (signal: string) => {
   await stopNotificationWorker();
   await stopMaintenanceWorker();
   await stopCapiPurchaseWorker();
+  await stopCapiPurchaseSweepWorker();
   server.close(() => {
     log.info('HTTP server closed');
     process.exit(0);

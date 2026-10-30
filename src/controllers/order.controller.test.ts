@@ -12,8 +12,10 @@ import {
   toOrderEventResponse,
   toOrderResponse
 } from './order.controller';
-import { IOrderEvent, OrderEventType } from '../models/OrderEvent';
+import { IOrderEvent, OrderEvent, OrderEventType } from '../models/OrderEvent';
+import { Message } from '../models/Message';
 import { Order } from '../models/Order';
+import { triggerCapiPurchase } from '../utilities/services/capiPurchase.service';
 import {
   OrderConfirmationError,
   OrderConfirmationService
@@ -24,6 +26,10 @@ jest.mock('../queues/notification.queue', () => ({
   enqueueConfirmationReminder: jest.fn(),
   enqueueOrderCancelled: jest.fn(),
   enqueueOrderConfirmed: jest.fn()
+}));
+
+jest.mock('../utilities/services/capiPurchase.service', () => ({
+  triggerCapiPurchase: jest.fn(async () => undefined)
 }));
 
 describe('order controller attention contracts', () => {
@@ -312,6 +318,22 @@ describe('order controller bulk actions', () => {
 
     expect(service).toHaveBeenCalledTimes(orderIds.length);
     orderIds.forEach(orderId => expect(service).toHaveBeenCalledWith(orderId, userId));
+  });
+
+  it('bulkConfirm triggers the Meta Purchase once per confirmed order (C5.5)', async () => {
+    const orderIds = [new Types.ObjectId(), new Types.ObjectId()];
+    jest
+      .spyOn(Order, 'findOneAndUpdate')
+      .mockImplementation(((filter: { _id: string }) => Promise.resolve({ _id: filter._id })) as never);
+    jest.spyOn(OrderEvent, 'create').mockResolvedValue({} as never);
+    jest.spyOn(Message, 'create').mockResolvedValue({ _id: new Types.ObjectId() } as never);
+    const { req, res } = buildBulkCall(orderIds.map(id => id.toString()));
+
+    await OrderController.bulkConfirm(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(200);
+    expect(triggerCapiPurchase).toHaveBeenCalledTimes(orderIds.length);
+    orderIds.forEach(id => expect(triggerCapiPurchase).toHaveBeenCalledWith(id.toString(), 'confirmation'));
   });
 });
 
