@@ -6,8 +6,7 @@ import {
   CustomerConfirmationStatus,
   IOrder,
   NotificationStatus,
-  Order,
-  OrderOperationalStatus
+  Order
 } from '../models/Order';
 import { createOrderConfirmationButtonPayload, MetaWhatsAppProvider } from '../providers/metaWhatsApp.provider';
 import { OrderConfirmationInput, ProviderError, TemplateVariable } from '../providers/messaging.provider';
@@ -30,7 +29,11 @@ import {
 import config from '../utilities/config/env.config';
 import log from '../utilities/logger/logger';
 import { ChatwootOutboundMirrorService } from '../utilities/services/chatwootOutboundMirror.service';
-import { OrderConfirmationService } from '../utilities/services/orderConfirmation.service';
+import {
+  CONFIRMABLE_BY_BUTTON,
+  OrderConfirmationService,
+  TERMINAL_OPERATIONAL_STATUSES
+} from '../utilities/services/orderConfirmation.service';
 import {
   MessageVariableConfigService,
   ResolvedMessageVariables
@@ -161,6 +164,78 @@ export const getOrderDeliveryRegion = (
   order: Pick<IOrder, 'deliveryRegionCode' | 'deliveryRegion' | 'shippingRegion'>
 ) => order.deliveryRegionCode || order.deliveryRegion || order.shippingRegion;
 
+// Error code of a confirmation request (initial, SMS fallback or reminder) deliberately not
+// sent because the order no longer awaits confirmation (same idea as `NOTIFICATION_SKIPPED`).
+export const ORDER_NO_LONGER_PENDING = 'ORDER_NO_LONGER_PENDING';
+
+// Error code of an initial confirmation request not sent because a request (a reminder)
+// already reached the customer: a new send goes through the reminder, its limit and cooldown.
+export const CONFIRMATION_REQUEST_ALREADY_SENT = 'CONFIRMATION_REQUEST_ALREADY_SENT';
+
+// A Message in one of these statuses left the platform: it is never sent again nor rewritten.
+// The status webhook can move a sent message to `delivered` / `read` before a job replay.
+const MESSAGE_ALREADY_SENT_STATUSES = [MessageStatus.SENT, MessageStatus.DELIVERED, MessageStatus.READ];
+
+const isMessageAlreadySent = (status?: MessageStatus) =>
+  Boolean(status && MESSAGE_ALREADY_SENT_STATUSES.includes(status));
+
+// Why a confirmation request must not be sent anymore, or null when the order can still be
+// confirmed by its button. Checked on the freshly loaded order right before the provider call.
+export const getConfirmationSendSkipReason = (
+  order: Pick<IOrder, 'customerConfirmationStatus' | 'shopifyCancelledAt' | 'operationalStatus'>
+) => {
+  if (!CONFIRMABLE_BY_BUTTON.includes(order.customerConfirmationStatus)) {
+    return 'not_confirmable';
+  }
+
+  if (order.shopifyCancelledAt) {
+    return 'cancelled_on_shopify';
+  }
+
+  if (order.operationalStatus && TERMINAL_OPERATIONAL_STATUSES.includes(order.operationalStatus)) {
+    return 'terminal_operational_status';
+  }
+
+  return null;
+};
+
+// Write-time counterpart of `getConfirmationSendSkipReason`. In MongoDB both `null` and `$nin`
+// also match a missing field, so a regular pending order still matches.
+const STILL_CONFIRMABLE_FILTER = {
+  customerConfirmationStatus: { $in: CONFIRMABLE_BY_BUTTON },
+  shopifyCancelledAt: null,
+  operationalStatus: { $nin: TERMINAL_OPERATIONAL_STATUSES }
+};
+
+// Records a confirmation request deliberately not sent: no attempt, no retry, no fallback.
+// Conditional write: a message that already left is never rewritten.
+const markMessageAsNotSent = async (
+  job: Job<SendOrderConfirmationJobData>,
+  order: IOrder,
+  skipReason: string,
+  errorCode = ORDER_NO_LONGER_PENDING,
+  errorMessage = `Order no longer awaits confirmation (${skipReason}), nothing sent`
+) => {
+  await Message.updateOne(
+    { _id: job.data.messageId, status: { $nin: MESSAGE_ALREADY_SENT_STATUSES } },
+    { $set: { status: MessageStatus.FAILED, errorCode, errorMessage } }
+  );
+
+  log.info(
+    {
+      jobId: job.id,
+      jobName: job.name,
+      orderId: order._id,
+      messageId: job.data.messageId,
+      channel: job.data.channel,
+      skipReason,
+      customerConfirmationStatus: order.customerConfirmationStatus,
+      operationalStatus: order.operationalStatus
+    },
+    'Confirmation request not sent, order no longer awaits confirmation'
+  );
+};
+
 const markMessageAsSending = async (
   job: Job<SendOrderConfirmationJobData>,
   input: OrderConfirmationInput,
@@ -247,8 +322,13 @@ const sendMetaTemplate = async (
   job: Job<SendOrderConfirmationJobData>,
   templateName: string,
   templatePurpose: TemplatePurpose,
-  buttonPayload?: string
-) => {
+  buttonPayload?: string,
+  options: { requireConfirmableOrder?: boolean } = {}
+): Promise<{
+  order: IOrder;
+  result?: Awaited<ReturnType<MetaWhatsAppProvider['sendOrderConfirmation']>>;
+  skipReason?: string;
+}> => {
   const order = await Order.findById(job.data.orderId);
 
   if (!order) {
@@ -257,7 +337,7 @@ const sendMetaTemplate = async (
 
   const existing = await Message.findById(job.data.messageId);
 
-  if (existing?.status === MessageStatus.SENT) {
+  if (isMessageAlreadySent(existing?.status)) {
     log.info(
       {
         jobId: job.id,
@@ -269,6 +349,15 @@ const sendMetaTemplate = async (
     );
 
     return { order, result: undefined };
+  }
+
+  // Confirmation requests only: the order may have been confirmed, cancelled or closed since
+  // the job was queued (or between two retries). Nothing is sent and the job ends normally.
+  const skipReason = options.requireConfirmableOrder ? getConfirmationSendSkipReason(order) : null;
+
+  if (skipReason) {
+    await markMessageAsNotSent(job, order, skipReason);
+    return { order, result: undefined, skipReason };
   }
 
   const customer = order.customerId ? await Customer.findById(order.customerId) : null;
@@ -343,16 +432,31 @@ const processOrderConfirmation = async (job: Job<SendOrderConfirmationJobData>) 
       },
       'Order confirmation already sent, skipping duplicate notification job'
     );
+    // A request (e.g. a reminder) already reached the customer: this Message (a manual retry
+    // or a late attempt) is closed explicitly instead of staying queued forever.
+    await markMessageAsNotSent(
+      job,
+      order,
+      'already_sent',
+      CONFIRMATION_REQUEST_ALREADY_SENT,
+      'A confirmation request was already sent for this order, use a reminder instead'
+    );
     return;
   }
 
   const buttonPayload = createOrderConfirmationButtonPayload(order._id.toString());
-  const { result } = await sendMetaTemplate(
+  const { result, skipReason } = await sendMetaTemplate(
     job,
     config.metaWhatsApp.templateName,
     TemplatePurpose.ORDER_CONFIRMATION_REQUEST,
-    buttonPayload
+    buttonPayload,
+    { requireConfirmableOrder: true }
   );
+
+  if (skipReason) {
+    await settlePendingInitialNotification(order._id.toString(), NotificationStatus.SKIPPED);
+    return;
+  }
 
   await Order.findByIdAndUpdate(order._id, {
     $set: {
@@ -373,8 +477,6 @@ const processOrderConfirmation = async (job: Job<SendOrderConfirmationJobData>) 
 
   return result;
 };
-
-const TERMINAL_OPERATIONAL_STATUSES = [OrderOperationalStatus.DELIVERED, OrderOperationalStatus.RETURNED];
 
 // Why the delayed initial request must not be sent, or null when it must. Attention flags
 // (e.g. `phone_mismatch`) are deliberately ignored: such an order is still pending.
@@ -528,15 +630,42 @@ const processOrderConfirmed = async (job: Job<SendOrderConfirmationJobData>) => 
   return result;
 };
 
+// Notification statuses a successful reminder overrides: the customer did receive a request.
+const NOTIFICATION_STATUSES_SET_BY_REMINDER = [
+  NotificationStatus.PENDING,
+  NotificationStatus.SKIPPED,
+  NotificationStatus.FAILED
+];
+
 const processConfirmationReminder = async (job: Job<SendOrderConfirmationJobData>) => {
   const buttonPayload = createOrderConfirmationButtonPayload(job.data.orderId);
-  const { result } = await sendMetaTemplate(
+  const { result, skipReason } = await sendMetaTemplate(
     job,
     config.metaWhatsApp.templateName,
     TemplatePurpose.REMINDER,
-    buttonPayload
+    buttonPayload,
+    { requireConfirmableOrder: true }
   );
+  if (skipReason) {
+    return;
+  }
+
+  // The reminder reached the customer: the agent no longer has to send one (C5.15).
   await clearNotScheduledAttention(job.data.orderId, job.id);
+
+  // Conditional write: `sent` and `partially_sent` are never overwritten. The reminder is
+  // already sent: a failure here must never fail the job (a replay would send it again).
+  try {
+    await Order.updateOne(
+      { _id: job.data.orderId, notificationStatus: { $in: NOTIFICATION_STATUSES_SET_BY_REMINDER } },
+      { $set: { notificationStatus: NotificationStatus.SENT } }
+    );
+  } catch (err) {
+    log.error(
+      { err, jobId: job.id, orderId: job.data.orderId, messageId: job.data.messageId },
+      'Reminder sent but the order notification status could not be updated'
+    );
+  }
 
   return result;
 };
@@ -554,7 +683,7 @@ const processSmsFallback = async (job: Job<SendOrderConfirmationJobData>) => {
 
   const existingMessage = await Message.findById(job.data.messageId);
 
-  if (existingMessage?.status === MessageStatus.SENT) {
+  if (isMessageAlreadySent(existingMessage?.status)) {
     log.info(
       {
         jobId: job.id,
@@ -563,6 +692,16 @@ const processSmsFallback = async (job: Job<SendOrderConfirmationJobData>) => {
       },
       'SMS fallback already sent, skipping duplicate notification job'
     );
+    return;
+  }
+
+  // The order may have been confirmed, cancelled or closed during the WhatsApp attempts:
+  // no SMS then, and the job ends normally.
+  const skipReason = getConfirmationSendSkipReason(order);
+
+  if (skipReason) {
+    await markMessageAsNotSent(job, order, skipReason);
+    await settlePendingInitialNotification(order._id.toString(), NotificationStatus.SKIPPED);
     return;
   }
 
@@ -602,16 +741,34 @@ const processSmsFallback = async (job: Job<SendOrderConfirmationJobData>) => {
     }
   });
 
-  await Order.findByIdAndUpdate(order._id, {
-    $set: {
-      notificationStatus: NotificationStatus.PARTIALLY_SENT,
-      customerConfirmationStatus: CustomerConfirmationStatus.SMS_ONLY,
-      needsHelpdeskAttention: true,
-      attentionReasonCode: AttentionReasonCode.SMS_ONLY,
-      attentionReason: 'WhatsApp failed and the confirmation request was delivered by SMS',
-      attentionRequiredAt: new Date()
-    }
-  });
+  // Conditional write: an order confirmed (or cancelled, closed) while the SMS was being sent
+  // is never downgraded to `sms_only` nor sent back to the helpdesk queue.
+  const downgraded = await Order.findOneAndUpdate(
+    { ...STILL_CONFIRMABLE_FILTER, _id: order._id },
+    {
+      $set: {
+        notificationStatus: NotificationStatus.PARTIALLY_SENT,
+        customerConfirmationStatus: CustomerConfirmationStatus.SMS_ONLY,
+        needsHelpdeskAttention: true,
+        attentionReasonCode: AttentionReasonCode.SMS_ONLY,
+        attentionReason: 'WhatsApp failed and the confirmation request was delivered by SMS',
+        attentionRequiredAt: new Date()
+      }
+    },
+    { new: true }
+  );
+
+  if (!downgraded) {
+    await Order.findByIdAndUpdate(order._id, {
+      $set: {
+        notificationStatus: NotificationStatus.PARTIALLY_SENT
+      }
+    });
+    log.info(
+      { jobId: job.id, orderId: order._id, messageId: job.data.messageId },
+      'SMS fallback sent but order no longer awaits confirmation; confirmation status left unchanged'
+    );
+  }
 
   log.info(
     {
@@ -635,6 +792,23 @@ const enqueueSmsFallback = async (job: Job<SendOrderConfirmationJobData>) => {
 
   if (!order.customerPhoneE164) {
     throw new Error(`Order ${order._id.toString()} has no phone for SMS fallback`);
+  }
+
+  // Confirmed, cancelled or closed during the WhatsApp attempts: no SMS Message is created.
+  const skipReason = getConfirmationSendSkipReason(order);
+
+  if (skipReason) {
+    log.info(
+      {
+        orderId: order._id,
+        whatsappMessageId: job.data.messageId,
+        skipReason,
+        customerConfirmationStatus: order.customerConfirmationStatus
+      },
+      'SMS fallback not created, order no longer awaits confirmation'
+    );
+    await settlePendingInitialNotification(order._id.toString(), NotificationStatus.SKIPPED);
+    return;
   }
 
   const smsMessage = await Message.create({

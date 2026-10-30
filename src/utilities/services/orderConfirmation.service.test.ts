@@ -15,10 +15,11 @@ import {
   CONFIRMABLE_BY_BUTTON,
   OrderConfirmationService,
   PHONE_MISMATCH_ATTENTION_REASON,
+  TERMINAL_OPERATIONAL_STATUSES,
   isSenderOrderPhone,
   parsePrefilledConfirmationText
 } from './orderConfirmation.service';
-import { enqueueOrderConfirmed } from '../../queues/notification.queue';
+import { enqueueConfirmationReminder, enqueueOrderConfirmed } from '../../queues/notification.queue';
 import log from '../logger/logger';
 import { triggerCapiPurchase } from './capiPurchase.service';
 import { MAX_NOTE_LENGTH } from './orderFulfillment.service';
@@ -51,6 +52,35 @@ describe('order action capabilities', () => {
       canReturn: false,
       canMarkUnreachable: true
     });
+  });
+
+  it.each([
+    ['cancelled on Shopify', { shopifyCancelledAt: new Date('2026-10-30T10:00:00.000Z') }],
+    ['delivered', { operationalStatus: OrderOperationalStatus.DELIVERED }],
+    ['returned', { operationalStatus: OrderOperationalStatus.RETURNED }]
+  ])('blocks a reminder for a pending order %s, like the reminder route (C5.13)', (_label, change) => {
+    const pending = {
+      customerConfirmationStatus: CustomerConfirmationStatus.PENDING,
+      customerPhoneE164: '+221771234567',
+      reminderCount: 0
+    };
+    const capabilities = getOrderActionCapabilities({ ...pending, ...change });
+
+    expect(capabilities.canRemind).toBe(false);
+    expect(capabilities.canConfirm).toBe(getOrderActionCapabilities(pending).canConfirm);
+  });
+
+  it('still allows a reminder for a pending order with an active delivery status or none', () => {
+    for (const operationalStatus of [undefined, OrderOperationalStatus.TO_DELIVER, OrderOperationalStatus.DELIVERY_FAILED]) {
+      expect(
+        getOrderActionCapabilities({
+          customerConfirmationStatus: CustomerConfirmationStatus.PENDING,
+          customerPhoneE164: '+221771234567',
+          reminderCount: 0,
+          operationalStatus
+        }).canRemind
+      ).toBe(true);
+    }
   });
 
   it('blocks a reminder during cooldown', () => {
@@ -845,5 +875,174 @@ describe('Meta Purchase trigger on confirmation (C5.5)', () => {
       status: 409
     });
     expect(triggerCapiPurchase).not.toHaveBeenCalled();
+  });
+});
+
+describe('automatic reminders (C5.13)', () => {
+  const orderId = new Types.ObjectId();
+
+  // Evaluates the claim filter with MongoDB semantics: `null` and `$nin` also match a
+  // missing field.
+  const matchesFilter = (doc: Record<string, unknown>, filter: Record<string, unknown>) =>
+    Object.entries(filter).every(([key, condition]) => {
+      const value = doc[key];
+
+      if (condition === null) {
+        return value === null || value === undefined;
+      }
+
+      if (condition && typeof condition === 'object' && !(condition instanceof Types.ObjectId)) {
+        const ops = condition as { $in?: unknown[]; $nin?: unknown[] };
+
+        if (ops.$in) {
+          return ops.$in.includes(value);
+        }
+
+        return !(ops.$nin || []).includes(value ?? null);
+      }
+
+      return String(value) === String(condition);
+    });
+
+  // `Order.find` returns a stale candidate; the claim sees the current state.
+  const runSweepOn = async (state: Record<string, unknown>) => {
+    const find = jest.spyOn(Order, 'find').mockReturnValue({
+      select: () => ({ limit: () => Promise.resolve([{ _id: orderId }]) })
+    } as never);
+    jest.spyOn(Order, 'updateMany').mockResolvedValue({ modifiedCount: 0 } as never);
+    const claim = jest.spyOn(Order, 'findOneAndUpdate').mockImplementation(((
+      filter: Record<string, unknown>,
+      change: { $inc: { reminderCount: number } }
+    ) =>
+      Promise.resolve().then(() => {
+        if (!matchesFilter(state, filter)) {
+          return null;
+        }
+        state.reminderCount = (state.reminderCount as number) + change.$inc.reminderCount;
+        return { ...state };
+      })) as never);
+    jest.spyOn(Message, 'create').mockResolvedValue({ _id: new Types.ObjectId() } as never);
+    jest.mocked(enqueueConfirmationReminder).mockResolvedValue({ id: 'reminder-1' } as never);
+
+    const result = await OrderConfirmationService.runConfirmationMaintenance();
+
+    return { result, find, claim };
+  };
+
+  const pendingOrder = (overrides: Record<string, unknown> = {}) => ({
+    _id: orderId,
+    customerConfirmationStatus: CustomerConfirmationStatus.PENDING,
+    customerPhoneE164: '+221776986780',
+    reminderCount: 0,
+    ...overrides
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  it('excludes orders cancelled on Shopify, delivered or returned from the candidates', async () => {
+    const { find } = await runSweepOn(pendingOrder());
+
+    for (const [filter] of find.mock.calls) {
+      expect(filter).toEqual(
+        expect.objectContaining({
+          shopifyCancelledAt: null,
+          operationalStatus: { $nin: TERMINAL_OPERATIONAL_STATUSES }
+        })
+      );
+    }
+  });
+
+  it.each([
+    ['cancelled on Shopify', { shopifyCancelledAt: new Date('2026-10-30T10:00:00.000Z') }],
+    ['delivered', { operationalStatus: OrderOperationalStatus.DELIVERED }],
+    ['returned', { operationalStatus: OrderOperationalStatus.RETURNED }]
+  ])('never claims nor sends a reminder to an order %s in the meantime', async (_label, change) => {
+    const state: Record<string, unknown> = pendingOrder(change);
+
+    const { result } = await runSweepOn(state);
+
+    expect(result).toEqual({ expired: 0, firstReminders: 0, secondReminders: 0 });
+    expect(state.reminderCount).toBe(0);
+    expect(enqueueConfirmationReminder).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['without operationalStatus nor shopifyCancelledAt', {}],
+    ['to deliver', { operationalStatus: OrderOperationalStatus.TO_DELIVER, shopifyCancelledAt: null }]
+  ])('still reminds a pending order %s', async (_label, fields) => {
+    const state: Record<string, unknown> = pendingOrder(fields);
+
+    const { result } = await runSweepOn(state);
+
+    expect(result.firstReminders).toBe(1);
+    expect(state.reminderCount).toBe(1);
+    expect(enqueueConfirmationReminder).toHaveBeenCalledTimes(1);
+  });
+
+  describe('agent reminder', () => {
+    const remind = () => OrderConfirmationService.remindByAdmin(orderId.toString(), new Types.ObjectId().toString());
+
+    // `Order.findById` returns `read`; the claim sees `state` (the current order).
+    const mockOrder = (read: Record<string, unknown>, state: Record<string, unknown> = read) => {
+      jest.spyOn(Order, 'findById').mockResolvedValue({ ...read } as never);
+      const claim = jest.spyOn(Order, 'findOneAndUpdate').mockImplementation(((
+        filter: Record<string, unknown>,
+        change: { $inc: { reminderCount: number } }
+      ) =>
+        Promise.resolve().then(() => {
+          if (!matchesFilter(state, filter)) {
+            return null;
+          }
+          state.reminderCount = (state.reminderCount as number) + change.$inc.reminderCount;
+          return { ...state };
+        })) as never);
+      const createEvent = jest.spyOn(OrderEvent, 'create').mockResolvedValue({} as never);
+      jest.spyOn(Message, 'create').mockResolvedValue({ _id: new Types.ObjectId() } as never);
+      jest.mocked(enqueueConfirmationReminder).mockResolvedValue({ id: 'reminder-1' } as never);
+
+      return { claim, createEvent };
+    };
+
+    const changes: [string, Record<string, unknown>][] = [
+      ['cancelled on Shopify', { shopifyCancelledAt: new Date('2026-10-30T10:00:00.000Z') }],
+      ['delivered', { operationalStatus: OrderOperationalStatus.DELIVERED }],
+      ['returned', { operationalStatus: OrderOperationalStatus.RETURNED }]
+    ];
+
+    it.each(changes)('refuses with 409 to remind an order %s, without claiming nor recording anything', async (_label, change) => {
+      const state: Record<string, unknown> = pendingOrder(change);
+      const { claim, createEvent } = mockOrder(state);
+
+      await expect(remind()).rejects.toMatchObject({ code: 'OrderReminderNotAllowed', status: 409 });
+
+      expect(claim).not.toHaveBeenCalled();
+      expect(createEvent).not.toHaveBeenCalled();
+      expect(enqueueConfirmationReminder).not.toHaveBeenCalled();
+      expect(state.reminderCount).toBe(0);
+    });
+
+    it.each(changes)('never claims a reminder on an order %s between the read and the claim', async (_label, change) => {
+      const state: Record<string, unknown> = pendingOrder(change);
+      const { createEvent } = mockOrder(pendingOrder(), state);
+
+      await expect(remind()).rejects.toMatchObject({ status: 409 });
+
+      expect(state.reminderCount).toBe(0);
+      expect(createEvent).not.toHaveBeenCalled();
+      expect(enqueueConfirmationReminder).not.toHaveBeenCalled();
+    });
+
+    it('still reminds a pending order', async () => {
+      const state: Record<string, unknown> = pendingOrder();
+      const { createEvent } = mockOrder(state);
+
+      await remind();
+
+      expect(state.reminderCount).toBe(1);
+      expect(createEvent).toHaveBeenCalledTimes(1);
+      expect(enqueueConfirmationReminder).toHaveBeenCalledTimes(1);
+    });
   });
 });

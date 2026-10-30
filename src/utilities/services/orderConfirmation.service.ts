@@ -18,7 +18,11 @@ import {
 import config from '../config/env.config';
 import log from '../logger/logger';
 import { triggerCapiPurchase } from './capiPurchase.service';
-import { CONFIRMABLE_BY_ADMIN, getOrderActionCapabilities } from './orderCapabilities.service';
+import {
+  CONFIRMABLE_BY_ADMIN,
+  TERMINAL_OPERATIONAL_STATUSES,
+  getOrderActionCapabilities
+} from './orderCapabilities.service';
 import { MAX_NOTE_LENGTH } from './orderFulfillment.service';
 import { PhoneNormalizationService } from './phoneNormalization.service';
 
@@ -188,7 +192,8 @@ export const isSenderOrderPhone = (sender?: string | null, orderPhoneE164?: stri
   };
 };
 
-const TERMINAL_OPERATIONAL_STATUSES = [OrderOperationalStatus.DELIVERED, OrderOperationalStatus.RETURNED];
+// Shared with the notification worker (defined with the order action capabilities).
+export { TERMINAL_OPERATIONAL_STATUSES };
 
 // Already confirmed, cancelled (here or on Shopify), expired or closed orders are left to
 // the regular inbound-message handling: the pre-filled message never transitions them.
@@ -633,6 +638,17 @@ export class OrderConfirmationService {
       throw new OrderConfirmationError('OrderReminderNotAllowed', 'Only pending orders can be reminded', 409);
     }
 
+    if (
+      order.shopifyCancelledAt ||
+      (order.operationalStatus && TERMINAL_OPERATIONAL_STATUSES.includes(order.operationalStatus))
+    ) {
+      throw new OrderConfirmationError(
+        'OrderReminderNotAllowed',
+        'Orders cancelled on Shopify, delivered or returned cannot be reminded',
+        409
+      );
+    }
+
     if (!order.customerPhoneE164) {
       throw new OrderConfirmationError('OrderPhoneRequired', 'A valid customer phone is required', 409);
     }
@@ -653,7 +669,9 @@ export class OrderConfirmationService {
       {
         _id: order._id,
         customerConfirmationStatus: CustomerConfirmationStatus.PENDING,
-        reminderCount: order.reminderCount || 0
+        reminderCount: order.reminderCount || 0,
+        shopifyCancelledAt: null,
+        operationalStatus: { $nin: TERMINAL_OPERATIONAL_STATUSES }
       },
       {
         $inc: { reminderCount: 1 },
@@ -722,11 +740,15 @@ export class OrderConfirmationService {
   }
 
   private static async dispatchDueReminders(input: { currentCount: number; olderThan: Date }) {
+    // Same exclusions as `claimReminder`: otherwise an excluded order would be picked again
+    // at every sweep and could crowd out the eligible ones beyond the batch limit.
     const candidates = await Order.find({
       customerConfirmationStatus: CustomerConfirmationStatus.PENDING,
       reminderCount: input.currentCount,
       createdAt: { $lte: input.olderThan },
-      customerPhoneE164: { $exists: true, $nin: [null, ''] }
+      customerPhoneE164: { $exists: true, $nin: [null, ''] },
+      shopifyCancelledAt: null,
+      operationalStatus: { $nin: TERMINAL_OPERATIONAL_STATUSES }
     })
       .select('_id')
       .limit(200);
@@ -751,12 +773,16 @@ export class OrderConfirmationService {
     return sent;
   }
 
+  // An order cancelled on Shopify, delivered or returned is never reminded. In MongoDB both
+  // `null` and `$nin` also match a missing field, so a regular pending order stays eligible.
   private static claimReminder(orderId: IOrder['_id'], currentCount: number) {
     return Order.findOneAndUpdate(
       {
         _id: orderId,
         customerConfirmationStatus: CustomerConfirmationStatus.PENDING,
-        reminderCount: currentCount
+        reminderCount: currentCount,
+        shopifyCancelledAt: null,
+        operationalStatus: { $nin: TERMINAL_OPERATIONAL_STATUSES }
       },
       {
         $inc: { reminderCount: 1 },
