@@ -177,20 +177,6 @@ POST /api/orders/bulk/remind
 
 Une réponse `207` indique un résultat partiel. Les détails `succeeded` et `failed` doivent être lus pour chaque commande.
 
-## Backfill de la file
-
-Après déploiement du nouveau modèle, classer les commandes historiques une seule fois :
-
-```bash
-# Sources TypeScript disponibles
-npm run attention:backfill
-
-# Après npm run build dans l'image de production
-npm run attention:backfill:prod
-```
-
-La commande est idempotente et utilise `MONGODB_URI`. Vérifier la cible Atlas avant exécution et ne jamais lancer ce backfill sans sauvegarde et fenêtre opérationnelle contrôlée.
-
 ## Vérification
 
 ```bash
