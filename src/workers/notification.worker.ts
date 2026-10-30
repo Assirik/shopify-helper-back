@@ -413,6 +413,24 @@ const settlePendingInitialNotification = async (
   );
 };
 
+// C5.15: the scheduling timed out at ingestion (order flagged `notification_not_scheduled`) but a
+// confirmation request did reach the customer afterwards (late delayed request handed over,
+// reminder sent): the helpdesk must not take over a customer who has it. Conditional write: any
+// other reason is left untouched. Never throws: a failure only leaves the flag for an agent.
+const clearNotScheduledAttention = async (orderId: string, jobId?: string) => {
+  try {
+    await Order.updateOne(
+      { _id: orderId, attentionReasonCode: AttentionReasonCode.NOTIFICATION_NOT_SCHEDULED },
+      {
+        $set: { needsHelpdeskAttention: false },
+        $unset: { attentionReason: '', attentionReasonCode: '', attentionRequiredAt: '' }
+      }
+    );
+  } catch (err) {
+    log.error({ err, jobId, orderId }, 'Failed to clear notification_not_scheduled attention');
+  }
+};
+
 // Delayed first confirmation request (C5.6a): runs once the configured delay has expired and
 // hands over to the regular flow (same job, same worker, same SMS fallback) only when the
 // order is still pending. It never touches `reminderCount`.
@@ -439,6 +457,8 @@ export const processInitialConfirmationRequest = async (job: Job<InitialConfirma
       'Delayed initial confirmation request skipped, order no longer pending'
     );
     await settlePendingInitialNotification(orderId, NotificationStatus.SKIPPED);
+    // `notification_not_scheduled` stays: a reminder clears it only once it is actually sent
+    // (processConfirmationReminder), never on a reminder that failed or is still retrying.
     return;
   }
 
@@ -489,6 +509,10 @@ export const processInitialConfirmationRequest = async (job: Job<InitialConfirma
     'Delayed initial confirmation request handed over to the send flow'
   );
 
+  if (order.attentionReasonCode === AttentionReasonCode.NOTIFICATION_NOT_SCHEDULED) {
+    await clearNotScheduledAttention(orderId, job.id);
+  }
+
   return { messageId: message._id.toString(), confirmationJobId: confirmationJob.id };
 };
 
@@ -512,6 +536,7 @@ const processConfirmationReminder = async (job: Job<SendOrderConfirmationJobData
     TemplatePurpose.REMINDER,
     buttonPayload
   );
+  await clearNotScheduledAttention(job.data.orderId, job.id);
 
   return result;
 };

@@ -457,7 +457,8 @@ export class OrderController {
         invalid_number: 0,
         late_confirm: 0,
         unreachable: 0,
-        phone_mismatch: 0
+        phone_mismatch: 0,
+        notification_not_scheduled: 0
       } as Record<'all' | AttentionReasonCode, number>
     );
 

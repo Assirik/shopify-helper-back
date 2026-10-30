@@ -62,7 +62,8 @@ export enum AttentionReasonCode {
   INVALID_NUMBER = 'invalid_number',
   LATE_CONFIRM = 'late_confirm',
   UNREACHABLE = 'unreachable',
-  PHONE_MISMATCH = 'phone_mismatch'
+  PHONE_MISMATCH = 'phone_mismatch',
+  NOTIFICATION_NOT_SCHEDULED = 'notification_not_scheduled'
 }
 
 const OrderLineItemSchema = new Schema<IOrderLineItem>(

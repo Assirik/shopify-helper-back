@@ -134,9 +134,19 @@ describe('Swagger MVP specification', () => {
       'sms_only',
       'invalid_number',
       'late_confirm',
-      'phone_mismatch'
+      'phone_mismatch',
+      'notification_not_scheduled'
     ]);
     expect(document.components.schemas.AttentionCounts.required).toContain('phone_mismatch');
+    expect(document.components.schemas.AttentionCounts.required).toContain('notification_not_scheduled');
+    expect(document.components.schemas.Order.properties.attentionReasonCode.enum).toContain('notification_not_scheduled');
+    const attentionParameters = (paths['/api/orders/attention'].get as any).parameters as Array<{
+      name: string;
+      schema: { enum?: string[] };
+    }>;
+    expect(attentionParameters.find(parameter => parameter.name === 'reason')?.schema.enum).toContain(
+      'notification_not_scheduled'
+    );
     expect(document.components.schemas.BulkOrderInput.properties.orderIds.maxItems).toBe(100);
     expect(paths['/api/orders/bulk/confirm'].post.responses).toHaveProperty('207');
   });

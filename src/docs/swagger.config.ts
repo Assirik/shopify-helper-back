@@ -284,7 +284,7 @@ const swaggerOptions: swaggerJSDoc.Options = {
             attentionReason: { type: 'string' },
             attentionReasonCode: {
               type: 'string',
-              enum: ['free_text', 'sms_only', 'invalid_number', 'late_confirm', 'phone_mismatch']
+              enum: ['free_text', 'sms_only', 'invalid_number', 'late_confirm', 'phone_mismatch', 'notification_not_scheduled']
             },
             attentionRequiredAt: dateTime,
             needsHelpdeskAttention: { type: 'boolean' },
@@ -319,7 +319,7 @@ const swaggerOptions: swaggerJSDoc.Options = {
               }
             },
             isCashOnDelivery: { type: 'boolean' },
-            reason: { type: 'string', enum: ['free_text', 'sms_only', 'invalid_number', 'late_confirm', 'phone_mismatch'] },
+            reason: { type: 'string', enum: ['free_text', 'sms_only', 'invalid_number', 'late_confirm', 'phone_mismatch', 'notification_not_scheduled'] },
             lastCustomerMessage: { type: 'string' },
             receivedAt: dateTime,
             customerConfirmationStatus: { type: 'string', enum: ['pending', 'confirmed', 'needs_attention', 'expired', 'cancelled', 'sms_only'] },
@@ -328,14 +328,15 @@ const swaggerOptions: swaggerJSDoc.Options = {
         },
         AttentionCounts: {
           type: 'object',
-          required: ['all', 'free_text', 'sms_only', 'invalid_number', 'late_confirm', 'phone_mismatch'],
+          required: ['all', 'free_text', 'sms_only', 'invalid_number', 'late_confirm', 'phone_mismatch', 'notification_not_scheduled'],
           properties: {
             all: { type: 'integer', minimum: 0 },
             free_text: { type: 'integer', minimum: 0 },
             sms_only: { type: 'integer', minimum: 0 },
             invalid_number: { type: 'integer', minimum: 0 },
             late_confirm: { type: 'integer', minimum: 0 },
-            phone_mismatch: { type: 'integer', minimum: 0 }
+            phone_mismatch: { type: 'integer', minimum: 0 },
+            notification_not_scheduled: { type: 'integer', minimum: 0 }
           }
         },
         BulkOrderInput: {

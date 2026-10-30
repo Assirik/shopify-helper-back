@@ -4,11 +4,12 @@ import config from '../utilities/config/env.config';
 import { PhoneNormalizationService } from '../utilities/services/phoneNormalization.service';
 import { Customer } from '../models/Customer';
 import { Message, MessageChannel, MessageProvider, MessageStatus, TemplatePurpose } from '../models/Message';
-import { AttentionReasonCode, NotificationStatus, Order } from '../models/Order';
+import { AttentionReasonCode, CustomerConfirmationStatus, NotificationStatus, Order } from '../models/Order';
 import { BrowserSession } from '../models/BrowserSession';
 import { Product } from '../models/Product';
 import { WebhookEvent, WebhookEventStatus } from '../models/WebhookEvent';
 import { scheduleInitialConfirmationRequest } from '../queues/notification.queue';
+import { QUEUE_ADD_TIMEOUT_MS, TimeoutError, withTimeout } from '../queues/queueTimeout';
 import { resolveRegion } from '../utilities/reference/senegalRegions';
 import log from '../utilities/logger/logger';
 import { splitFullName } from '../utilities/services/nameParser';
@@ -340,21 +341,50 @@ export interface BrowserSessionCapiFields {
   fbclid?: string;
 }
 
-// Rejects when the promise does not settle within `ms`; the timer never outlives the call.
-const withTimeout = <T>(promise: Promise<T>, ms: number) =>
-  new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(`Timed out after ${ms} ms`)), ms);
-    promise.then(
-      value => {
-        clearTimeout(timer);
-        resolve(value);
-      },
-      err => {
-        clearTimeout(timer);
-        reject(err);
+export const NOTIFICATION_NOT_SCHEDULED_ATTENTION_REASON = 'Demande de confirmation non programmée';
+
+// C5.15: the delayed initial request could not be scheduled (Redis error or no answer within
+// QUEUE_ADD_TIMEOUT_MS), so a helpdesk agent takes over. Conditional writes: the send status
+// only leaves PENDING (FAILED while the order awaits confirmation, SKIPPED once it no longer
+// does, as the delayed job would), and an attention reason already set (e.g. `invalid_number`
+// at ingestion, a WhatsApp message received meanwhile) or an order no longer pending is never
+// overwritten. Returns true when the attention reason was set.
+export const flagUnscheduledConfirmationRequest = async (orderId: string) => {
+  await Order.updateOne(
+    {
+      _id: orderId,
+      notificationStatus: NotificationStatus.PENDING,
+      customerConfirmationStatus: CustomerConfirmationStatus.PENDING
+    },
+    { $set: { notificationStatus: NotificationStatus.FAILED } }
+  );
+  await Order.updateOne(
+    {
+      _id: orderId,
+      notificationStatus: NotificationStatus.PENDING,
+      customerConfirmationStatus: { $ne: CustomerConfirmationStatus.PENDING }
+    },
+    { $set: { notificationStatus: NotificationStatus.SKIPPED } }
+  );
+
+  const result = await Order.updateOne(
+    {
+      _id: orderId,
+      needsHelpdeskAttention: { $ne: true },
+      customerConfirmationStatus: CustomerConfirmationStatus.PENDING
+    },
+    {
+      $set: {
+        needsHelpdeskAttention: true,
+        attentionReasonCode: AttentionReasonCode.NOTIFICATION_NOT_SCHEDULED,
+        attentionReason: NOTIFICATION_NOT_SCHEDULED_ATTENTION_REASON,
+        attentionRequiredAt: new Date()
       }
-    );
-  });
+    }
+  );
+
+  return result.modifiedCount > 0;
+};
 
 const getOrderCreatedAt = (payload: ShopifyOrderPayload) => {
   const createdAt = payload.created_at ? new Date(payload.created_at) : new Date();
@@ -852,11 +882,17 @@ export class ShopifyWebhookController {
     // The customer often confirms within a minute through the pre-filled EasySell message, so
     // no Message is created here: a delayed job (deterministic jobId) re-checks the order when
     // the delay expires and only then creates the Message and hands over to the send flow.
-    // A scheduling failure (Redis down) never fails the ingestion.
+    // A scheduling failure never fails the ingestion. With Redis unreachable the add never
+    // settles (offline queue, `maxRetriesPerRequest: null`), hence the bounded wait (C5.15):
+    // on error or timeout the order goes to the helpdesk queue and the webhook still gets 202.
+    // If the hung add lands later anyway, the T+5 job runs under the worker guards: sent when
+    // the order is still pending and not reminded (the hand-over clears `notification_not_scheduled`,
+    // then notificationStatus goes FAILED → SENT), skipped otherwise (status and flag stay; a
+    // reminder that is actually sent clears the flag).
     let scheduledJobId: string | undefined;
 
     try {
-      const job = await scheduleInitialConfirmationRequest(order._id.toString());
+      const job = await withTimeout(scheduleInitialConfirmationRequest(order._id.toString()), QUEUE_ADD_TIMEOUT_MS);
       scheduledJobId = job.id;
 
       log.info(
@@ -870,9 +906,22 @@ export class ShopifyWebhookController {
       );
     } catch (err) {
       log.error(
-        { err, orderId: order._id, shopifyOrderId },
+        { err, orderId: order._id, shopifyOrderId, timedOut: err instanceof TimeoutError },
         'Failed to schedule the initial confirmation request; order ingested without it'
       );
+
+      try {
+        const flagged = await flagUnscheduledConfirmationRequest(order._id.toString());
+        log.info(
+          { orderId: order._id, attentionReasonCode: AttentionReasonCode.NOTIFICATION_NOT_SCHEDULED, flagged },
+          'Unscheduled confirmation request handed over to the helpdesk'
+        );
+      } catch (flagErr) {
+        log.error(
+          { err: flagErr, orderId: order._id, shopifyOrderId },
+          'Failed to flag the unscheduled confirmation request for helpdesk attention'
+        );
+      }
     }
 
     // Réponse volontairement courte: IDs de suivi pour debug/dashboard.

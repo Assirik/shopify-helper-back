@@ -10,16 +10,19 @@ jest.mock('../queues/notification.queue', () => ({
 import { BrowserSession } from '../models/BrowserSession';
 import { Customer } from '../models/Customer';
 import { Message } from '../models/Message';
-import { Order } from '../models/Order';
+import { AttentionReasonCode, CustomerConfirmationStatus, NotificationStatus, Order } from '../models/Order';
 import { WebhookEvent } from '../models/WebhookEvent';
 import { enqueueOrderConfirmation, scheduleInitialConfirmationRequest } from '../queues/notification.queue';
+import { QUEUE_ADD_TIMEOUT_MS } from '../queues/queueTimeout';
 import log from '../utilities/logger/logger';
 import {
   ShopifyWebhookController,
   extractDeliverySnapshot,
   BROWSER_SESSION_LOOKUP_TIMEOUT_MS,
   BROWSER_SESSION_QUERY_MAX_TIME_MS,
+  NOTIFICATION_NOT_SCHEDULED_ATTENTION_REASON,
   findBrowserSessionCapiFields,
+  flagUnscheduledConfirmationRequest,
   normalizeDeliveryMoment
 } from './shopifyWebhook.controller';
 
@@ -213,6 +216,7 @@ describe('ShopifyWebhookController.ordersCreate — browser session link', () =>
   let orderCreate: ReturnType<typeof jest.spyOn>;
   let orderFindOne: ReturnType<typeof jest.spyOn>;
   let logInfo: ReturnType<typeof jest.spyOn>;
+  let orderUpdateOne: ReturnType<typeof jest.spyOn>;
 
   const callOrdersCreate = async (body: Record<string, unknown> = payload) => {
     const headers: Record<string, string> = { 'x-shopify-webhook-id': `wh-${Math.random()}` };
@@ -261,10 +265,12 @@ describe('ShopifyWebhookController.ordersCreate — browser session link', () =>
       id: `confirm-initial-${orderId.toString()}`,
       queueName: 'notifications'
     } as never);
+    orderUpdateOne = jest.spyOn(Order, 'updateOne').mockResolvedValue({ modifiedCount: 1 } as never);
     logInfo = jest.spyOn(log, 'info');
   });
 
   afterEach(() => {
+    jest.useRealTimers();
     jest.restoreAllMocks();
   });
 
@@ -434,5 +440,181 @@ describe('ShopifyWebhookController.ordersCreate — browser session link', () =>
       expect.objectContaining({ orderId }),
       'Failed to schedule the initial confirmation request; order ingested without it'
     );
+  });
+
+  // C5.15: Redis unreachable → the arrival never waits, a helpdesk agent takes over.
+  const expectUnscheduledFlag = () => {
+    expect(orderUpdateOne).toHaveBeenCalledWith(
+      {
+        _id: orderId.toString(),
+        notificationStatus: NotificationStatus.PENDING,
+        customerConfirmationStatus: CustomerConfirmationStatus.PENDING
+      },
+      { $set: { notificationStatus: NotificationStatus.FAILED } }
+    );
+    expect(orderUpdateOne).toHaveBeenCalledWith(
+      expect.objectContaining({ _id: orderId.toString(), needsHelpdeskAttention: { $ne: true } }),
+      {
+        $set: {
+          needsHelpdeskAttention: true,
+          attentionReasonCode: AttentionReasonCode.NOTIFICATION_NOT_SCHEDULED,
+          attentionReason: NOTIFICATION_NOT_SCHEDULED_ATTENTION_REASON,
+          attentionRequiredAt: expect.any(Date)
+        }
+      }
+    );
+  };
+
+  it('flags the order notification_not_scheduled and answers 202 when Redis rejects the job (C5.15)', async () => {
+    mockBrowserSessionLookup(null);
+    (scheduleInitialConfirmationRequest as jest.Mock).mockRejectedValue(new Error('ECONNREFUSED') as never);
+    const logError = jest.spyOn(log, 'error');
+
+    const res = await callOrdersCreate();
+
+    expect(res.statusCode).toBe(202);
+    expect(res.body).toEqual(expect.objectContaining({ accepted: true, orderId, notificationQueued: false, jobId: undefined }));
+    expectUnscheduledFlag();
+    const errorLog = (logError.mock.calls as unknown[][]).find(
+      call => call[1] === 'Failed to schedule the initial confirmation request; order ingested without it'
+    )?.[0] as Record<string, unknown>;
+    expect(errorLog).toEqual(expect.objectContaining({ orderId, shopifyOrderId: '9001', timedOut: false }));
+    expect(JSON.stringify(errorLog)).not.toContain('776986780');
+  });
+
+  it('answers 202 within the queue deadline and flags the order when Redis never answers (C5.15)', async () => {
+    jest.useFakeTimers();
+    mockBrowserSessionLookup(null);
+    (scheduleInitialConfirmationRequest as jest.Mock).mockReturnValue(new Promise(() => undefined));
+    const logError = jest.spyOn(log, 'error');
+    let settled = false;
+
+    const pending = callOrdersCreate().then(res => {
+      settled = true;
+      return res;
+    });
+
+    // Literal 3 s on purpose: the card fixes the deadline, a larger constant must fail here.
+    await jest.advanceTimersByTimeAsync(2999);
+    expect(settled).toBe(false);
+    expect(orderUpdateOne).not.toHaveBeenCalled();
+
+    await jest.advanceTimersByTimeAsync(1);
+    const res = await pending;
+
+    expect(settled).toBe(true);
+    expect(res.statusCode).toBe(202);
+    expect(res.body).toEqual(expect.objectContaining({ accepted: true, orderId, notificationQueued: false }));
+    expectUnscheduledFlag();
+    expect(logError).toHaveBeenCalledWith(
+      expect.objectContaining({ orderId, timedOut: true }),
+      'Failed to schedule the initial confirmation request; order ingested without it'
+    );
+  });
+
+  it('still answers 202 when flagging the unscheduled order fails (C5.15)', async () => {
+    mockBrowserSessionLookup(null);
+    (scheduleInitialConfirmationRequest as jest.Mock).mockRejectedValue(new Error('ECONNREFUSED') as never);
+    orderUpdateOne.mockRejectedValue(new Error('Mongo down') as never);
+    const logError = jest.spyOn(log, 'error');
+
+    const res = await callOrdersCreate();
+
+    expect(res.statusCode).toBe(202);
+    expect(res.body).toEqual(expect.objectContaining({ accepted: true, notificationQueued: false }));
+    expect(logError).toHaveBeenCalledWith(
+      expect.objectContaining({ orderId }),
+      'Failed to flag the unscheduled confirmation request for helpdesk attention'
+    );
+  });
+
+  it('leaves the order untouched when the job is scheduled (C5.15)', async () => {
+    mockBrowserSessionLookup(null);
+
+    const res = await callOrdersCreate();
+
+    expect(res.statusCode).toBe(202);
+    expect(res.body).toEqual(expect.objectContaining({ notificationQueued: true }));
+    expect(orderUpdateOne).not.toHaveBeenCalled();
+    expect(orderCreate.mock.calls[0]?.[0]).toEqual(
+      expect.objectContaining({ notificationStatus: NotificationStatus.PENDING })
+    );
+    expect(orderCreate.mock.calls[0]?.[0]).not.toHaveProperty('needsHelpdeskAttention');
+  });
+
+  it('keeps the invalid_number reason: no request is scheduled for an invalid phone (C5.15)', async () => {
+    mockBrowserSessionLookup(null);
+    // No stable customer key without a valid phone: the controller creates an isolated customer.
+    jest.spyOn(Customer, 'create').mockResolvedValue({
+      _id: new Types.ObjectId(),
+      save: jest.fn(async () => undefined)
+    } as never);
+
+    const res = await callOrdersCreate({ ...payload, phone: '12345' });
+
+    expect(res.statusCode).toBe(202);
+    expect(res.body).toEqual(expect.objectContaining({ notificationQueued: false, phoneValid: false }));
+    expect(scheduleInitialConfirmationRequest).not.toHaveBeenCalled();
+    expect(orderUpdateOne).not.toHaveBeenCalled();
+    expect(orderCreate.mock.calls[0]?.[0]).toEqual(
+      expect.objectContaining({
+        notificationStatus: NotificationStatus.FAILED,
+        needsHelpdeskAttention: true,
+        attentionReasonCode: AttentionReasonCode.INVALID_NUMBER
+      })
+    );
+  });
+});
+
+describe('flagUnscheduledConfirmationRequest (C5.15)', () => {
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  it('bounds the scheduling wait to 3 seconds', () => {
+    expect(QUEUE_ADD_TIMEOUT_MS).toBe(3000);
+  });
+
+  it('marks the request failed while the order awaits confirmation, skipped once it no longer does', async () => {
+    const updateOne = jest.spyOn(Order, 'updateOne').mockResolvedValue({ modifiedCount: 1 } as never);
+
+    await flagUnscheduledConfirmationRequest('order-1');
+
+    expect(updateOne.mock.calls[0]).toEqual([
+      { _id: 'order-1', notificationStatus: NotificationStatus.PENDING, customerConfirmationStatus: CustomerConfirmationStatus.PENDING },
+      { $set: { notificationStatus: NotificationStatus.FAILED } }
+    ]);
+    expect(updateOne.mock.calls[1]).toEqual([
+      {
+        _id: 'order-1',
+        notificationStatus: NotificationStatus.PENDING,
+        customerConfirmationStatus: { $ne: CustomerConfirmationStatus.PENDING }
+      },
+      { $set: { notificationStatus: NotificationStatus.SKIPPED } }
+    ]);
+  });
+
+  it('never overwrites an existing attention reason nor flags an order no longer pending', async () => {
+    const updateOne = jest
+      .spyOn(Order, 'updateOne')
+      .mockResolvedValueOnce({ modifiedCount: 0 } as never)
+      .mockResolvedValueOnce({ modifiedCount: 1 } as never)
+      .mockResolvedValueOnce({ modifiedCount: 0 } as never);
+
+    const flagged = await flagUnscheduledConfirmationRequest('order-1');
+
+    expect(flagged).toBe(false);
+    expect(updateOne).toHaveBeenCalledTimes(3);
+    expect(updateOne.mock.calls[2]?.[0]).toEqual({
+      _id: 'order-1',
+      needsHelpdeskAttention: { $ne: true },
+      customerConfirmationStatus: CustomerConfirmationStatus.PENDING
+    });
+  });
+
+  it('reports the flag when the attention reason was set', async () => {
+    jest.spyOn(Order, 'updateOne').mockResolvedValue({ modifiedCount: 1 } as never);
+
+    await expect(flagUnscheduledConfirmationRequest('order-1')).resolves.toBe(true);
   });
 });
