@@ -35,6 +35,17 @@ export const parseSessionCaptureOrigins = (value?: string) =>
     .map(origin => origin.trim().toLowerCase().replace(/\/+$/, ''))
     .filter(origin => origin.length > 0);
 
+// Delay before the first WhatsApp confirmation request (C5.6a): the customer often confirms
+// within a minute through the pre-filled EasySell message. Never shorter than 5 minutes.
+export const MIN_INITIAL_CONFIRMATION_REQUEST_DELAY_MINUTES = 5;
+
+export const parseInitialConfirmationRequestDelayMinutes = (value?: string) => {
+  const minutes = Number(value);
+  return Number.isFinite(minutes) && minutes > MIN_INITIAL_CONFIRMATION_REQUEST_DELAY_MINUTES
+    ? minutes
+    : MIN_INITIAL_CONFIRMATION_REQUEST_DELAY_MINUTES;
+};
+
 export default {
   port,
   apiEndpoint,
@@ -90,6 +101,9 @@ export default {
     baseUrl: process.env.TERMII_BASE_URL || 'https://v3.api.termii.com'
   },
   confirmation: {
+    initialRequestDelayMinutes: parseInitialConfirmationRequestDelayMinutes(
+      process.env.CONFIRMATION_INITIAL_REQUEST_DELAY_MINUTES
+    ),
     firstReminderHours: Number(process.env.CONFIRMATION_FIRST_REMINDER_HOURS) || 24,
     secondReminderHours: Number(process.env.CONFIRMATION_SECOND_REMINDER_HOURS) || 48,
     expireHours: Number(process.env.CONFIRMATION_EXPIRE_HOURS) || 72,

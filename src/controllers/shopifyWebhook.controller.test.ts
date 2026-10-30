@@ -3,7 +3,8 @@ import { Request, Response } from 'express';
 import { Types } from 'mongoose';
 
 jest.mock('../queues/notification.queue', () => ({
-  enqueueOrderConfirmation: jest.fn()
+  enqueueOrderConfirmation: jest.fn(),
+  scheduleInitialConfirmationRequest: jest.fn()
 }));
 
 import { BrowserSession } from '../models/BrowserSession';
@@ -11,7 +12,7 @@ import { Customer } from '../models/Customer';
 import { Message } from '../models/Message';
 import { Order } from '../models/Order';
 import { WebhookEvent } from '../models/WebhookEvent';
-import { enqueueOrderConfirmation } from '../queues/notification.queue';
+import { enqueueOrderConfirmation, scheduleInitialConfirmationRequest } from '../queues/notification.queue';
 import log from '../utilities/logger/logger';
 import {
   ShopifyWebhookController,
@@ -256,7 +257,10 @@ describe('ShopifyWebhookController.ordersCreate — browser session link', () =>
       lineItems: []
     })) as never);
     jest.spyOn(Message, 'create').mockResolvedValue({ _id: new Types.ObjectId() } as never);
-    (enqueueOrderConfirmation as jest.Mock).mockResolvedValue({ id: 'job-1', queueName: 'notifications' } as never);
+    (scheduleInitialConfirmationRequest as jest.Mock).mockResolvedValue({
+      id: `confirm-initial-${orderId.toString()}`,
+      queueName: 'notifications'
+    } as never);
     logInfo = jest.spyOn(log, 'info');
   });
 
@@ -379,5 +383,56 @@ describe('ShopifyWebhookController.ordersCreate — browser session link', () =>
     expect(orderCreate).not.toHaveBeenCalled();
     expect(updateOne).not.toHaveBeenCalled();
     expect(findOneAndUpdate).not.toHaveBeenCalled();
+  });
+
+  it('schedules only the delayed confirmation request: no Message and no immediate send', async () => {
+    mockBrowserSessionLookup(null);
+
+    const res = await callOrdersCreate();
+
+    expect(res.statusCode).toBe(202);
+    expect(Message.create).not.toHaveBeenCalled();
+    expect(enqueueOrderConfirmation).not.toHaveBeenCalled();
+    expect(scheduleInitialConfirmationRequest).toHaveBeenCalledTimes(1);
+    expect(scheduleInitialConfirmationRequest).toHaveBeenCalledWith(orderId.toString());
+    expect(res.body).toEqual(
+      expect.objectContaining({
+        accepted: true,
+        orderId,
+        jobId: `confirm-initial-${orderId.toString()}`,
+        notificationQueued: true,
+        phoneValid: true
+      })
+    );
+    expect(res.body).not.toHaveProperty('messageId');
+  });
+
+  it('does not schedule a second request when the webhook is replayed', async () => {
+    orderFindOne.mockResolvedValue({ _id: orderId } as never);
+    mockBrowserSessionLookup(null);
+
+    const res = await callOrdersCreate();
+
+    expect(res.body).toEqual(expect.objectContaining({ duplicate: true }));
+    expect(scheduleInitialConfirmationRequest).not.toHaveBeenCalled();
+    expect(Message.create).not.toHaveBeenCalled();
+    expect(enqueueOrderConfirmation).not.toHaveBeenCalled();
+  });
+
+  it('keeps the order ingested and answers 202 when the delayed job cannot be scheduled', async () => {
+    mockBrowserSessionLookup(null);
+    (scheduleInitialConfirmationRequest as jest.Mock).mockRejectedValue(new Error('Redis down') as never);
+    const logError = jest.spyOn(log, 'error');
+
+    const res = await callOrdersCreate();
+
+    expect(res.statusCode).toBe(202);
+    expect(orderCreate).toHaveBeenCalledTimes(1);
+    expect(WebhookEvent.create).toHaveBeenCalledTimes(1);
+    expect(res.body).toEqual(expect.objectContaining({ accepted: true, orderId, notificationQueued: false }));
+    expect(logError).toHaveBeenCalledWith(
+      expect.objectContaining({ orderId }),
+      'Failed to schedule the initial confirmation request; order ingested without it'
+    );
   });
 });

@@ -6,6 +6,7 @@ export const SEND_ORDER_CONFIRMATION_JOB = 'sendOrderConfirmation';
 export const SEND_ORDER_CONFIRMED_JOB = 'sendOrderConfirmed';
 export const SEND_ORDER_CANCELLED_JOB = 'sendOrderCancelled';
 export const SEND_CONFIRMATION_REMINDER_JOB = 'sendConfirmationReminder';
+export const SEND_INITIAL_CONFIRMATION_REQUEST_JOB = 'sendInitialConfirmationRequest';
 
 export const MAINTENANCE_QUEUE_NAME = 'confirmation-maintenance';
 export const CONFIRMATION_SWEEP_JOB = 'confirmationSweep';
@@ -16,6 +17,12 @@ export interface SendOrderConfirmationJobData {
   messageId: string;
   channel: 'whatsapp' | 'sms';
 }
+
+export interface InitialConfirmationRequestJobData {
+  orderId: string;
+}
+
+export type NotificationJobData = SendOrderConfirmationJobData | InitialConfirmationRequestJobData;
 
 export const getRedisConnection = () => {
   const redisUrl = new URL(config.redisUrl);
@@ -28,7 +35,7 @@ export const getRedisConnection = () => {
   };
 };
 
-export const notificationQueue = new Queue<SendOrderConfirmationJobData>(NOTIFICATION_QUEUE_NAME, {
+export const notificationQueue = new Queue<NotificationJobData>(NOTIFICATION_QUEUE_NAME, {
   connection: getRedisConnection()
 });
 
@@ -42,8 +49,14 @@ const defaultJobOptions: JobsOptions = {
   removeOnFail: 500
 };
 
-export const enqueueOrderConfirmation = async (data: SendOrderConfirmationJobData) => {
-  return notificationQueue.add(SEND_ORDER_CONFIRMATION_JOB, data, defaultJobOptions);
+// `jobId` is only set by the delayed initial request; the other callers (SMS fallback,
+// manual resend) keep BullMQ's generated ids.
+export const enqueueOrderConfirmation = async (data: SendOrderConfirmationJobData, options: { jobId?: string } = {}) => {
+  return notificationQueue.add(
+    SEND_ORDER_CONFIRMATION_JOB,
+    data,
+    options.jobId ? { ...defaultJobOptions, jobId: options.jobId } : defaultJobOptions
+  );
 };
 
 export const enqueueOrderConfirmed = async (data: SendOrderConfirmationJobData) => {
@@ -56,6 +69,27 @@ export const enqueueOrderCancelled = async (data: SendOrderConfirmationJobData) 
 
 export const enqueueConfirmationReminder = async (data: SendOrderConfirmationJobData) => {
   return notificationQueue.add(SEND_CONFIRMATION_REMINDER_JOB, data, defaultJobOptions);
+};
+
+// Deterministic id: a replayed Shopify webhook never schedules a second request.
+// BullMQ rejects ':' in custom job ids.
+export const getInitialConfirmationRequestJobId = (orderId: string) => `confirm-initial-${orderId}`;
+
+// Send job the delayed initial request hands over to, keyed on its Message.
+export const getInitialConfirmationSendJobId = (messageId: string) => `confirm-send-${messageId}`;
+
+// Delayed first confirmation request (C5.6a). The worker re-checks the order when the delay
+// expires and only then creates the Message and hands over to `enqueueOrderConfirmation`.
+export const scheduleInitialConfirmationRequest = async (orderId: string) => {
+  return notificationQueue.add(
+    SEND_INITIAL_CONFIRMATION_REQUEST_JOB,
+    { orderId },
+    {
+      ...defaultJobOptions,
+      delay: config.confirmation.initialRequestDelayMinutes * 60 * 1000,
+      jobId: getInitialConfirmationRequestJobId(orderId)
+    }
+  );
 };
 
 export const maintenanceQueue = new Queue(MAINTENANCE_QUEUE_NAME, {
