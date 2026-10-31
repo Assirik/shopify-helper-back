@@ -1,5 +1,5 @@
 import { Job, UnrecoverableError, Worker } from 'bullmq';
-import { CapiPurchaseStatus, IOrder, Order } from '../models/Order';
+import { CapiPurchaseStatus, CustomerConfirmationStatus, IOrder, Order } from '../models/Order';
 import { OrderEvent, OrderEventType } from '../models/OrderEvent';
 import { CapiSendResult, MetaCapiError, buildFbc, sendPurchase } from '../providers/metaCapi.provider';
 import { CAPI_PURCHASE_QUEUE_NAME, CapiPurchaseJobData } from '../queues/capi.queue';
@@ -55,6 +55,13 @@ export const getSkipReason = (order: IOrder, now: Date = new Date()): CapiSkipRe
   }
 
   if (order.shopifyCancelledAt) {
+    return 'cancelled';
+  }
+
+  // Cancelled by an agent while the send was delayed (Meta 5xx, Redis) before the retry.
+  // A delivered order is a real sale even if it was cancelled on the way (cancelByAdmin
+  // leaves operationalStatus untouched): it is still sent.
+  if (order.customerConfirmationStatus === CustomerConfirmationStatus.CANCELLED && !order.deliveredAt) {
     return 'cancelled';
   }
 

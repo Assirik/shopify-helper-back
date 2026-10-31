@@ -2,7 +2,7 @@ import { createServer } from 'http';
 import os from 'os';
 import app from './src/app';
 import config from './src/utilities/config/env.config';
-import { checkCapiStartup } from './src/utilities/config/capiStartup';
+import { checkCapiStartup, describeCapiStatus } from './src/utilities/config/capiStartup';
 import log from './src/utilities/logger/logger';
 import { DatabaseService } from './src/utilities/services/database.service';
 import { scheduleConfirmationSweep } from './src/queues/notification.queue';
@@ -21,6 +21,7 @@ if (capiError) {
   log.fatal(capiError);
   process.exit(1);
 }
+log.info(describeCapiStatus(config.metaCapi), `CAPI ${config.metaCapi.enabled ? 'enabled' : 'disabled'}`);
 
 const port = config.port;
 app.set('port', port);

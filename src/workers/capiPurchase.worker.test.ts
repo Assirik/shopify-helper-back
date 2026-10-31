@@ -24,7 +24,7 @@ jest.mock('../providers/metaCapi.provider', () => {
   return { ...actual, sendPurchase: jest.fn() };
 });
 
-import { CapiPurchaseStatus, Order } from '../models/Order';
+import { CapiPurchaseStatus, CustomerConfirmationStatus, Order } from '../models/Order';
 import { OrderEvent, OrderEventType } from '../models/OrderEvent';
 import { MetaCapiError, sendPurchase } from '../providers/metaCapi.provider';
 import { CapiPurchaseJobData } from '../queues/capi.queue';
@@ -143,6 +143,7 @@ describe('capi purchase worker', () => {
   it.each([
     ['test', { isTest: true }],
     ['cancelled', { shopifyCancelledAt: new Date() }],
+    ['cancelled', { customerConfirmationStatus: CustomerConfirmationStatus.CANCELLED }],
     ['too_old', { confirmedAt: new Date(Date.now() - CAPI_MAX_EVENT_AGE_MS - 60_000) }],
     ['too_old', { confirmedAt: undefined, deliveredAt: new Date(Date.now() - 7 * 24 * HOUR + 30 * 60_000) }]
   ])('skips with reason %s without any network call', async (reason, overrides) => {
@@ -163,6 +164,46 @@ describe('capi purchase worker', () => {
       type: OrderEventType.CAPI_PURCHASE_SKIPPED,
       metadata: { reason }
     });
+  });
+
+  it('does not send a purchase cancelled by an agent while the send was delayed (5xx then cancel then retry)', async () => {
+    const update = spyUpdate({ _id: orderId });
+    const createEvent = jest.spyOn(OrderEvent, 'create').mockResolvedValue({} as never);
+    const findById = jest.spyOn(Order, 'findById');
+
+    // First attempt: confirmed order, Meta answers 5xx, the job is retried later.
+    findById.mockResolvedValueOnce(buildOrder({ customerConfirmationStatus: CustomerConfirmationStatus.CONFIRMED }) as never);
+    mockedSend.mockRejectedValueOnce(new MetaCapiError('Meta 503', { status: 503, retryable: true }));
+    await expect(processCapiPurchaseJob(buildJob(0))).rejects.toThrow();
+    expect(mockedSend).toHaveBeenCalledTimes(1);
+    expect(update).not.toHaveBeenCalled();
+
+    // The agent cancels, then the retry runs: skipped, no second call to Meta.
+    findById.mockResolvedValueOnce(buildOrder({ customerConfirmationStatus: CustomerConfirmationStatus.CANCELLED }) as never);
+    await processCapiPurchaseJob(buildJob(1));
+
+    expect(mockedSend).toHaveBeenCalledTimes(1);
+    expect(mockedPost).not.toHaveBeenCalled();
+    expect(update).toHaveBeenCalledTimes(1);
+    expect(createEvent).toHaveBeenCalledTimes(1);
+    expect(createEvent).toHaveBeenCalledWith({
+      orderId,
+      type: OrderEventType.CAPI_PURCHASE_SKIPPED,
+      metadata: { reason: 'cancelled' }
+    });
+  });
+
+  it('still sends an order cancelled by an agent but delivered anyway (a real sale)', async () => {
+    stubOrder(
+      buildOrder({ customerConfirmationStatus: CustomerConfirmationStatus.CANCELLED, deliveredAt: new Date() })
+    );
+    mockedSend.mockResolvedValueOnce(sendResult);
+    spyUpdate({ _id: orderId });
+    jest.spyOn(OrderEvent, 'create').mockResolvedValue({} as never);
+
+    await processCapiPurchaseJob(buildJob());
+
+    expect(mockedSend).toHaveBeenCalledTimes(1);
   });
 
   it('skips with reason disabled when the CAPI flag is off', async () => {
