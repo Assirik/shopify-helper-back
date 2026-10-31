@@ -47,8 +47,12 @@ export const parseInitialConfirmationRequestDelayMinutes = (value?: string) => {
 };
 
 // Expected pre-filled WhatsApp confirmation text (C5.17), identical to the EasySell message
-// with its EasySell variables. Absent: this default. Empty or without {{order.number}}:
-// logged at startup and the confirmation by message is disabled.
+// with its EasySell variables. Template and message are compared in lower case, NFC, edge
+// spaces and invisible characters removed; the fixed text is compared as is. Required
+// {{order.number}}: `1234`, `#1234` or `##1234`. Any other variable: 1 to 100 characters on
+// a single line. Message over 500 characters: no match. Absent: this default. Invalid (empty,
+// without {{order.number}}, fixed text under 5 letters, adjacent variables): logged at
+// startup and the confirmation by message is disabled.
 export const DEFAULT_PREFILLED_CONFIRMATION_TEMPLATE = 'Je confirme ma commande #{{order.number}}';
 
 export default {

@@ -16,6 +16,7 @@ import {
   OrderConfirmationService,
   PHONE_MISMATCH_ATTENTION_REASON,
   TERMINAL_OPERATIONAL_STATUSES,
+  MAX_PREFILLED_MESSAGE_LENGTH,
   compilePrefilledConfirmationTemplate,
   isSenderOrderPhone,
   matchPrefilledConfirmationText
@@ -335,10 +336,14 @@ describe('pre-filled WhatsApp confirmation (C5.6b)', () => {
       expect(match(text)).toBe('1234');
     });
 
-    it('accepts the order number with or without "#", even when the template writes it', () => {
+    it('accepts the order number as 1234, #1234 or ##1234, even when the template writes "#"', () => {
       expect(match('Je confirme ma commande #1234')).toBe('1234');
       expect(match('Je confirme ma commande 1234')).toBe('1234');
-      expect(match('Je confirme ma commande ##1234')).toBeNull();
+      // EasySell may render {{order.number}} with its own "#".
+      expect(match('Je confirme ma commande ##1234')).toBe('1234');
+      expect(match('Je confirme ma commande ###1234')).toBeNull();
+      expect(match('Je confirme ma commande #')).toBeNull();
+      expect(match('Je confirme ma commande #123456789012345678901')).toBeNull();
 
       const withoutHash = compilePrefilledConfirmationTemplate('Je confirme {{order.number}}');
       expect(match('je confirme #1234', withoutHash)).toBe('1234');
@@ -388,11 +393,117 @@ describe('pre-filled WhatsApp confirmation (C5.6b)', () => {
       expect(match('Commande (n° 1234) confirmée ? Ouix [*+$^|\\]', template)).toBeNull();
     });
 
+    it('accepts a message of exactly 500 characters and rejects 501', () => {
+      const prefix = 'Je confirme ma commande #1234 ';
+      const exact = compilePrefilledConfirmationTemplate(`Je confirme ma commande #{{order.number}} ${'x'.repeat(500 - prefix.length)}`);
+      const over = compilePrefilledConfirmationTemplate(`Je confirme ma commande #{{order.number}} ${'x'.repeat(501 - prefix.length)}`);
+      const exactMessage = `${prefix}${'x'.repeat(500 - prefix.length)}`;
+      const overMessage = `${prefix}${'x'.repeat(501 - prefix.length)}`;
+
+      expect(exactMessage).toHaveLength(500);
+      expect(overMessage).toHaveLength(501);
+      expect(match(exactMessage, exact)).toBe('1234');
+      expect(match(overMessage, over)).toBeNull();
+    });
+
+    it('rejects a message readable two ways with two different order numbers', () => {
+      const template = compilePrefilledConfirmationTemplate('Je confirme {{customer.name}} #{{order.number}} {{note}}');
+
+      // name "a", number 1, note "b #2 c" — or name "a #1 b", number 2, note "c".
+      expect(match('je confirme a #1 b #2 c', template)).toBeNull();
+      expect(match('je confirme awa #1234 merci', template)).toBe('1234');
+    });
+
+    it('accepts a template writing ##{{order.number}}', () => {
+      const template = compilePrefilledConfirmationTemplate('Je confirme ##{{order.number}}');
+
+      expect(match('je confirme 1234', template)).toBe('1234');
+      expect(match('je confirme #1234', template)).toBe('1234');
+      expect(match('je confirme ##1234', template)).toBe('1234');
+      expect(match('je confirme ###1234', template)).toBeNull();
+    });
+
+    it('requires a fixed text of at least 5 letters', () => {
+      expect(compilePrefilledConfirmationTemplate('Abcd #{{order.number}}')).toEqual({
+        error: expect.stringContaining('at least 5 letters')
+      });
+      const fiveLetters = compilePrefilledConfirmationTemplate('Abcdé #{{order.number}}');
+
+      expect(fiveLetters).not.toHaveProperty('error');
+      expect(match('ABCDÉ #12', fiveLetters)).toBe('12');
+    });
+
+    it.each([
+      'Je confirme {{customer.name}}#{{order.number}}',
+      'Je confirme {{customer.name}}##{{order.number}}',
+      'Je confirme {{customer.name}}{{order.number}}'
+    ])('rejects adjacent variables, even separated by "#" only: %p', template => {
+      expect(compilePrefilledConfirmationTemplate(template)).toEqual({
+        error: expect.stringContaining('adjacent variables')
+      });
+    });
+
     it('requires the same number when the template quotes it twice', () => {
       const template = compilePrefilledConfirmationTemplate('#{{order.number}} : je confirme #{{order.number}}');
 
       expect(match('#1234 : je confirme #1234', template)).toBe('1234');
       expect(match('#1234 : je confirme #99', template)).toBeNull();
+    });
+
+    it('does not let a variable span several lines', () => {
+      const template = compilePrefilledConfirmationTemplate('Bonjour {{customer.name}}, je confirme #{{order.number}}');
+
+      expect(match('Bonjour Awa\nANNULEZ TOUT\nAwa, je confirme #1234', template)).toBeNull();
+      expect(match('Bonjour Awa\r\nX, je confirme #1234', template)).toBeNull();
+    });
+
+    it('bounds a variable to 100 characters and the message to 500', () => {
+      const template = compilePrefilledConfirmationTemplate('Bonjour {{customer.name}}, je confirme #{{order.number}}');
+      expect(match(`Bonjour ${'a'.repeat(100)}, je confirme #1234`, template)).toBe('1234');
+      expect(match(`Bonjour ${'a'.repeat(101)}, je confirme #1234`, template)).toBeNull();
+
+      const long = compilePrefilledConfirmationTemplate(`Je confirme ma commande #{{order.number}} ${'merci '.repeat(80)}`);
+      expect(match(`Je confirme ma commande #1234 ${'merci '.repeat(70)}`, long)).toBeNull();
+      const fits = compilePrefilledConfirmationTemplate(`Je confirme ma commande #{{order.number}} ${'merci '.repeat(70)}`);
+      expect(match(`Je confirme ma commande #1234 ${'merci '.repeat(70)}`, fits)).toBe('1234');
+      expect(MAX_PREFILLED_MESSAGE_LENGTH).toBe(500);
+    });
+
+    it('normalises to NFC and strips invisible characters at the edges only', () => {
+      const template = compilePrefilledConfirmationTemplate('Je confirme ma commande numéro #{{order.number}}');
+
+      expect(match('Je confirme ma commande nume\u0301ro #1234', template)).toBe('1234');
+      expect(match('\u200eJe confirme ma commande numéro #1234\u200b\ufeff ', template)).toBe('1234');
+      expect(match('Je confirme ma\u200b commande numéro #1234', template)).toBeNull();
+      expect(match('\u200b', template)).toBeNull();
+    });
+
+    it('compares apostrophes and inner spaces as is (exact text)', () => {
+      const template = compilePrefilledConfirmationTemplate("C'est confirmé pour #{{order.number}}");
+
+      expect(match("c'est confirmé pour #1234", template)).toBe('1234');
+      expect(match('c’est confirmé pour #1234', template)).toBeNull();
+      expect(match("c'est  confirmé pour #1234", template)).toBeNull();
+    });
+
+    it('stays fast on adversarial messages (no backtracking)', () => {
+      const template = compilePrefilledConfirmationTemplate(
+        'Bonjour {{a}} {{b}} {{c}} {{d}} je confirme #{{order.number}}'
+      );
+      const messages = [
+        ' '.repeat(4096),
+        `bonjour ${' '.repeat(490)}`,
+        `bonjour ${'a '.repeat(245)}`,
+        `bonjour ${'a'.repeat(4000)} je confirme #1234`,
+        `bonjour ${'#1'.repeat(240)}`
+      ];
+      const started = process.hrtime.bigint();
+
+      for (const message of messages) {
+        expect(match(message, template)).toBeNull();
+      }
+
+      expect(Number(process.hrtime.bigint() - started) / 1e6).toBeLessThan(200);
     });
 
     it.each([
@@ -401,7 +512,12 @@ describe('pre-filled WhatsApp confirmation (C5.6b)', () => {
       ['absent', undefined],
       ['without {{order.number}}', 'Je confirme ma commande'],
       ['with another variable only', 'Je confirme ma commande {{order.name}}'],
-      ['truncated by an unquoted "#" in .env', 'Je confirme ma commande']
+      ['truncated by an unquoted "#" in .env', 'Je confirme ma commande'],
+      ['reduced to {{order.number}}', '{{order.number}}'],
+      ['reduced to #{{order.number}}', ' #{{order.number}} '],
+      ['with a fixed text under 5 letters', 'Oui #{{order.number}} !'],
+      ['with adjacent variables', 'Je confirme {{customer.name}}{{order.number}}'],
+      ['with adjacent variables at the start', '{{customer.name}}{{shop.name}} je confirme #{{order.number}}']
     ])('rejects an invalid template (%s) without throwing, and it matches nothing', (_label, template) => {
       const compiled = compilePrefilledConfirmationTemplate(template);
 
@@ -464,6 +580,8 @@ describe('pre-filled WhatsApp confirmation (C5.6b)', () => {
         _id: orderId.toString(),
         customerConfirmationStatus: { $in: CONFIRMABLE_BY_BUTTON },
         attentionReasonCode: { $ne: AttentionReasonCode.LATE_CONFIRM },
+        confirmationCancelledAt: null,
+        expiredAt: null,
         shopifyCancelledAt: null,
         operationalStatus: { $nin: [OrderOperationalStatus.DELIVERED, OrderOperationalStatus.RETURNED] }
       });
@@ -507,6 +625,8 @@ describe('pre-filled WhatsApp confirmation (C5.6b)', () => {
       _id: orderId,
       customerConfirmationStatus: { $in: CONFIRMABLE_BY_BUTTON },
       attentionReasonCode: { $nin: [AttentionReasonCode.PHONE_MISMATCH, AttentionReasonCode.LATE_CONFIRM] },
+      confirmationCancelledAt: null,
+      expiredAt: null,
       shopifyCancelledAt: null,
       operationalStatus: { $nin: [OrderOperationalStatus.DELIVERED, OrderOperationalStatus.RETURNED] }
     });
@@ -849,7 +969,9 @@ describe('pre-filled WhatsApp confirmation (C5.6b)', () => {
     expect(update.mock.calls[0]?.[0]).toEqual({
       _id: orderId.toString(),
       customerConfirmationStatus: { $in: CONFIRMABLE_BY_BUTTON },
-      attentionReasonCode: { $ne: AttentionReasonCode.LATE_CONFIRM }
+      attentionReasonCode: { $ne: AttentionReasonCode.LATE_CONFIRM },
+      confirmationCancelledAt: null,
+      expiredAt: null
     });
   });
 
