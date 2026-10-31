@@ -134,6 +134,15 @@ describe('Meta Purchase across confirmation and delivery (real services)', () =>
         return (state[key] !== undefined) === condition.$exists;
       }
 
+      // `null` and `$ne` also match a missing field.
+      if (condition === null) {
+        return state[key] === null || state[key] === undefined;
+      }
+
+      if (condition && typeof condition === 'object' && '$ne' in condition) {
+        return state[key] !== condition.$ne;
+      }
+
       return state[key] === condition;
     });
 

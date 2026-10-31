@@ -55,6 +55,15 @@ export const parseInitialConfirmationRequestDelayMinutes = (value?: string) => {
     : MIN_INITIAL_CONFIRMATION_REQUEST_DELAY_MINUTES;
 };
 
+// Expected pre-filled WhatsApp confirmation text (C5.17), identical to the EasySell message
+// with its EasySell variables. Template and message are compared in lower case, NFC, edge
+// spaces and invisible characters removed; the fixed text is compared as is. Required
+// {{order.number}}: `1234`, `#1234` or `##1234`. Any other variable: 1 to 100 characters on
+// a single line. Message over 500 characters: no match. Absent: this default. Invalid (empty,
+// without {{order.number}}, fixed text under 5 letters, adjacent variables): logged at
+// startup and the confirmation by message is disabled.
+export const DEFAULT_PREFILLED_CONFIRMATION_TEMPLATE = 'Je confirme ma commande #{{order.number}}';
+
 export default {
   port,
   apiEndpoint,
@@ -118,7 +127,8 @@ export default {
     expireHours: Number(process.env.CONFIRMATION_EXPIRE_HOURS) || 72,
     maxReminders: Number(process.env.CONFIRMATION_MAX_REMINDERS) || 2,
     reminderCooldownMinutes: Number(process.env.CONFIRMATION_REMINDER_COOLDOWN_MINUTES) || 60,
-    sweepIntervalMinutes: Number(process.env.CONFIRMATION_SWEEP_INTERVAL_MINUTES) || 30
+    sweepIntervalMinutes: Number(process.env.CONFIRMATION_SWEEP_INTERVAL_MINUTES) || 30,
+    prefilledTemplate: process.env.PREFILLED_CONFIRMATION_TEMPLATE ?? DEFAULT_PREFILLED_CONFIRMATION_TEMPLATE
   },
   delivery: {
     defaultFee: Number(process.env.DELIVERY_DEFAULT_FEE) || 0,

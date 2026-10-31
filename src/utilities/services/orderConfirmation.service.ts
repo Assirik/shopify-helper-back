@@ -146,36 +146,190 @@ export const CONFIRMABLE_BY_BUTTON = [
   CustomerConfirmationStatus.SMS_ONLY
 ];
 
-// Pre-filled WhatsApp message sent right after the EasySell form:
-// "Je confirme ma commande #1234". Recognised when the text contains "confirm"
-// (case and accent insensitive) and at least one `#<digits>` order reference.
-// A negation (the whole word "pas": "ne … pas", "n'… pas") or a cancellation ("annul…")
-// disqualifies it: such a text follows the regular free-text handling.
-const PREFILLED_CONFIRMATION_KEYWORD = 'confirm';
-const PREFILLED_CONFIRMATION_DISQUALIFIER = /\bpas\b|annul/;
-const ORDER_REFERENCE_PATTERN = /#(\d+)/g;
+// Pre-filled WhatsApp message sent right after the EasySell form. The expected text is
+// configured (`PREFILLED_CONFIRMATION_TEMPLATE`), identical to the EasySell message with its
+// EasySell variables, e.g. "Je confirme ma commande #{{order.number}}". Only the static
+// text is compared, case-insensitively, against the whole message: each `{{…}}` is a
+// capture zone. `{{order.number}}` (required) captures the order number, written `1234`,
+// `#1234` or `##1234` whatever the template writes before it, to look the order up; any
+// other variable captures 1 to 100 characters on a single line, ignored.
+// Both sides are NFC-normalised and stripped of edge spaces and invisible characters;
+// inner spaces and apostrophes are compared as is (exact text).
+// The matcher walks the message once per template part over a bounded set of positions
+// (no regular expression, no backtracking): its cost stays linear in the message length.
+const ORDER_NUMBER_VARIABLE = 'order.number';
+const TEMPLATE_VARIABLE_PATTERN = /\{\{\s*([^{}]*?)\s*\}\}/g;
+export const MAX_PREFILLED_MESSAGE_LENGTH = 500;
+const MAX_VARIABLE_LENGTH = 100;
+const MAX_ORDER_NUMBER_DIGITS = 20;
+const MAX_ORDER_NUMBER_HASHES = 2;
+const MIN_TEMPLATE_LETTERS = 5;
+// Spaces and invisible characters (zero-width, direction marks, BOM) stripped at the edges.
+const EDGE_NOISE_CHAR = /[\s\u200b-\u200f\u202a-\u202e\u2060-\u2064\ufeff]/;
 
-const foldText = (text: string) =>
-  text
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .toLowerCase();
+// Linear edge strip (a `\s+$` regular expression is quadratic on a long run of spaces).
+const stripEdgeNoise = (text: string) => {
+  let start = 0;
+  let end = text.length;
 
-/**
- * Returns the candidate Shopify order names (`#1234`) of a pre-filled confirmation
- * message, in order of appearance, or an empty list when the text is not one.
- */
-export const parsePrefilledConfirmationText = (text?: string | null): string[] => {
-  const folded = text ? foldText(text) : '';
-
-  if (!text || !folded.includes(PREFILLED_CONFIRMATION_KEYWORD) || PREFILLED_CONFIRMATION_DISQUALIFIER.test(folded)) {
-    return [];
+  while (start < end && EDGE_NOISE_CHAR.test(text[start])) {
+    start += 1;
   }
 
-  const names = Array.from(text.matchAll(ORDER_REFERENCE_PATTERN), match => `#${match[1]}`);
+  while (end > start && EDGE_NOISE_CHAR.test(text[end - 1])) {
+    end -= 1;
+  }
 
-  return Array.from(new Set(names));
+  return text.slice(start, end);
 };
+
+const normalizePrefilledText = (text: string) => stripEdgeNoise(text.normalize('NFC')).toLowerCase();
+
+type PrefilledTemplatePart = { kind: 'text'; value: string } | { kind: 'variable' } | { kind: 'orderNumber' };
+
+export type PrefilledConfirmationTemplate = { parts: PrefilledTemplatePart[] } | { error: string };
+
+/** Compiles the configured template into a list of lower-case parts. Never throws. */
+export const compilePrefilledConfirmationTemplate = (template?: string | null): PrefilledConfirmationTemplate => {
+  const lowered = normalizePrefilledText(template ?? '');
+
+  if (!lowered) {
+    return { error: 'Pre-filled confirmation template is empty' };
+  }
+
+  const parts: PrefilledTemplatePart[] = [];
+  let lastIndex = 0;
+
+  const pushText = (value: string) => {
+    if (value) {
+      parts.push({ kind: 'text', value });
+    }
+  };
+
+  for (const match of lowered.matchAll(TEMPLATE_VARIABLE_PATTERN)) {
+    const index = match.index ?? 0;
+    const isOrderNumber = match[1] === ORDER_NUMBER_VARIABLE;
+    // The `#` before the order number is optional in the message, whether the template
+    // writes it or not: it is not part of the fixed text.
+    const staticText = isOrderNumber
+      ? lowered.slice(lastIndex, index).replace(/#+$/, '')
+      : lowered.slice(lastIndex, index);
+
+    // Checked once the `#` is removed: `{{customer.name}}#{{order.number}}` is ambiguous too.
+    if (!staticText && parts.length > 0 && parts[parts.length - 1].kind !== 'text') {
+      return { error: 'Pre-filled confirmation template has two adjacent variables' };
+    }
+
+    pushText(staticText);
+    parts.push({ kind: isOrderNumber ? 'orderNumber' : 'variable' });
+
+    lastIndex = index + match[0].length;
+  }
+
+  pushText(lowered.slice(lastIndex));
+
+  if (!parts.some(part => part.kind === 'orderNumber')) {
+    return { error: `Pre-filled confirmation template has no {{${ORDER_NUMBER_VARIABLE}}} variable` };
+  }
+
+  const staticText = parts.map(part => (part.kind === 'text' ? part.value : '')).join('');
+
+  if ((staticText.match(/\p{L}/gu) ?? []).length < MIN_TEMPLATE_LETTERS) {
+    return { error: `Pre-filled confirmation template needs a fixed text of at least ${MIN_TEMPLATE_LETTERS} letters` };
+  }
+
+  return { parts };
+};
+
+const isDigit = (char: string | undefined) => char !== undefined && char >= '0' && char <= '9';
+
+/**
+ * Returns the order number (digits only) of a message matching the compiled template, or
+ * null when the message does not match it, is too long, or the template is invalid.
+ */
+export const matchPrefilledConfirmationText = (
+  template: PrefilledConfirmationTemplate,
+  text?: string | null
+): string | null => {
+  if ('error' in template || !text) {
+    return null;
+  }
+
+  const message = normalizePrefilledText(text);
+
+  if (!message || message.length > MAX_PREFILLED_MESSAGE_LENGTH) {
+    return null;
+  }
+
+  // Reachable positions in the message, each with the order numbers captured on the way
+  // ('' = none yet). A template quoting the order number twice must quote the same one.
+  let states = new Map<number, Set<string>>([[0, new Set([''])]]);
+
+  for (const part of template.parts) {
+    const next = new Map<number, Set<string>>();
+    const reach = (position: number, number: string) => {
+      const numbers = next.get(position) ?? new Set<string>();
+      numbers.add(number);
+      next.set(position, numbers);
+    };
+
+    for (const [position, numbers] of states) {
+      if (part.kind === 'text') {
+        if (message.startsWith(part.value, position)) {
+          numbers.forEach(number => reach(position + part.value.length, number));
+        }
+      } else if (part.kind === 'variable') {
+        for (let length = 1; length <= MAX_VARIABLE_LENGTH; length += 1) {
+          const char = message[position + length - 1];
+
+          if (char === undefined || char === '\n' || char === '\r') {
+            break;
+          }
+
+          numbers.forEach(number => reach(position + length, number));
+        }
+      } else {
+        for (let hashes = 0; hashes <= MAX_ORDER_NUMBER_HASHES; hashes += 1) {
+          if (hashes > 0 && message[position + hashes - 1] !== '#') {
+            break;
+          }
+
+          const start = position + hashes;
+
+          for (let digits = 1; digits <= MAX_ORDER_NUMBER_DIGITS && isDigit(message[start + digits - 1]); digits += 1) {
+            const captured = message.slice(start, start + digits);
+            numbers.forEach(number => {
+              if (!number || number === captured) {
+                reach(start + digits, captured);
+              }
+            });
+          }
+        }
+      }
+    }
+
+    if (next.size === 0) {
+      return null;
+    }
+
+    states = next;
+  }
+
+  const numbers = states.get(message.length);
+
+  return numbers && numbers.size === 1 ? Array.from(numbers)[0] || null : null;
+};
+
+// Compiled once at startup: an invalid template is logged and disables the confirmation by
+// message (every message then follows the regular free-text handling).
+const prefilledConfirmationTemplate = compilePrefilledConfirmationTemplate(config.confirmation.prefilledTemplate);
+
+if ('error' in prefilledConfirmationTemplate) {
+  log.error(
+    { template: config.confirmation.prefilledTemplate },
+    `${prefilledConfirmationTemplate.error}: confirmation by pre-filled message is disabled`
+  );
+}
 
 /**
  * Single comparison point between a WhatsApp sender and the order phone. Both sides go
@@ -195,10 +349,28 @@ export const isSenderOrderPhone = (sender?: string | null, orderPhoneE164?: stri
 // Shared with the notification worker (defined with the order action capabilities).
 export { TERMINAL_OPERATIONAL_STATUSES };
 
-// Already confirmed, cancelled (here or on Shopify), expired or closed orders are left to
-// the regular inbound-message handling: the pre-filled message never transitions them.
+// An order cancelled by an agent or expired, then re-opened to the helpdesk (late
+// confirmation fallback), is confirmed by an agent only: every automatic write (button,
+// pre-filled message) excludes it. Its reason code does not last (a free text, a reaction,
+// "unreachable" or the SMS fallback overwrite it), so the guard rests on the durable
+// markers `confirmationCancelledAt` / `expiredAt`, never cleared, plus the late_confirm
+// reason. In MongoDB both `null` and `$ne` also match a missing field.
+const AUTO_CONFIRMATION_GUARD = {
+  attentionReasonCode: { $ne: AttentionReasonCode.LATE_CONFIRM },
+  confirmationCancelledAt: null,
+  expiredAt: null
+};
+
+const isClosedByUs = (order: IOrder) =>
+  Boolean(order.confirmationCancelledAt || order.expiredAt) ||
+  order.attentionReasonCode === AttentionReasonCode.LATE_CONFIRM;
+
+// Already confirmed, cancelled (here or on Shopify), expired (even re-opened since) or
+// closed orders are left to the regular inbound-message handling: the pre-filled message
+// never transitions them.
 const acceptsPrefilledConfirmation = (order: IOrder) =>
   CONFIRMABLE_BY_BUTTON.includes(order.customerConfirmationStatus) &&
+  !isClosedByUs(order) &&
   !order.shopifyCancelledAt &&
   !(order.operationalStatus && TERMINAL_OPERATIONAL_STATUSES.includes(order.operationalStatus));
 
@@ -251,7 +423,8 @@ const createOrderEvent = (input: {
 // Atomic confirm shared by the Confirm button and the pre-filled message: only one writer
 // can flip a confirmable status to CONFIRMED, so the confirmed template is enqueued at most
 // once even with concurrent admin/button actions. Returns null when the write did not apply.
-// `extraFilter` adds write-time conditions (pre-filled message only, the button has none).
+// `extraFilter` adds write-time conditions (pre-filled message only). An order cancelled by
+// an agent or expired is never written here, whatever the caller: only an agent confirms it.
 // A write that applied triggers the Meta Purchase (fire-and-forget, never awaited).
 const writeWhatsAppConfirmation = async (
   orderId: string,
@@ -262,7 +435,7 @@ const writeWhatsAppConfirmation = async (
   const lastCustomerMessageText = payload.buttonText || payload.buttonPayload || 'CONFIRM_ORDER';
 
   const confirmed = await Order.findOneAndUpdate(
-    { ...extraFilter, _id: orderId, customerConfirmationStatus: { $in: CONFIRMABLE_BY_BUTTON } },
+    { ...extraFilter, ...AUTO_CONFIRMATION_GUARD, _id: orderId, customerConfirmationStatus: { $in: CONFIRMABLE_BY_BUTTON } },
     {
       $set: {
         customerConfirmationStatus: CustomerConfirmationStatus.CONFIRMED,
@@ -329,6 +502,8 @@ export class OrderConfirmationService {
     }
 
     // Late confirmation on an expired/cancelled order: never auto-confirm, route to helpdesk.
+    // A new press on an order cancelled or expired then re-opened lands here too (the write
+    // above excludes it): it is flagged late_confirm again, never confirmed.
     order.customerConfirmationStatus = CustomerConfirmationStatus.NEEDS_ATTENTION;
     order.needsHelpdeskAttention = true;
     order.lastCustomerMessageAt = now;
@@ -343,7 +518,8 @@ export class OrderConfirmationService {
   }
 
   /**
-   * Handles the pre-filled "Je confirme ma commande #1234" message. Same sender as the
+   * Handles the pre-filled message matching the configured template (e.g. "Je confirme ma
+   * commande #1234"). Same sender as the
    * order phone: confirmed through the exact button path (source `whatsapp_button`).
    * Different sender: no confirmation, the order goes to the helpdesk queue with the
    * `phone_mismatch` reason and a `phone_mismatch` event is recorded for counting.
@@ -353,16 +529,14 @@ export class OrderConfirmationService {
     input: PrefilledConfirmationInput
   ): Promise<PrefilledConfirmationResult> {
     const text = input.text?.trim();
-    const orderNames = parsePrefilledConfirmationText(text);
-    let order: IOrder | null = null;
+    const orderNumber = matchPrefilledConfirmationText(prefilledConfirmationTemplate, text);
 
-    for (const shopifyOrderName of orderNames) {
-      order = await Order.findOne({ shopifyOrderName });
-
-      if (order) {
-        break;
-      }
+    if (!orderNumber) {
+      return { outcome: 'not_applicable' };
     }
+
+    // Shopify order names are stored as `#1234`.
+    const order = await Order.findOne({ shopifyOrderName: `#${orderNumber}` });
 
     if (!order || !acceptsPrefilledConfirmation(order)) {
       return { outcome: 'not_applicable' };
@@ -408,14 +582,16 @@ export class OrderConfirmationService {
     const now = new Date();
     // Conditional write: a concurrent confirmation or cancellation wins and the message
     // then falls back to the regular handling. An order already flagged phone_mismatch is
-    // not written again, so a single phone_mismatch event exists per order. The
+    // not written again, so a single phone_mismatch event exists per order, and an order
+    // cancelled or expired keeps its reason (agent only). The
     // confirmation status is left as is so the pending-order reminders keep running.
     const flagged = await Order.findOneAndUpdate(
       {
         ...PREFILLED_WRITE_GUARD,
+        ...AUTO_CONFIRMATION_GUARD,
         _id: order._id,
         customerConfirmationStatus: { $in: CONFIRMABLE_BY_BUTTON },
-        attentionReasonCode: { $ne: AttentionReasonCode.PHONE_MISMATCH }
+        attentionReasonCode: { $nin: [AttentionReasonCode.PHONE_MISMATCH, AttentionReasonCode.LATE_CONFIRM] }
       },
       {
         $set: {
