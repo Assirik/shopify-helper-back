@@ -416,6 +416,7 @@ describe('pre-filled WhatsApp confirmation (C5.6b)', () => {
       expect(update.mock.calls[0]?.[0]).toEqual({
         _id: orderId.toString(),
         customerConfirmationStatus: { $in: CONFIRMABLE_BY_BUTTON },
+        attentionReasonCode: { $ne: AttentionReasonCode.LATE_CONFIRM },
         shopifyCancelledAt: null,
         operationalStatus: { $nin: [OrderOperationalStatus.DELIVERED, OrderOperationalStatus.RETURNED] }
       });
@@ -458,7 +459,7 @@ describe('pre-filled WhatsApp confirmation (C5.6b)', () => {
     expect(update.mock.calls[0]?.[0]).toEqual({
       _id: orderId,
       customerConfirmationStatus: { $in: CONFIRMABLE_BY_BUTTON },
-      attentionReasonCode: { $ne: AttentionReasonCode.PHONE_MISMATCH },
+      attentionReasonCode: { $nin: [AttentionReasonCode.PHONE_MISMATCH, AttentionReasonCode.LATE_CONFIRM] },
       shopifyCancelledAt: null,
       operationalStatus: { $nin: [OrderOperationalStatus.DELIVERED, OrderOperationalStatus.RETURNED] }
     });
@@ -588,11 +589,11 @@ describe('pre-filled WhatsApp confirmation (C5.6b)', () => {
     const state: Record<string, unknown> = pendingOrder();
     mockFindOne({ '#1234': state });
     jest.spyOn(Order, 'findOneAndUpdate').mockImplementation(((
-      filter: { attentionReasonCode: { $ne: string } },
+      filter: { attentionReasonCode: { $nin: unknown[] } },
       update: { $set: Record<string, unknown> }
     ) =>
       Promise.resolve().then(() => {
-        if (state.attentionReasonCode === filter.attentionReasonCode.$ne) {
+        if (filter.attentionReasonCode.$nin.includes(state.attentionReasonCode)) {
           return null;
         }
         Object.assign(state, update.$set);
@@ -735,7 +736,7 @@ describe('pre-filled WhatsApp confirmation (C5.6b)', () => {
     });
   });
 
-  it('keeps the Confirm button write filter free of the pre-filled guard', async () => {
+  it('keeps the Confirm button write filter free of the pre-filled guard (late_confirm excluded)', async () => {
     const update = jest.spyOn(Order, 'findOneAndUpdate').mockResolvedValue({ _id: orderId } as never);
     jest.spyOn(OrderEvent, 'create').mockResolvedValue({} as never);
     jest.spyOn(Message, 'create').mockResolvedValue({ _id: new Types.ObjectId() } as never);
@@ -747,7 +748,8 @@ describe('pre-filled WhatsApp confirmation (C5.6b)', () => {
 
     expect(update.mock.calls[0]?.[0]).toEqual({
       _id: orderId.toString(),
-      customerConfirmationStatus: { $in: CONFIRMABLE_BY_BUTTON }
+      customerConfirmationStatus: { $in: CONFIRMABLE_BY_BUTTON },
+      attentionReasonCode: { $ne: AttentionReasonCode.LATE_CONFIRM }
     });
   });
 
@@ -875,6 +877,234 @@ describe('Meta Purchase trigger on confirmation (C5.5)', () => {
       status: 409
     });
     expect(triggerCapiPurchase).not.toHaveBeenCalled();
+  });
+});
+
+describe('late confirmation is confirmed by an agent only (C5.16)', () => {
+  const orderId = new Types.ObjectId();
+  const orderPhone = '+221776986780';
+  const prefilledText = 'Je confirme ma commande #1234';
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  // Evaluates the operators the service writes with, using MongoDB semantics: `null`
+  // and `$nin` / `$ne` also match a missing field.
+  const matchesFilter = (doc: Record<string, unknown>, filter: Record<string, unknown>) =>
+    Object.entries(filter).every(([key, condition]) => {
+      const value = doc[key];
+
+      if (condition === null) {
+        return value === null || value === undefined;
+      }
+
+      if (condition && typeof condition === 'object' && !(condition instanceof Types.ObjectId)) {
+        const ops = condition as { $in?: unknown[]; $nin?: unknown[]; $ne?: unknown };
+
+        if (ops.$in) {
+          return ops.$in.includes(value);
+        }
+
+        if (ops.$nin) {
+          return !ops.$nin.includes(value ?? null);
+        }
+
+        return value !== ops.$ne;
+      }
+
+      return String(value) === String(condition);
+    });
+
+  // In-memory order honouring the conditional writes and `save()`, as MongoDB would.
+  const mockOrderStore = (state: Record<string, unknown>) => {
+    jest.spyOn(Order, 'findOne').mockImplementation(((filter: { shopifyOrderName?: string }) =>
+      Promise.resolve(filter.shopifyOrderName === state.shopifyOrderName ? { ...state } : null)) as never);
+    jest.spyOn(Order, 'findById').mockImplementation((() => {
+      const doc: Record<string, unknown> = { ...state };
+      doc.save = async () => {
+        const { save: _save, ...fields } = doc;
+        Object.assign(state, fields);
+      };
+      return Promise.resolve(doc);
+    }) as never);
+    const update = jest.spyOn(Order, 'findOneAndUpdate').mockImplementation(((
+      filter: Record<string, unknown>,
+      change: { $set: Record<string, unknown>; $unset?: Record<string, unknown> }
+    ) =>
+      Promise.resolve().then(() => {
+        if (!matchesFilter(state, filter)) {
+          return null;
+        }
+        Object.assign(state, change.$set);
+        for (const key of Object.keys(change.$unset ?? {})) {
+          delete state[key];
+        }
+        return { ...state };
+      })) as never);
+    const createEvent = jest.spyOn(OrderEvent, 'create').mockResolvedValue({} as never);
+    const createMessage = jest.spyOn(Message, 'create').mockResolvedValue({ _id: new Types.ObjectId() } as never);
+
+    return { update, createEvent, createMessage };
+  };
+
+  const closedOrder = (customerConfirmationStatus: CustomerConfirmationStatus): Record<string, unknown> => ({
+    _id: orderId,
+    shopifyOrderName: '#1234',
+    customerPhoneE164: orderPhone,
+    customerConfirmationStatus
+  });
+
+  const pressConfirm = (buttonText = 'Confirmer') =>
+    OrderConfirmationService.confirmByWhatsAppButton(orderId.toString(), {
+      buttonPayload: `CONFIRM_ORDER:${orderId.toString()}`,
+      buttonText
+    });
+
+  describe.each([
+    ['cancelled by an agent', CustomerConfirmationStatus.CANCELLED],
+    ['expired', CustomerConfirmationStatus.EXPIRED]
+  ])('order %s', (_label, closedStatus) => {
+    it('routes the first press to the helpdesk as late_confirm without confirming', async () => {
+      const state = closedOrder(closedStatus);
+      const { createEvent, createMessage } = mockOrderStore(state);
+
+      const result = await pressConfirm();
+
+      expect(result).toEqual(expect.objectContaining({ alreadyConfirmed: false, needsAttention: true }));
+      expect(state).toEqual(
+        expect.objectContaining({
+          customerConfirmationStatus: CustomerConfirmationStatus.NEEDS_ATTENTION,
+          attentionReasonCode: AttentionReasonCode.LATE_CONFIRM,
+          needsHelpdeskAttention: true
+        })
+      );
+      expect(triggerCapiPurchase).not.toHaveBeenCalled();
+      expect(createEvent).not.toHaveBeenCalled();
+      expect(createMessage).not.toHaveBeenCalled();
+    });
+
+    it('does not confirm on a second press: only the last customer message is refreshed', async () => {
+      const state = closedOrder(closedStatus);
+      const { update, createEvent, createMessage } = mockOrderStore(state);
+
+      await pressConfirm();
+      const firstAttentionAt = state.attentionRequiredAt;
+      const result = await pressConfirm('Confirmer encore');
+
+      expect(update).toHaveBeenCalledTimes(2);
+      expect(update.mock.calls[1]?.[0]).toEqual(
+        expect.objectContaining({ attentionReasonCode: { $ne: AttentionReasonCode.LATE_CONFIRM } })
+      );
+      expect(result).toEqual(expect.objectContaining({ alreadyConfirmed: false, needsAttention: true }));
+      expect(state).toEqual(
+        expect.objectContaining({
+          customerConfirmationStatus: CustomerConfirmationStatus.NEEDS_ATTENTION,
+          attentionReasonCode: AttentionReasonCode.LATE_CONFIRM,
+          needsHelpdeskAttention: true,
+          lastCustomerMessageText: 'Confirmer encore'
+        })
+      );
+      expect(firstAttentionAt).toBeInstanceOf(Date);
+      expect(state.operationalStatus).toBeUndefined();
+      expect(state.confirmedAt).toBeUndefined();
+      expect(triggerCapiPurchase).not.toHaveBeenCalled();
+      expect(createEvent).not.toHaveBeenCalled();
+      expect(createMessage).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['the order phone', '221776986780'],
+      ['another phone', '221771112233']
+    ])('leaves a pre-filled message from %s after the first press to the regular handling', async (_from, from) => {
+      const state = closedOrder(closedStatus);
+      const { update, createEvent, createMessage } = mockOrderStore(state);
+
+      await pressConfirm();
+      const afterFirstPress = { ...state };
+      const result = await OrderConfirmationService.confirmByPrefilledMessage({ from, text: prefilledText, waMessageId: 'wamid.late' });
+
+      expect(result).toEqual({ outcome: 'not_applicable' });
+      expect(update).toHaveBeenCalledTimes(1);
+      expect(state).toEqual(afterFirstPress);
+      expect(triggerCapiPurchase).not.toHaveBeenCalled();
+      expect(createEvent).not.toHaveBeenCalled();
+      expect(createMessage).not.toHaveBeenCalled();
+    });
+
+    it('lets an agent confirm it', async () => {
+      const state = closedOrder(closedStatus);
+      const { createEvent, createMessage } = mockOrderStore(state);
+
+      await pressConfirm();
+      await OrderConfirmationService.confirmByAdmin(orderId.toString(), undefined, ConfirmationSource.ADMIN);
+
+      expect(state.customerConfirmationStatus).toBe(CustomerConfirmationStatus.CONFIRMED);
+      expect(state.operationalStatus).toBe(OrderOperationalStatus.TO_DELIVER);
+      expect(state.attentionReasonCode).toBeUndefined();
+      expect(triggerCapiPurchase).toHaveBeenCalledTimes(1);
+      expect(createEvent).toHaveBeenCalledTimes(1);
+      expect(createMessage).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it('never writes a late_confirm order flagged between the read and the pre-filled write', async () => {
+    // Stale read: still pending when looked up, late_confirm when written.
+    const state = closedOrder(CustomerConfirmationStatus.NEEDS_ATTENTION);
+    state.attentionReasonCode = AttentionReasonCode.LATE_CONFIRM;
+    const { update, createEvent, createMessage } = mockOrderStore(state);
+    jest.spyOn(Order, 'findOne').mockResolvedValue(closedOrder(CustomerConfirmationStatus.PENDING) as never);
+    const before = { ...state };
+
+    for (const from of ['221776986780', '221771112233']) {
+      const result = await OrderConfirmationService.confirmByPrefilledMessage({ from, text: prefilledText });
+
+      expect(result).toEqual({ outcome: 'not_applicable' });
+    }
+
+    expect(update).toHaveBeenCalledTimes(2);
+    expect(state).toEqual(before);
+    expect(triggerCapiPurchase).not.toHaveBeenCalled();
+    expect(createEvent).not.toHaveBeenCalled();
+    expect(createMessage).not.toHaveBeenCalled();
+  });
+
+  describe('other confirmable orders are unchanged', () => {
+    it.each([
+      ['pending', { customerConfirmationStatus: CustomerConfirmationStatus.PENDING }],
+      [
+        'needs_attention for a free text',
+        { customerConfirmationStatus: CustomerConfirmationStatus.NEEDS_ATTENTION, attentionReasonCode: AttentionReasonCode.FREE_TEXT }
+      ]
+    ])('confirms a %s order on the button and on the pre-filled message', async (_label, fields) => {
+      for (const confirm of [() => pressConfirm(), () => OrderConfirmationService.confirmByPrefilledMessage({ from: '221776986780', text: prefilledText })]) {
+        const state: Record<string, unknown> = { ...closedOrder(CustomerConfirmationStatus.PENDING), ...fields };
+        mockOrderStore(state);
+
+        await confirm();
+
+        expect(state.customerConfirmationStatus).toBe(CustomerConfirmationStatus.CONFIRMED);
+        expect(state.operationalStatus).toBe(OrderOperationalStatus.TO_DELIVER);
+        expect(triggerCapiPurchase).toHaveBeenCalledTimes(1);
+        jest.restoreAllMocks();
+        jest.mocked(triggerCapiPurchase).mockClear();
+      }
+    });
+
+    it('lets an agent confirm a phone_mismatch order', async () => {
+      const state: Record<string, unknown> = {
+        ...closedOrder(CustomerConfirmationStatus.PENDING),
+        attentionReasonCode: AttentionReasonCode.PHONE_MISMATCH,
+        needsHelpdeskAttention: true
+      };
+      mockOrderStore(state);
+
+      await OrderConfirmationService.confirmByAdmin(orderId.toString());
+
+      expect(state.customerConfirmationStatus).toBe(CustomerConfirmationStatus.CONFIRMED);
+      expect(state.attentionReasonCode).toBeUndefined();
+      expect(triggerCapiPurchase).toHaveBeenCalledTimes(1);
+    });
   });
 });
 

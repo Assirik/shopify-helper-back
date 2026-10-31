@@ -195,10 +195,17 @@ export const isSenderOrderPhone = (sender?: string | null, orderPhoneE164?: stri
 // Shared with the notification worker (defined with the order action capabilities).
 export { TERMINAL_OPERATIONAL_STATUSES };
 
-// Already confirmed, cancelled (here or on Shopify), expired or closed orders are left to
-// the regular inbound-message handling: the pre-filled message never transitions them.
+// A late confirmation (cancelled or expired order re-opened to the helpdesk by the button
+// fallback) is confirmed by an agent only: every automatic write (button, pre-filled
+// message) excludes it. `$ne` also matches a missing field.
+const NOT_LATE_CONFIRM = { attentionReasonCode: { $ne: AttentionReasonCode.LATE_CONFIRM } };
+
+// Already confirmed, cancelled (here or on Shopify), expired, late-confirmed or closed
+// orders are left to the regular inbound-message handling: the pre-filled message never
+// transitions them.
 const acceptsPrefilledConfirmation = (order: IOrder) =>
   CONFIRMABLE_BY_BUTTON.includes(order.customerConfirmationStatus) &&
+  order.attentionReasonCode !== AttentionReasonCode.LATE_CONFIRM &&
   !order.shopifyCancelledAt &&
   !(order.operationalStatus && TERMINAL_OPERATIONAL_STATUSES.includes(order.operationalStatus));
 
@@ -251,7 +258,8 @@ const createOrderEvent = (input: {
 // Atomic confirm shared by the Confirm button and the pre-filled message: only one writer
 // can flip a confirmable status to CONFIRMED, so the confirmed template is enqueued at most
 // once even with concurrent admin/button actions. Returns null when the write did not apply.
-// `extraFilter` adds write-time conditions (pre-filled message only, the button has none).
+// `extraFilter` adds write-time conditions (pre-filled message only). A late confirmation
+// is never written here, whatever the caller: only an agent confirms it.
 // A write that applied triggers the Meta Purchase (fire-and-forget, never awaited).
 const writeWhatsAppConfirmation = async (
   orderId: string,
@@ -262,7 +270,7 @@ const writeWhatsAppConfirmation = async (
   const lastCustomerMessageText = payload.buttonText || payload.buttonPayload || 'CONFIRM_ORDER';
 
   const confirmed = await Order.findOneAndUpdate(
-    { ...extraFilter, _id: orderId, customerConfirmationStatus: { $in: CONFIRMABLE_BY_BUTTON } },
+    { ...extraFilter, ...NOT_LATE_CONFIRM, _id: orderId, customerConfirmationStatus: { $in: CONFIRMABLE_BY_BUTTON } },
     {
       $set: {
         customerConfirmationStatus: CustomerConfirmationStatus.CONFIRMED,
@@ -329,6 +337,8 @@ export class OrderConfirmationService {
     }
 
     // Late confirmation on an expired/cancelled order: never auto-confirm, route to helpdesk.
+    // A new press on an order already flagged late_confirm lands here too (the write above
+    // excludes it): only the last customer message is refreshed.
     order.customerConfirmationStatus = CustomerConfirmationStatus.NEEDS_ATTENTION;
     order.needsHelpdeskAttention = true;
     order.lastCustomerMessageAt = now;
@@ -408,14 +418,15 @@ export class OrderConfirmationService {
     const now = new Date();
     // Conditional write: a concurrent confirmation or cancellation wins and the message
     // then falls back to the regular handling. An order already flagged phone_mismatch is
-    // not written again, so a single phone_mismatch event exists per order. The
+    // not written again, so a single phone_mismatch event exists per order, and a late
+    // confirmation keeps its reason (agent only). The
     // confirmation status is left as is so the pending-order reminders keep running.
     const flagged = await Order.findOneAndUpdate(
       {
         ...PREFILLED_WRITE_GUARD,
         _id: order._id,
         customerConfirmationStatus: { $in: CONFIRMABLE_BY_BUTTON },
-        attentionReasonCode: { $ne: AttentionReasonCode.PHONE_MISMATCH }
+        attentionReasonCode: { $nin: [AttentionReasonCode.PHONE_MISMATCH, AttentionReasonCode.LATE_CONFIRM] }
       },
       {
         $set: {
