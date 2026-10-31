@@ -82,6 +82,25 @@ describe('WhatsApp webhook: pre-filled confirmation (C5.6b)', () => {
 
   const inboundEvent = () => createInbound.mock.calls[0]?.[0] as Record<string, unknown>;
 
+  // The regular free-text handling: a single write, conditional on a not-yet-final status.
+  const expectFreeTextDowngrade = (update: ReturnType<typeof jest.spyOn>) => {
+    expect(update).toHaveBeenCalledTimes(1);
+    expect(update).toHaveBeenCalledWith(
+      {
+        _id: orderId,
+        customerConfirmationStatus: {
+          $nin: [CustomerConfirmationStatus.CONFIRMED, CustomerConfirmationStatus.CANCELLED, CustomerConfirmationStatus.EXPIRED]
+        }
+      },
+      {
+        $set: expect.objectContaining({
+          attentionReasonCode: AttentionReasonCode.FREE_TEXT,
+          customerConfirmationStatus: CustomerConfirmationStatus.NEEDS_ATTENTION
+        })
+      }
+    );
+  };
+
   it.each(['221776986780', '+221776986780', '776986780'])(
     'confirms with source whatsapp_button when the sender %p is the order phone',
     async from => {
@@ -176,7 +195,7 @@ describe('WhatsApp webhook: pre-filled confirmation (C5.6b)', () => {
     ['a cancellation', "je confirme l'annulation de #1234"]
   ])('keeps the regular free-text handling for %s', async (_label, body) => {
     mockOrderLookups(order);
-    const update = jest.spyOn(Order, 'findOneAndUpdate');
+    const update = jest.spyOn(Order, 'findOneAndUpdate').mockResolvedValue({ _id: orderId } as never);
     const freeText = jest.spyOn(Order, 'findByIdAndUpdate').mockResolvedValue({} as never);
     const createEvent = jest.spyOn(OrderEvent, 'create');
     const req = webhookRequest(textMessage('221776986780', body));
@@ -184,14 +203,10 @@ describe('WhatsApp webhook: pre-filled confirmation (C5.6b)', () => {
 
     await WhatsAppWebhookController.receive(req, res);
 
-    expect(update).not.toHaveBeenCalled();
+    // Only the conditional free-text downgrade is written, never a confirmation.
+    expectFreeTextDowngrade(update);
+    expect(freeText).not.toHaveBeenCalled();
     expect(createEvent).not.toHaveBeenCalled();
-    expect(freeText).toHaveBeenCalledWith(orderId, {
-      $set: expect.objectContaining({
-        attentionReasonCode: AttentionReasonCode.FREE_TEXT,
-        customerConfirmationStatus: CustomerConfirmationStatus.NEEDS_ATTENTION
-      })
-    });
     expect(forward).toHaveBeenCalledWith(req.body);
   });
 
@@ -249,7 +264,7 @@ describe('WhatsApp webhook: pre-filled confirmation (C5.6b)', () => {
 
       return { sort: () => Promise.resolve(order) };
     }) as never);
-    const update = jest.spyOn(Order, 'findOneAndUpdate');
+    const update = jest.spyOn(Order, 'findOneAndUpdate').mockResolvedValue({ _id: orderId } as never);
     const freeText = jest.spyOn(Order, 'findByIdAndUpdate').mockResolvedValue({} as never);
     jest.spyOn(log, 'error').mockImplementation((() => undefined) as never);
     const req = webhookRequest(textMessage('221776986780', 'Je confirme ma commande #1234'));
@@ -258,10 +273,8 @@ describe('WhatsApp webhook: pre-filled confirmation (C5.6b)', () => {
     await WhatsAppWebhookController.receive(req, res);
 
     expect(status).toHaveBeenCalledWith(200);
-    expect(update).not.toHaveBeenCalled();
-    expect(freeText).toHaveBeenCalledWith(orderId, {
-      $set: expect.objectContaining({ attentionReasonCode: AttentionReasonCode.FREE_TEXT })
-    });
+    expectFreeTextDowngrade(update);
+    expect(freeText).not.toHaveBeenCalled();
     expect(inboundEvent()).toEqual(
       expect.objectContaining({ orderId, processedStatus: InboundWhatsAppEventStatus.NEEDS_ATTENTION })
     );
@@ -527,5 +540,53 @@ describe('WhatsApp webhook: an order cancelled or expired is confirmed by an age
     expect(state.confirmationSource).toBe(ConfirmationSource.WHATSAPP_BUTTON);
     expect(triggerCapiPurchase).toHaveBeenCalledTimes(1);
     expect(enqueueOrderConfirmed).toHaveBeenCalledTimes(1);
+  });
+
+  // C5.24: a free text read while the order was still pending must not demote a confirmation
+  // written in between (by the button or an agent): the sale keeps its Purchase.
+  it.each([
+    ['the button', ConfirmationSource.WHATSAPP_BUTTON],
+    ['an agent phone call', ConfirmationSource.PHONE_CALL]
+  ])('keeps an order confirmed by %s between the free-text read and its write', async (_label, source) => {
+    const stale = { ...state };
+    Object.assign(state, {
+      customerConfirmationStatus: CustomerConfirmationStatus.CONFIRMED,
+      confirmationSource: source,
+      confirmedAt: new Date()
+    });
+    jest.mocked(Order.findOne).mockImplementation(((filter: Record<string, unknown>) => {
+      if ('shopifyOrderName' in filter) {
+        return Promise.resolve(null);
+      }
+
+      return { sort: () => Promise.resolve({ ...stale }) };
+    }) as never);
+
+    await freeText();
+
+    expect(state).toEqual(
+      expect.objectContaining({
+        customerConfirmationStatus: CustomerConfirmationStatus.CONFIRMED,
+        confirmationSource: source,
+        attentionReasonCode: AttentionReasonCode.FREE_TEXT,
+        needsHelpdeskAttention: true,
+        lastCustomerMessageText: 'Bonjour, je veux toujours ma commande'
+      })
+    );
+    expect(InboundWhatsAppEvent.create).toHaveBeenCalledWith(
+      expect.objectContaining({ orderId, processedStatus: InboundWhatsAppEventStatus.NEEDS_ATTENTION })
+    );
+  });
+
+  it('still moves a pending order to needs_attention on a free text (no race)', async () => {
+    await freeText();
+
+    expect(state).toEqual(
+      expect.objectContaining({
+        customerConfirmationStatus: CustomerConfirmationStatus.NEEDS_ATTENTION,
+        attentionReasonCode: AttentionReasonCode.FREE_TEXT,
+        needsHelpdeskAttention: true
+      })
+    );
   });
 });

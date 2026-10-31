@@ -56,6 +56,7 @@ const buildOrder = (overrides: Record<string, unknown> = {}) => ({
   shopifyOrderId: '1234567890',
   isTest: false,
   capiPurchaseStatus: CapiPurchaseStatus.PENDING,
+  customerConfirmationStatus: CustomerConfirmationStatus.CONFIRMED,
   confirmedAt: new Date(Date.now() - HOUR),
   capiFbp: 'fb.1.1700000000000.123',
   capiClientUserAgent: 'Mozilla/5.0',
@@ -196,6 +197,75 @@ describe('capi purchase worker', () => {
   it('still sends an order cancelled by an agent but delivered anyway (a real sale)', async () => {
     stubOrder(
       buildOrder({ customerConfirmationStatus: CustomerConfirmationStatus.CANCELLED, deliveredAt: new Date() })
+    );
+    mockedSend.mockResolvedValueOnce(sendResult);
+    spyUpdate({ _id: orderId });
+    jest.spyOn(OrderEvent, 'create').mockResolvedValue({} as never);
+
+    await processCapiPurchaseJob(buildJob());
+
+    expect(mockedSend).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ['reopened needs_attention', CustomerConfirmationStatus.NEEDS_ATTENTION],
+    ['pending', CustomerConfirmationStatus.PENDING],
+    ['sms_only', CustomerConfirmationStatus.SMS_ONLY],
+    ['expired', CustomerConfirmationStatus.EXPIRED]
+  ])('skips with reason cancelled an order neither confirmed nor delivered (%s)', async (_label, status) => {
+    stubOrder(buildOrder({ customerConfirmationStatus: status, confirmedAt: undefined }));
+    const update = spyUpdate({ _id: orderId });
+    const createEvent = jest.spyOn(OrderEvent, 'create').mockResolvedValue({} as never);
+
+    await processCapiPurchaseJob(buildJob());
+
+    expect(mockedSend).not.toHaveBeenCalled();
+    expect(mockedPost).not.toHaveBeenCalled();
+    expect(update).toHaveBeenCalledWith(
+      { _id: orderId, capiPurchaseStatus: CapiPurchaseStatus.PENDING },
+      { $set: { capiPurchaseStatus: CapiPurchaseStatus.SKIPPED } },
+      expect.anything()
+    );
+    expect(createEvent).toHaveBeenCalledWith({
+      orderId,
+      type: OrderEventType.CAPI_PURCHASE_SKIPPED,
+      metadata: { reason: 'cancelled' }
+    });
+  });
+
+  it('does not send an order cancelled then reopened by a customer message while the send was delayed', async () => {
+    const update = spyUpdate({ _id: orderId });
+    const createEvent = jest.spyOn(OrderEvent, 'create').mockResolvedValue({} as never);
+    const findById = jest.spyOn(Order, 'findById');
+
+    // First attempt: confirmed order, Meta answers 5xx, the job is retried later.
+    findById.mockResolvedValueOnce(buildOrder() as never);
+    mockedSend.mockRejectedValueOnce(new MetaCapiError('Meta 503', { status: 503, retryable: true }));
+    await expect(processCapiPurchaseJob(buildJob(0))).rejects.toThrow();
+
+    // The agent cancels, the customer presses the button: the order is reopened (late_confirm).
+    findById.mockResolvedValueOnce(
+      buildOrder({ customerConfirmationStatus: CustomerConfirmationStatus.NEEDS_ATTENTION }) as never
+    );
+    await processCapiPurchaseJob(buildJob(1));
+
+    expect(mockedSend).toHaveBeenCalledTimes(1);
+    expect(mockedPost).not.toHaveBeenCalled();
+    expect(update).toHaveBeenCalledTimes(1);
+    expect(createEvent).toHaveBeenCalledWith({
+      orderId,
+      type: OrderEventType.CAPI_PURCHASE_SKIPPED,
+      metadata: { reason: 'cancelled' }
+    });
+  });
+
+  it('still sends an order in needs_attention that was delivered (fallback without confirmation)', async () => {
+    stubOrder(
+      buildOrder({
+        customerConfirmationStatus: CustomerConfirmationStatus.NEEDS_ATTENTION,
+        confirmedAt: undefined,
+        deliveredAt: new Date()
+      })
     );
     mockedSend.mockResolvedValueOnce(sendResult);
     spyUpdate({ _id: orderId });
@@ -445,6 +515,18 @@ describe('capi purchase worker', () => {
       expect.anything()
     );
     expect(createEvent).not.toHaveBeenCalled();
+  });
+
+  it('keeps the order of the skip reasons', () => {
+    expect(getSkipReason(buildOrder({ isTest: true, customerConfirmationStatus: CustomerConfirmationStatus.PENDING }) as never)).toBe(
+      'test'
+    );
+
+    config.metaCapi.enabled = false;
+    expect(
+      getSkipReason(buildOrder({ customerConfirmationStatus: CustomerConfirmationStatus.NEEDS_ATTENTION }) as never)
+    ).toBe('cancelled');
+    expect(getSkipReason(buildOrder() as never)).toBe('disabled');
   });
 
   it('applies the 7 days minus 1 hour limit strictly', () => {

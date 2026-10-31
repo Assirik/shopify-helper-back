@@ -1,8 +1,10 @@
-import { describe, expect, it } from '@jest/globals';
+import { describe, expect, it, jest } from '@jest/globals';
 import {
   buildMetaCapiConfig,
   DEFAULT_FX_XOF_EUR,
+  DEFAULT_PREFILLED_CONFIRMATION_TEMPLATE,
   parseInitialConfirmationRequestDelayMinutes,
+  parsePrefilledConfirmationTemplate,
   parseSessionCaptureOrigins
 } from './env.config';
 import { checkCapiStartup, describeCapiStatus } from './capiStartup';
@@ -154,5 +156,35 @@ describe('parseInitialConfirmationRequestDelayMinutes', () => {
   it('keeps a longer delay', () => {
     expect(parseInitialConfirmationRequestDelayMinutes('5')).toBe(5);
     expect(parseInitialConfirmationRequestDelayMinutes('10')).toBe(10);
+  });
+});
+
+describe('parsePrefilledConfirmationTemplate', () => {
+  it.each([undefined, '', '   ', ' \t\n '])('falls back to the default template for %p', value => {
+    expect(parsePrefilledConfirmationTemplate(value)).toBe(DEFAULT_PREFILLED_CONFIRMATION_TEMPLATE);
+  });
+
+  it.each(['', '   '])('is wired into the loaded config: %p gives the default template', value => {
+    const previous = process.env.PREFILLED_CONFIRMATION_TEMPLATE;
+    process.env.PREFILLED_CONFIRMATION_TEMPLATE = value;
+
+    try {
+      jest.isolateModules(() => {
+        const { default: loaded } = require('./env.config') as typeof import('./env.config');
+        expect(loaded.confirmation.prefilledTemplate).toBe(DEFAULT_PREFILLED_CONFIRMATION_TEMPLATE);
+      });
+    } finally {
+      if (previous === undefined) {
+        delete process.env.PREFILLED_CONFIRMATION_TEMPLATE;
+      } else {
+        process.env.PREFILLED_CONFIRMATION_TEMPLATE = previous;
+      }
+    }
+  });
+
+  it('keeps a non-empty template as is, without trimming it', () => {
+    expect(parsePrefilledConfirmationTemplate(' Bonjour, je confirme #{{order.number}} ')).toBe(
+      ' Bonjour, je confirme #{{order.number}} '
+    );
   });
 });

@@ -59,10 +59,15 @@ export const parseInitialConfirmationRequestDelayMinutes = (value?: string) => {
 // with its EasySell variables. Template and message are compared in lower case, NFC, edge
 // spaces and invisible characters removed; the fixed text is compared as is. Required
 // {{order.number}}: `1234`, `#1234` or `##1234`. Any other variable: 1 to 100 characters on
-// a single line. Message over 500 characters: no match. Absent: this default. Invalid (empty,
-// without {{order.number}}, fixed text under 5 letters, adjacent variables): logged at
+// a single line. Message over 500 characters: no match. Absent, empty or blank: this default.
+// Invalid (without {{order.number}}, fixed text under 5 letters, adjacent variables): logged at
 // startup and the confirmation by message is disabled.
 export const DEFAULT_PREFILLED_CONFIRMATION_TEMPLATE = 'Je confirme ma commande #{{order.number}}';
+
+// An empty or blank variable is treated as absent (default template). A non-empty value is
+// kept as is: the comparison rule handles its edges.
+export const parsePrefilledConfirmationTemplate = (value?: string) =>
+  value && value.trim() ? value : DEFAULT_PREFILLED_CONFIRMATION_TEMPLATE;
 
 export default {
   port,
@@ -128,7 +133,7 @@ export default {
     maxReminders: Number(process.env.CONFIRMATION_MAX_REMINDERS) || 2,
     reminderCooldownMinutes: Number(process.env.CONFIRMATION_REMINDER_COOLDOWN_MINUTES) || 60,
     sweepIntervalMinutes: Number(process.env.CONFIRMATION_SWEEP_INTERVAL_MINUTES) || 30,
-    prefilledTemplate: process.env.PREFILLED_CONFIRMATION_TEMPLATE ?? DEFAULT_PREFILLED_CONFIRMATION_TEMPLATE
+    prefilledTemplate: parsePrefilledConfirmationTemplate(process.env.PREFILLED_CONFIRMATION_TEMPLATE)
   },
   delivery: {
     defaultFee: Number(process.env.DELIVERY_DEFAULT_FEE) || 0,

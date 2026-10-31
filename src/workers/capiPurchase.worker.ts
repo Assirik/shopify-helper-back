@@ -58,10 +58,12 @@ export const getSkipReason = (order: IOrder, now: Date = new Date()): CapiSkipRe
     return 'cancelled';
   }
 
-  // Cancelled by an agent while the send was delayed (Meta 5xx, Redis) before the retry.
-  // A delivered order is a real sale even if it was cancelled on the way (cancelByAdmin
-  // leaves operationalStatus untouched): it is still sent.
-  if (order.customerConfirmationStatus === CustomerConfirmationStatus.CANCELLED && !order.deliveredAt) {
+  // A Purchase is only sent for a confirmed or delivered order. While the send was delayed
+  // (Meta 5xx, Redis) an agent may have cancelled the order, and a later customer message
+  // may even have reopened it (needs_attention): neither is a sale, so the retry is skipped.
+  // A delivered order is a real sale whatever its confirmation status (cancelByAdmin leaves
+  // operationalStatus untouched, delivery without confirmation is the fallback): it is sent.
+  if (order.customerConfirmationStatus !== CustomerConfirmationStatus.CONFIRMED && !order.deliveredAt) {
     return 'cancelled';
   }
 
