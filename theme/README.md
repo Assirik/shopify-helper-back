@@ -29,8 +29,9 @@ avale toutes ses erreurs.
 
 1. Ouvrir la boutique (idéalement avec `?fbclid=TEST` à la fin de l'adresse), puis les outils
    de développement du navigateur, onglet **Réseau**.
-2. Saisir un numéro d'au moins 8 chiffres dans le formulaire de commande et attendre une
-   seconde : une requête `POST` vers `/api/session` apparaît, avec la réponse `204`.
+2. Saisir un numéro sénégalais complet (9 chiffres, ex. `77 123 45 67`, avec ou sans `+221`)
+   dans le formulaire de commande et attendre une seconde : une requête `POST` vers
+   `/api/session` apparaît, avec la réponse `204`. Un numéro plus court n'est pas envoyé.
 3. Dans le corps de la requête : `phone`, `fbp`, `fbc`, `fbclid`, `userAgent`, `pageUrl`.
    Avec `?fbclid=TEST`, `fbc` vaut `fb.1.<horodatage>.TEST`.
 4. Ressaisir le même numéro n'envoie rien de nouveau ; envoyer le formulaire provoque toujours

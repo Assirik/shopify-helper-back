@@ -10,7 +10,7 @@
   var ENDPOINT = 'https://REMPLACER-PAR-LE-DOMAINE-API/api/session';
 
   var PAUSE_MS = 800; // délai sans frappe avant envoi
-  var MIN_DIGITS = 8; // nombre minimal de chiffres pour envoyer
+  var MIN_DIGITS = 9; // un mobile sénégalais a 9 chiffres (sans indicatif) : en dessous, l'API refuse
   var COOKIE_MAX_AGE = 90 * 24 * 60 * 60; // 90 jours, en secondes
 
   // Du plus précis au plus large : le premier qui trouve un champ gagne.
