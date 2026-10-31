@@ -146,36 +146,93 @@ export const CONFIRMABLE_BY_BUTTON = [
   CustomerConfirmationStatus.SMS_ONLY
 ];
 
-// Pre-filled WhatsApp message sent right after the EasySell form:
-// "Je confirme ma commande #1234". Recognised when the text contains "confirm"
-// (case and accent insensitive) and at least one `#<digits>` order reference.
-// A negation (the whole word "pas": "ne … pas", "n'… pas") or a cancellation ("annul…")
-// disqualifies it: such a text follows the regular free-text handling.
-const PREFILLED_CONFIRMATION_KEYWORD = 'confirm';
-const PREFILLED_CONFIRMATION_DISQUALIFIER = /\bpas\b|annul/;
-const ORDER_REFERENCE_PATTERN = /#(\d+)/g;
+// Pre-filled WhatsApp message sent right after the EasySell form. The expected text is
+// configured (`PREFILLED_CONFIRMATION_TEMPLATE`), identical to the EasySell message with its
+// EasySell variables, e.g. "Je confirme ma commande #{{order.number}}". Only the static
+// text is compared, case-insensitively, against the whole trimmed message: each `{{…}}`
+// is a capture zone. `{{order.number}}` (required) captures the order number, with or
+// without `#`, to look the order up; any other variable captures a non-empty text, ignored.
+const ORDER_NUMBER_VARIABLE = 'order.number';
+const TEMPLATE_VARIABLE_PATTERN = /\{\{\s*([^{}]*?)\s*\}\}/g;
 
-const foldText = (text: string) =>
-  text
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .toLowerCase();
+const escapeRegExp = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
-/**
- * Returns the candidate Shopify order names (`#1234`) of a pre-filled confirmation
- * message, in order of appearance, or an empty list when the text is not one.
- */
-export const parsePrefilledConfirmationText = (text?: string | null): string[] => {
-  const folded = text ? foldText(text) : '';
+export type PrefilledConfirmationTemplate = { pattern: RegExp; orderNumberGroups: number[] } | { error: string };
 
-  if (!text || !folded.includes(PREFILLED_CONFIRMATION_KEYWORD) || PREFILLED_CONFIRMATION_DISQUALIFIER.test(folded)) {
-    return [];
+/** Compiles the configured template into an anchored, lower-case matcher. Never throws. */
+export const compilePrefilledConfirmationTemplate = (template?: string | null): PrefilledConfirmationTemplate => {
+  const lowered = (template ?? '').trim().toLowerCase();
+
+  if (!lowered) {
+    return { error: 'Pre-filled confirmation template is empty' };
   }
 
-  const names = Array.from(text.matchAll(ORDER_REFERENCE_PATTERN), match => `#${match[1]}`);
+  let source = '';
+  let lastIndex = 0;
+  let group = 0;
+  const orderNumberGroups: number[] = [];
 
-  return Array.from(new Set(names));
+  for (const match of lowered.matchAll(TEMPLATE_VARIABLE_PATTERN)) {
+    let staticText = lowered.slice(lastIndex, match.index);
+    group += 1;
+
+    if (match[1] === ORDER_NUMBER_VARIABLE) {
+      // The `#` is optional in the message, whether the template writes it or not.
+      staticText = staticText.replace(/#$/, '');
+      source += `${escapeRegExp(staticText)}#?(\\d+)`;
+      orderNumberGroups.push(group);
+    } else {
+      source += `${escapeRegExp(staticText)}([\\s\\S]+?)`;
+    }
+
+    lastIndex = (match.index ?? 0) + match[0].length;
+  }
+
+  if (orderNumberGroups.length === 0) {
+    return { error: `Pre-filled confirmation template has no {{${ORDER_NUMBER_VARIABLE}}} variable` };
+  }
+
+  source += escapeRegExp(lowered.slice(lastIndex));
+
+  return { pattern: new RegExp(`^${source}$`), orderNumberGroups };
 };
+
+/**
+ * Returns the order number (digits only) of a message matching the compiled template, or
+ * null when the message does not match it (or the template is invalid).
+ */
+export const matchPrefilledConfirmationText = (
+  template: PrefilledConfirmationTemplate,
+  text?: string | null
+): string | null => {
+  const lowered = text?.trim().toLowerCase();
+
+  if ('error' in template || !lowered) {
+    return null;
+  }
+
+  const match = template.pattern.exec(lowered);
+
+  if (!match) {
+    return null;
+  }
+
+  const numbers = new Set(template.orderNumberGroups.map(group => match[group]));
+
+  // A template quoting the order number twice must quote the same one.
+  return numbers.size === 1 ? Array.from(numbers)[0] : null;
+};
+
+// Compiled once at startup: an invalid template is logged and disables the confirmation by
+// message (every message then follows the regular free-text handling).
+const prefilledConfirmationTemplate = compilePrefilledConfirmationTemplate(config.confirmation.prefilledTemplate);
+
+if ('error' in prefilledConfirmationTemplate) {
+  log.error(
+    { template: config.confirmation.prefilledTemplate },
+    `${prefilledConfirmationTemplate.error}: confirmation by pre-filled message is disabled`
+  );
+}
 
 /**
  * Single comparison point between a WhatsApp sender and the order phone. Both sides go
@@ -353,7 +410,8 @@ export class OrderConfirmationService {
   }
 
   /**
-   * Handles the pre-filled "Je confirme ma commande #1234" message. Same sender as the
+   * Handles the pre-filled message matching the configured template (e.g. "Je confirme ma
+   * commande #1234"). Same sender as the
    * order phone: confirmed through the exact button path (source `whatsapp_button`).
    * Different sender: no confirmation, the order goes to the helpdesk queue with the
    * `phone_mismatch` reason and a `phone_mismatch` event is recorded for counting.
@@ -363,16 +421,14 @@ export class OrderConfirmationService {
     input: PrefilledConfirmationInput
   ): Promise<PrefilledConfirmationResult> {
     const text = input.text?.trim();
-    const orderNames = parsePrefilledConfirmationText(text);
-    let order: IOrder | null = null;
+    const orderNumber = matchPrefilledConfirmationText(prefilledConfirmationTemplate, text);
 
-    for (const shopifyOrderName of orderNames) {
-      order = await Order.findOne({ shopifyOrderName });
-
-      if (order) {
-        break;
-      }
+    if (!orderNumber) {
+      return { outcome: 'not_applicable' };
     }
+
+    // Shopify order names are stored as `#1234`.
+    const order = await Order.findOne({ shopifyOrderName: `#${orderNumber}` });
 
     if (!order || !acceptsPrefilledConfirmation(order)) {
       return { outcome: 'not_applicable' };

@@ -119,7 +119,7 @@ describe('WhatsApp webhook: pre-filled confirmation (C5.6b)', () => {
     const freeText = jest.spyOn(Order, 'findByIdAndUpdate');
     const createEvent = jest.spyOn(OrderEvent, 'create').mockResolvedValue({} as never);
     const createMessage = jest.spyOn(Message, 'create');
-    const req = webhookRequest(textMessage(OTHER_SENDER, 'CONFIRMÉ commande #1234'));
+    const req = webhookRequest(textMessage(OTHER_SENDER, 'JE CONFIRME MA COMMANDE #1234'));
     const { res, status } = mockResponse();
 
     await WhatsAppWebhookController.receive(req, res);

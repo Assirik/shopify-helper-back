@@ -9,15 +9,16 @@ import {
   Order,
   OrderOperationalStatus
 } from '../../models/Order';
-import config from '../config/env.config';
+import config, { DEFAULT_PREFILLED_CONFIRMATION_TEMPLATE } from '../config/env.config';
 import { CONFIRMABLE_BY_ADMIN, getOrderActionCapabilities } from './orderCapabilities.service';
 import {
   CONFIRMABLE_BY_BUTTON,
   OrderConfirmationService,
   PHONE_MISMATCH_ATTENTION_REASON,
   TERMINAL_OPERATIONAL_STATUSES,
+  compilePrefilledConfirmationTemplate,
   isSenderOrderPhone,
-  parsePrefilledConfirmationText
+  matchPrefilledConfirmationText
 } from './orderConfirmation.service';
 import { enqueueConfirmationReminder, enqueueOrderConfirmed } from '../../queues/notification.queue';
 import log from '../logger/logger';
@@ -316,51 +317,97 @@ describe('pre-filled WhatsApp confirmation (C5.6b)', () => {
     jest.restoreAllMocks();
   });
 
-  describe('recognition', () => {
-    it.each([
-      'Je confirme ma commande #1234',
-      'je CONFIRME ma commande #1234',
-      'CONFIRMÉ #1234',
-      'Confirmé, commande #1234 merci',
-      'confirmation #1234'
-    ])('recognises %p', text => {
-      expect(parsePrefilledConfirmationText(text)).toEqual(['#1234']);
-    });
+  describe('recognition of the configured template (C5.17)', () => {
+    const defaultTemplate = compilePrefilledConfirmationTemplate(DEFAULT_PREFILLED_CONFIRMATION_TEMPLATE);
+    const match = (text?: string | null, template = defaultTemplate) => matchPrefilledConfirmationText(template, text);
 
-    it.each([
-      ['Où en est ma commande #1234 ?'],
-      ['Bonjour, ma commande #1234'],
-      ['Je confirme ma commande'],
-      ['Je confirme ma commande 1234'],
-      [''],
-      [undefined]
-    ])('does not recognise %p', text => {
-      expect(parsePrefilledConfirmationText(text)).toEqual([]);
-    });
-
-    it.each([
-      'Je ne confirme pas ma commande #1234',
-      'je confirme pas #1234',
-      "Je n'confirme pas ma commande #1234",
-      'Annulez, je confirme pas #1234',
-      "je confirme l'annulation de #1234",
-      'JE NE CONFIRME PAS #1234',
-      'Je confirme, mais ANNULÉ #1234'
-    ])('does not recognise the negation or cancellation %p', text => {
-      expect(parsePrefilledConfirmationText(text)).toEqual([]);
+    it('uses "Je confirme ma commande #{{order.number}}" by default', () => {
+      expect(DEFAULT_PREFILLED_CONFIRMATION_TEMPLATE).toBe('Je confirme ma commande #{{order.number}}');
+      expect(config.confirmation.prefilledTemplate).toBe(DEFAULT_PREFILLED_CONFIRMATION_TEMPLATE);
     });
 
     it.each([
       'Je confirme ma commande #1234',
+      'je confirme ma commande #1234',
       'JE CONFIRME MA COMMANDE #1234',
-      'Je confirme ma commande #1234, passage le soir svp',
-      'Je confirme #1234, je repasse demain'
-    ])('still recognises %p (no whole word "pas", no "annul")', text => {
-      expect(parsePrefilledConfirmationText(text)).toEqual(['#1234']);
+      '  Je confirme ma commande #1234 \n'
+    ])('recognises the exact text whatever its case or edge spaces: %p', text => {
+      expect(match(text)).toBe('1234');
     });
 
-    it('keeps every reference in order of appearance, without duplicates', () => {
-      expect(parsePrefilledConfirmationText('Je confirme #99 et #1234, oui #99')).toEqual(['#99', '#1234']);
+    it('accepts the order number with or without "#", even when the template writes it', () => {
+      expect(match('Je confirme ma commande #1234')).toBe('1234');
+      expect(match('Je confirme ma commande 1234')).toBe('1234');
+      expect(match('Je confirme ma commande ##1234')).toBeNull();
+
+      const withoutHash = compilePrefilledConfirmationTemplate('Je confirme {{order.number}}');
+      expect(match('je confirme #1234', withoutHash)).toBe('1234');
+      expect(match('je confirme 1234', withoutHash)).toBe('1234');
+    });
+
+    it.each([
+      ['an added text', 'Je confirme ma commande #1234, passage le soir svp'],
+      ['a prefix', 'Bonjour, je confirme ma commande #1234'],
+      ['a modified text', 'Je confirme la commande #1234'],
+      ['a negation', 'Je ne confirme pas ma commande #1234'],
+      ['a truncated text', 'Je confirme ma commande'],
+      ['a truncated text with a number', 'Je confirme #1234'],
+      ['a doubled inner space', 'Je confirme  ma commande #1234'],
+      ['another language', 'I confirm my order #1234'],
+      ['an accent added', 'Je confirmé ma commande #1234'],
+      ['a non numeric order number', 'Je confirme ma commande #12a4'],
+      ['an empty text', ''],
+      ['blank text', '   '],
+      ['no text', undefined]
+    ])('does not recognise %s', (_label, text) => {
+      expect(match(text)).toBeNull();
+    });
+
+    it('compares only the static text of a template with several variables', () => {
+      const template = compilePrefilledConfirmationTemplate('Bonjour {{customer.name}}, je confirme #{{order.number}}');
+
+      expect(match('Bonjour Awa Diop, je confirme #1234', template)).toBe('1234');
+      expect(match('BONJOUR awa, JE CONFIRME 1234', template)).toBe('1234');
+      expect(match('Bonjour , je confirme #1234', template)).toBeNull();
+      expect(match('Bonjour Awa, je confirme', template)).toBeNull();
+      expect(match('Salut Awa, je confirme #1234', template)).toBeNull();
+    });
+
+    it('accepts EasySell variables written with inner spaces or another case', () => {
+      const template = compilePrefilledConfirmationTemplate('Commande {{ Order.Number }} OK');
+
+      expect(match('commande #1234 ok', template)).toBe('1234');
+    });
+
+    it('treats regex special characters of the template as plain text', () => {
+      const template = compilePrefilledConfirmationTemplate('Commande (n° {{order.number}}) confirmée ? Oui. [*+$^|\\]');
+
+      expect(match('Commande (n° 1234) confirmée ? Oui. [*+$^|\\]', template)).toBe('1234');
+      expect(match('Commande xn° 1234) confirmée ? Oui. [*+$^|\\]', template)).toBeNull();
+      expect(match('Commande (n° 1234) confirmée ! Oui. [*+$^|\\]', template)).toBeNull();
+      expect(match('Commande (n° 1234) confirmée ? Ouix [*+$^|\\]', template)).toBeNull();
+    });
+
+    it('requires the same number when the template quotes it twice', () => {
+      const template = compilePrefilledConfirmationTemplate('#{{order.number}} : je confirme #{{order.number}}');
+
+      expect(match('#1234 : je confirme #1234', template)).toBe('1234');
+      expect(match('#1234 : je confirme #99', template)).toBeNull();
+    });
+
+    it.each([
+      ['empty', ''],
+      ['blank', '   '],
+      ['absent', undefined],
+      ['without {{order.number}}', 'Je confirme ma commande'],
+      ['with another variable only', 'Je confirme ma commande {{order.name}}'],
+      ['truncated by an unquoted "#" in .env', 'Je confirme ma commande']
+    ])('rejects an invalid template (%s) without throwing, and it matches nothing', (_label, template) => {
+      const compiled = compilePrefilledConfirmationTemplate(template);
+
+      expect(compiled).toEqual({ error: expect.any(String) });
+      expect(match('Je confirme ma commande #1234', compiled)).toBeNull();
+      expect(match('Je confirme ma commande', compiled)).toBeNull();
     });
   });
 
@@ -483,38 +530,91 @@ describe('pre-filled WhatsApp confirmation (C5.6b)', () => {
     );
   });
 
-  it('uses the first reference that matches an existing order', async () => {
-    const findOne = mockFindOne({ '#1234': pendingOrder() });
-    jest.spyOn(Order, 'findOneAndUpdate').mockResolvedValue({ _id: orderId } as never);
-    jest.spyOn(OrderEvent, 'create').mockResolvedValue({} as never);
-    jest.spyOn(Message, 'create').mockResolvedValue({ _id: new Types.ObjectId() } as never);
+  it.each(['Je confirme ma commande #1234', 'je confirme ma commande 1234'])(
+    'looks the order up by its Shopify name "#1234" for %p',
+    async text => {
+      const findOne = mockFindOne({ '#1234': pendingOrder() });
+      jest.spyOn(Order, 'findOneAndUpdate').mockResolvedValue({ _id: orderId } as never);
+      jest.spyOn(OrderEvent, 'create').mockResolvedValue({} as never);
+      jest.spyOn(Message, 'create').mockResolvedValue({ _id: new Types.ObjectId() } as never);
 
-    const result = await OrderConfirmationService.confirmByPrefilledMessage({
-      from: '221776986780',
-      text: 'Je confirme #99 puis #1234'
-    });
+      const result = await OrderConfirmationService.confirmByPrefilledMessage({ from: '221776986780', text });
 
-    expect(findOne.mock.calls.map(call => call[0])).toEqual([
-      { shopifyOrderName: '#99' },
-      { shopifyOrderName: '#1234' }
-    ]);
-    expect(result.outcome).toBe('confirmed');
-  });
+      expect(findOne.mock.calls.map(call => call[0])).toEqual([{ shopifyOrderName: '#1234' }]);
+      expect(result.outcome).toBe('confirmed');
+    }
+  );
 
   it.each([
-    ['an unknown reference', 'Je confirme ma commande #9999'],
-    ['a text without "confirm"', 'Où en est ma commande #1234 ?'],
-    ['a text without reference', 'Je confirme ma commande']
-  ])('leaves %s to the regular handling', async (_label, text) => {
-    mockFindOne({ '#1234': pendingOrder() });
-    const update = jest.spyOn(Order, 'findOneAndUpdate');
-    const createEvent = jest.spyOn(OrderEvent, 'create');
+    ['an unknown order number', 'Je confirme ma commande #9999', [{ shopifyOrderName: '#9999' }]],
+    ['a question', 'Où en est ma commande #1234 ?', []],
+    ['a text without order number', 'Je confirme ma commande', []],
+    ['an added text', 'Je confirme ma commande #1234 svp', []],
+    ['another language', 'I confirm my order #1234', []]
+  ])('leaves %s to the regular handling', async (_label, text, lookups) => {
+    for (const from of ['221776986780', '221771112233']) {
+      const findOne = mockFindOne({ '#1234': pendingOrder() });
+      const update = jest.spyOn(Order, 'findOneAndUpdate');
+      const createEvent = jest.spyOn(OrderEvent, 'create');
 
-    const result = await OrderConfirmationService.confirmByPrefilledMessage({ from: '221776986780', text });
+      const result = await OrderConfirmationService.confirmByPrefilledMessage({ from, text });
 
-    expect(result).toEqual({ outcome: 'not_applicable' });
-    expect(update).not.toHaveBeenCalled();
-    expect(createEvent).not.toHaveBeenCalled();
+      expect(result).toEqual({ outcome: 'not_applicable' });
+      expect(findOne.mock.calls.map(call => call[0])).toEqual(lookups);
+      expect(update).not.toHaveBeenCalled();
+      expect(createEvent).not.toHaveBeenCalled();
+      jest.restoreAllMocks();
+    }
+  });
+
+  describe('invalid configured template', () => {
+    it.each([
+      ['empty', ''],
+      ['without {{order.number}}', 'Je confirme ma commande']
+    ])('is logged at startup and disables the confirmation by message (%s)', async (_label, template) => {
+      const logError = jest.fn();
+      let isolated!: {
+        service: typeof import('./orderConfirmation.service');
+        order: typeof import('../../models/Order');
+      };
+
+      jest.isolateModules(() => {
+        jest.doMock('../config/env.config', () => {
+          const actual = jest.requireActual<typeof import('../config/env.config')>('../config/env.config');
+          return {
+            ...actual,
+            __esModule: true,
+            default: { ...actual.default, confirmation: { ...actual.default.confirmation, prefilledTemplate: template } }
+          };
+        });
+        jest.doMock('../logger/logger', () => ({
+          __esModule: true,
+          default: { error: logError, info: jest.fn(), warn: jest.fn(), debug: jest.fn() }
+        }));
+        isolated = {
+          service: require('./orderConfirmation.service'),
+          order: require('../../models/Order')
+        };
+      });
+
+      expect(logError).toHaveBeenCalledTimes(1);
+      expect(logError).toHaveBeenCalledWith(
+        { template },
+        expect.stringContaining('confirmation by pre-filled message is disabled')
+      );
+
+      const findOne = jest.spyOn(isolated.order.Order, 'findOne');
+      const update = jest.spyOn(isolated.order.Order, 'findOneAndUpdate');
+
+      for (const text of ['Je confirme ma commande #1234', 'Je confirme ma commande', '#1234']) {
+        await expect(
+          isolated.service.OrderConfirmationService.confirmByPrefilledMessage({ from: '221776986780', text })
+        ).resolves.toEqual({ outcome: 'not_applicable' });
+      }
+
+      expect(findOne).not.toHaveBeenCalled();
+      expect(update).not.toHaveBeenCalled();
+    });
   });
 
   it.each([
