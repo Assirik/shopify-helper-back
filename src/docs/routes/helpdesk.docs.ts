@@ -88,6 +88,11 @@
  *     tags: [Orders]
  *     operationId: bulkConfirmOrders
  *     summary: Confirmer plusieurs commandes éligibles
+ *     description: >-
+ *       Confirmation par un agent (source `admin`). Une commande « Numéro différent »
+ *       (motif `phone_mismatch` ou `phoneMismatchAt` présent) n’est jamais confirmée ici :
+ *       elle figure dans `failed` avec l’erreur `PhoneMismatchRequiresCall` (409) et se
+ *       confirme une par une, par appel.
  *     security: [{ bearerAuth: [] }]
  *     requestBody:
  *       required: true
@@ -189,7 +194,11 @@
  *         description: Commande absente.
  *         content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } }
  *       409:
- *         description: Confirmation incompatible avec l’état actuel.
+ *         description: >-
+ *           Confirmation incompatible avec l’état actuel (`OrderConfirmationNotAllowed`), ou
+ *           commande « Numéro différent » (motif `phone_mismatch` ou `phoneMismatchAt`
+ *           présent) confirmée sans `source: phone_call` (`PhoneMismatchRequiresCall`) : elle
+ *           ne se confirme qu’après un appel au client. Aucune écriture dans les deux cas.
  *         content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } }
  *       500: { $ref: '#/components/responses/InternalError' }
  *

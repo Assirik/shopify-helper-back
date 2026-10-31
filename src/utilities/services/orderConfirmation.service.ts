@@ -599,6 +599,8 @@ export class OrderConfirmationService {
           attentionReasonCode: AttentionReasonCode.PHONE_MISMATCH,
           attentionReason: PHONE_MISMATCH_ATTENTION_REASON,
           attentionRequiredAt: now,
+          // Durable marker: the reason can be overwritten later, the call requirement stays.
+          phoneMismatchAt: now,
           lastCustomerMessageAt: now,
           lastCustomerMessageText: text
         }
@@ -637,6 +639,15 @@ export class OrderConfirmationService {
     return { outcome: 'phone_mismatch', order: flagged, senderE164 };
   }
 
+  /**
+   * Agent confirmation (single or bulk). An order that received a confirmation message from
+   * another number (`phone_mismatch` reason, or the durable `phoneMismatchAt` marker that
+   * survives a later reason such as free_text or sms_only) is confirmed only after calling
+   * the customer: any source other than `phone_call` is refused with
+   * `PhoneMismatchRequiresCall` (409). The rule sits in the write filter, so an order
+   * flagged between a read and the write is honoured. In MongoDB `null` also matches a
+   * missing field.
+   */
   public static async confirmByAdmin(
     orderId: string,
     actorId?: string,
@@ -644,9 +655,13 @@ export class OrderConfirmationService {
   ) {
     ensureObjectId(orderId);
 
+    const requiresCallGuard =
+      source === ConfirmationSource.PHONE_CALL
+        ? {}
+        : { attentionReasonCode: { $ne: AttentionReasonCode.PHONE_MISMATCH }, phoneMismatchAt: null };
     const now = new Date();
     const order = await Order.findOneAndUpdate(
-      { _id: orderId, customerConfirmationStatus: { $in: CONFIRMABLE_BY_ADMIN } },
+      { ...requiresCallGuard, _id: orderId, customerConfirmationStatus: { $in: CONFIRMABLE_BY_ADMIN } },
       {
         $set: {
           customerConfirmationStatus: CustomerConfirmationStatus.CONFIRMED,
@@ -661,10 +676,22 @@ export class OrderConfirmationService {
     );
 
     if (!order) {
-      const exists = await Order.exists({ _id: orderId });
+      const current = await Order.findById(orderId);
 
-      if (!exists) {
+      if (!current) {
         throw new OrderConfirmationError('OrderNotFound', 'Order not found', 404);
+      }
+
+      if (
+        source !== ConfirmationSource.PHONE_CALL &&
+        (current.attentionReasonCode === AttentionReasonCode.PHONE_MISMATCH || current.phoneMismatchAt) &&
+        CONFIRMABLE_BY_ADMIN.includes(current.customerConfirmationStatus)
+      ) {
+        throw new OrderConfirmationError(
+          'PhoneMismatchRequiresCall',
+          'An order confirmed from another phone number must be confirmed by a phone call',
+          409
+        );
       }
 
       throw new OrderConfirmationError(
@@ -691,6 +718,9 @@ export class OrderConfirmationService {
 
   // Appel sans réponse : la commande (re)vient dans « À traiter » avec le motif UNREACHABLE
   // pour être relancée. La tentative est tracée en note (auteur + date) et en aperçu de liste.
+  // A `phone_mismatch` order keeps its reason (and its reason text): it still has to be
+  // confirmed by a phone call, and the helpdesk shows that requirement from this reason.
+  // Both writes are conditioned on the reason, so a concurrent flag is never overwritten.
   public static async markUnreachable(orderId: string, note?: string, actorId?: string) {
     ensureObjectId(orderId);
 
@@ -701,20 +731,24 @@ export class OrderConfirmationService {
     const noteText = trimmedNote || DEFAULT_UNREACHABLE_NOTE;
 
     const now = new Date();
-    const order = await Order.findOneAndUpdate(
-      { _id: orderId, customerConfirmationStatus: { $in: CONFIRMABLE_BY_ADMIN } },
-      {
-        $set: {
-          needsHelpdeskAttention: true,
-          attentionReasonCode: AttentionReasonCode.UNREACHABLE,
-          attentionReason: noteText,
-          attentionRequiredAt: now,
-          lastNoteText: noteText,
-          lastNoteAt: now
-        }
-      },
-      { new: true }
-    );
+    const attempt = {
+      needsHelpdeskAttention: true,
+      attentionRequiredAt: now,
+      lastNoteText: noteText,
+      lastNoteAt: now
+    };
+    const awaitingConfirmation = { _id: orderId, customerConfirmationStatus: { $in: CONFIRMABLE_BY_ADMIN } };
+    const order =
+      (await Order.findOneAndUpdate(
+        { ...awaitingConfirmation, attentionReasonCode: { $ne: AttentionReasonCode.PHONE_MISMATCH } },
+        { $set: { ...attempt, attentionReasonCode: AttentionReasonCode.UNREACHABLE, attentionReason: noteText } },
+        { new: true }
+      )) ??
+      (await Order.findOneAndUpdate(
+        { ...awaitingConfirmation, attentionReasonCode: AttentionReasonCode.PHONE_MISMATCH },
+        { $set: attempt },
+        { new: true }
+      ));
 
     if (!order) {
       const exists = await Order.exists({ _id: orderId });
