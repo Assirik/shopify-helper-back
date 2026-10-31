@@ -20,6 +20,9 @@ export interface SendOrderConfirmationJobData {
 
 export interface InitialConfirmationRequestJobData {
   orderId: string;
+  // Number of times the delayed request was already postponed behind a reminder still being
+  // sent (C5.18). Absent on the job scheduled at ingestion.
+  reminderWaitCount?: number;
 }
 
 export type NotificationJobData = SendOrderConfirmationJobData | InitialConfirmationRequestJobData;
@@ -88,6 +91,26 @@ export const scheduleInitialConfirmationRequest = async (orderId: string) => {
       ...defaultJobOptions,
       delay: config.confirmation.initialRequestDelayMinutes * 60 * 1000,
       jobId: getInitialConfirmationRequestJobId(orderId)
+    }
+  );
+};
+
+// C5.18: how long the delayed initial request waits, each time, for a reminder still being sent.
+export const INITIAL_REQUEST_REMINDER_WAIT_MS = 2 * 60 * 1000;
+
+// Deterministic id per postponement: a replayed delayed job never schedules a second wait.
+export const getPostponedInitialConfirmationRequestJobId = (orderId: string, reminderWaitCount: number) =>
+  `confirm-initial-${orderId}-wait-${reminderWaitCount}`;
+
+// Re-runs the delayed initial request later, once the reminder being sent has settled (C5.18).
+export const postponeInitialConfirmationRequest = async (orderId: string, reminderWaitCount: number) => {
+  return notificationQueue.add(
+    SEND_INITIAL_CONFIRMATION_REQUEST_JOB,
+    { orderId, reminderWaitCount },
+    {
+      ...defaultJobOptions,
+      delay: INITIAL_REQUEST_REMINDER_WAIT_MS,
+      jobId: getPostponedInitialConfirmationRequestJobId(orderId, reminderWaitCount)
     }
   );
 };
