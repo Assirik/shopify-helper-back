@@ -36,7 +36,8 @@ jest.mock('../queues/notification.queue', () => ({
   SEND_ORDER_CONFIRMATION_JOB: 'send-order-confirmation',
   enqueueOrderConfirmation: jest.fn(),
   getInitialConfirmationSendJobId: (messageId: string) => `confirm-send-${messageId}`,
-  getRedisConnection: jest.fn()
+  getRedisConnection: jest.fn(),
+  postponeInitialConfirmationRequest: jest.fn()
 }));
 
 jest.mock('../utilities/services/capiPurchase.service', () => ({
@@ -54,7 +55,7 @@ import {
 import { Message, MessageChannel, MessageProvider, MessageStatus, TemplatePurpose } from '../models/Message';
 import { MetaWhatsAppProvider } from '../providers/metaWhatsApp.provider';
 import { TermiiSmsProvider } from '../providers/termiiSms.provider';
-import { enqueueOrderConfirmation } from '../queues/notification.queue';
+import { enqueueOrderConfirmation, postponeInitialConfirmationRequest } from '../queues/notification.queue';
 import log from '../utilities/logger/logger';
 import { ChatwootOutboundMirrorService } from '../utilities/services/chatwootOutboundMirror.service';
 import { MessageVariableConfigService } from '../utilities/services/messageVariableConfig.service';
@@ -63,6 +64,8 @@ import {
   ORDER_NO_LONGER_PENDING,
   buildTemplateVariables,
   getOrderDeliveryRegion,
+  MAX_INITIAL_REQUEST_REMINDER_WAITS,
+  RECENT_REMINDER_CLAIM_MS,
   processInitialConfirmationRequest,
   startNotificationWorker
 } from './notification.worker';
@@ -146,6 +149,7 @@ describe('delayed initial confirmation request (C5.6a)', () => {
 
   let orderFindById: ReturnType<typeof jest.spyOn>;
   let messageFindOne: ReturnType<typeof jest.spyOn>;
+  let messageFind: ReturnType<typeof jest.spyOn>;
   let messageCreate: ReturnType<typeof jest.spyOn>;
   let orderWrites: ReturnType<typeof jest.spyOn>[];
   let orderUpdateOne: ReturnType<typeof jest.spyOn>;
@@ -157,6 +161,8 @@ describe('delayed initial confirmation request (C5.6a)', () => {
   beforeEach(() => {
     orderFindById = jest.spyOn(Order, 'findById').mockResolvedValue(storedOrder() as never);
     messageFindOne = jest.spyOn(Message, 'findOne').mockResolvedValue(null as never);
+    // Reminder Messages of the order (C5.18): none by default.
+    messageFind = jest.spyOn(Message, 'find').mockResolvedValue([] as never);
     messageCreate = jest.spyOn(Message, 'create').mockResolvedValue({ _id: messageId } as never);
     orderWrites = [
       jest.spyOn(Order, 'findByIdAndUpdate').mockResolvedValue(null as never),
@@ -244,6 +250,8 @@ describe('delayed initial confirmation request (C5.6a)', () => {
     ['already reminded during the delay', { reminderCount: 1, lastReminderAt: new Date() }]
   ])('sends nothing, creates no Message and marks the request skipped for an order %s', async (_label, overrides) => {
     orderFindById.mockResolvedValue(storedOrder(overrides) as never);
+    // Only read for the reminded order: its reminder reached the customer (C5.18).
+    messageFind.mockResolvedValue([{ status: MessageStatus.DELIVERED }] as never);
     const logInfo = jest.spyOn(log, 'info');
 
     await processInitialConfirmationRequest(initialJob() as never);
@@ -412,6 +420,8 @@ describe('delayed initial confirmation request (C5.6a)', () => {
     ['delivered', { operationalStatus: OrderOperationalStatus.DELIVERED }]
   ])('keeps the notification_not_scheduled reason when the late request is skipped for an order %s (C5.15)', async (_label, overrides) => {
     orderFindById.mockResolvedValue(storedOrder({ ...notScheduledFlag, ...overrides }) as never);
+    // Only read for the reminded order: its reminder reached the customer (C5.18).
+    messageFind.mockResolvedValue([{ status: MessageStatus.SENT }] as never);
 
     await processInitialConfirmationRequest(initialJob() as never);
 
@@ -578,8 +588,8 @@ describe('confirmation requests never sent to, nor downgrading, a confirmed orde
       reminderCount: 0
     };
     messages = {
-      [messageId.toString()]: { _id: messageId, status: MessageStatus.QUEUED, attemptCount: 0 },
-      [smsMessageId.toString()]: { _id: smsMessageId, status: MessageStatus.QUEUED, attemptCount: 0 }
+      [messageId.toString()]: { _id: messageId, orderId, status: MessageStatus.QUEUED, attemptCount: 0 },
+      [smsMessageId.toString()]: { _id: smsMessageId, orderId, status: MessageStatus.QUEUED, attemptCount: 0 }
     };
 
     jest.spyOn(Order, 'findById').mockImplementation((() => Promise.resolve({ ...order })) as never);
@@ -622,6 +632,15 @@ describe('confirmation requests never sent to, nor downgrading, a confirmed orde
         return { matchedCount: matched ? 1 : 0 };
       })) as never);
     jest.spyOn(Message, 'create').mockResolvedValue({ _id: smsMessageId } as never);
+    jest.spyOn(Message, 'find').mockImplementation(((filter: Record<string, unknown>) =>
+      Promise.resolve(
+        Object.values(messages)
+          .filter(
+            message =>
+              String(message.orderId) === String(filter.orderId) && message.templatePurpose === filter.templatePurpose
+          )
+          .map(message => ({ ...message }))
+      )) as never);
     jest.spyOn(MessageVariableConfigService, 'resolveForRegion').mockResolvedValue({} as never);
     jest.spyOn(ChatwootOutboundMirrorService, 'mirrorTemplateMessage').mockResolvedValue(true as never);
     sendWhatsApp = jest
@@ -903,6 +922,325 @@ describe('confirmation requests never sent to, nor downgrading, a confirmed orde
 
       expect(messages[messageId.toString()].status).toBe(MessageStatus.SENT);
       expect(messages[messageId.toString()].errorCode).toBeUndefined();
+    });
+  });
+
+  // C5.18: an agent reminded the order during the delay; the delayed initial request (T+5) is
+  // skipped only when that reminder actually reached the customer.
+  describe('delayed initial request after an agent reminder (C5.18)', () => {
+    const initialRequestId = new Types.ObjectId();
+    const initialJob = (reminderWaitCount?: number) => ({
+      id: `confirm-initial-${orderId.toString()}`,
+      name: INITIAL_JOB,
+      data: reminderWaitCount ? { orderId: orderId.toString(), reminderWaitCount } : { orderId: orderId.toString() }
+    });
+
+    beforeEach(() => {
+      // The agent clicked "Relancer" before T+5: reminder claimed, its Message queued.
+      order.reminderCount = 1;
+      messages[messageId.toString()].templatePurpose = TemplatePurpose.REMINDER;
+      jest.spyOn(Message, 'findOne').mockResolvedValue(null as never);
+      jest.spyOn(Message, 'create').mockImplementation(((doc: Record<string, unknown>) => {
+        const id = doc.channel === MessageChannel.SMS ? smsMessageId : initialRequestId;
+        messages[id.toString()] = { ...doc, _id: id, attemptCount: 0 };
+        return Promise.resolve({ _id: id });
+      }) as never);
+      (enqueueOrderConfirmation as jest.Mock).mockImplementation(((data: { messageId: string }) =>
+        Promise.resolve({ id: `job-${data.messageId}` })) as never);
+      (postponeInitialConfirmationRequest as jest.Mock).mockResolvedValue({ id: 'postponed-1' } as never);
+    });
+
+    const failReminderPermanently = async () => {
+      sendWhatsApp.mockRejectedValueOnce(new Error('Meta down') as never);
+      await expect(mockWorkerRegistry.processor?.(reminderJob())).rejects.toThrow('Meta down');
+      mockWorkerRegistry.handlers.failed?.(reminderJob(3), new Error('Meta down'));
+      await flushPromises();
+      expect(messages[messageId.toString()].status).toBe(MessageStatus.FAILED);
+    };
+
+    it('skips the initial request once the reminder reached the customer', async () => {
+      await mockWorkerRegistry.processor?.(reminderJob());
+      await mockWorkerRegistry.processor?.(initialJob());
+
+      expect(sendWhatsApp).toHaveBeenCalledTimes(1);
+      expect(Message.create).not.toHaveBeenCalled();
+      expect(enqueueOrderConfirmation).not.toHaveBeenCalled();
+      expect(postponeInitialConfirmationRequest).not.toHaveBeenCalled();
+      expect(log.info).toHaveBeenCalledWith(
+        expect.objectContaining({ orderId: orderId.toString(), skipReason: 'already_reminded' }),
+        'Delayed initial confirmation request skipped, order no longer pending'
+      );
+      expect(order.notificationStatus).toBe(NotificationStatus.SENT);
+    });
+
+    it.each([MessageStatus.DELIVERED, MessageStatus.READ])(
+      'skips the initial request when the reminder is already %s',
+      async status => {
+        Object.assign(messages[messageId.toString()], { status });
+
+        await mockWorkerRegistry.processor?.(initialJob());
+
+        expect(enqueueOrderConfirmation).not.toHaveBeenCalled();
+        expect(order.notificationStatus).toBe(NotificationStatus.SKIPPED);
+      }
+    );
+
+    it('still sends the initial request, then its SMS fallback, when the reminder failed', async () => {
+      await failReminderPermanently();
+
+      await mockWorkerRegistry.processor?.(initialJob());
+
+      expect(enqueueOrderConfirmation).toHaveBeenCalledWith(
+        { orderId: orderId.toString(), messageId: initialRequestId.toString(), channel: MessageChannel.WHATSAPP },
+        { jobId: `confirm-send-${initialRequestId.toString()}` }
+      );
+
+      // The WhatsApp request fails as well: the SMS fallback of the initial request applies.
+      const requestJob = job(CONFIRMATION_JOB, MessageChannel.WHATSAPP, initialRequestId, 0);
+      sendWhatsApp.mockRejectedValue(new Error('Meta down') as never);
+      await expect(mockWorkerRegistry.processor?.(requestJob)).rejects.toThrow('Meta down');
+      mockWorkerRegistry.handlers.failed?.({ ...requestJob, attemptsMade: 3 }, new Error('Meta down'));
+      await flushPromises();
+
+      expect(enqueueOrderConfirmation).toHaveBeenLastCalledWith({
+        orderId: orderId.toString(),
+        messageId: smsMessageId.toString(),
+        channel: MessageChannel.SMS
+      });
+
+      await mockWorkerRegistry.processor?.(smsFallbackJob());
+
+      expect(sendSms).toHaveBeenCalledTimes(1);
+      expect(order).toEqual(
+        expect.objectContaining({
+          customerConfirmationStatus: CustomerConfirmationStatus.SMS_ONLY,
+          notificationStatus: NotificationStatus.PARTIALLY_SENT,
+          attentionReasonCode: AttentionReasonCode.SMS_ONLY,
+          reminderCount: 1
+        })
+      );
+    });
+
+    it('sends the initial request normally when the reminder failed and WhatsApp works', async () => {
+      await failReminderPermanently();
+
+      await mockWorkerRegistry.processor?.(initialJob());
+      await mockWorkerRegistry.processor?.(job(CONFIRMATION_JOB, MessageChannel.WHATSAPP, initialRequestId));
+
+      expect(sendWhatsApp).toHaveBeenCalledTimes(2);
+      expect(messages[initialRequestId.toString()].status).toBe(MessageStatus.SENT);
+      expect(order.notificationStatus).toBe(NotificationStatus.SENT);
+      expect(sendSms).not.toHaveBeenCalled();
+    });
+
+    it.each([MessageStatus.QUEUED, MessageStatus.SENDING])(
+      'waits, without sending, for a reminder still %s, then skips once the reminder is sent',
+      async status => {
+        Object.assign(messages[messageId.toString()], { status });
+
+        await mockWorkerRegistry.processor?.(initialJob());
+        // Replayed: the same deterministic postponement, never a second one.
+        await mockWorkerRegistry.processor?.(initialJob());
+
+        expect(postponeInitialConfirmationRequest).toHaveBeenCalledTimes(2);
+        expect((postponeInitialConfirmationRequest as jest.Mock).mock.calls).toEqual([
+          [orderId.toString(), 1],
+          [orderId.toString(), 1]
+        ]);
+        expect(Message.create).not.toHaveBeenCalled();
+        expect(enqueueOrderConfirmation).not.toHaveBeenCalled();
+        expect(order.notificationStatus).toBe(NotificationStatus.PENDING);
+
+        // The reminder goes out, then the postponed request runs: nothing more is sent.
+        messages[messageId.toString()].status = MessageStatus.QUEUED;
+        await mockWorkerRegistry.processor?.(reminderJob());
+        await mockWorkerRegistry.processor?.(initialJob(1));
+
+        expect(sendWhatsApp).toHaveBeenCalledTimes(1);
+        expect(Message.create).not.toHaveBeenCalled();
+        expect(enqueueOrderConfirmation).not.toHaveBeenCalled();
+        expect(postponeInitialConfirmationRequest).toHaveBeenCalledTimes(2);
+      }
+    );
+
+    it('sends the postponed request when the reminder it waited for finally failed', async () => {
+      Object.assign(messages[messageId.toString()], { status: MessageStatus.SENDING });
+      await mockWorkerRegistry.processor?.(initialJob());
+      expect(postponeInitialConfirmationRequest).toHaveBeenCalledWith(orderId.toString(), 1);
+
+      mockWorkerRegistry.handlers.failed?.(reminderJob(3), new Error('Meta down'));
+      await flushPromises();
+      await mockWorkerRegistry.processor?.(initialJob(1));
+
+      expect(postponeInitialConfirmationRequest).toHaveBeenCalledTimes(1);
+      expect(enqueueOrderConfirmation).toHaveBeenCalledTimes(1);
+      expect(enqueueOrderConfirmation).toHaveBeenCalledWith(
+        { orderId: orderId.toString(), messageId: initialRequestId.toString(), channel: MessageChannel.WHATSAPP },
+        { jobId: `confirm-send-${initialRequestId.toString()}` }
+      );
+    });
+
+    it('waits a bounded number of times, then sends the request rather than leaving the customer without one', async () => {
+      Object.assign(messages[messageId.toString()], { status: MessageStatus.SENDING });
+
+      for (let wait = 0; wait < MAX_INITIAL_REQUEST_REMINDER_WAITS; wait += 1) {
+        await mockWorkerRegistry.processor?.(initialJob(wait));
+        expect(postponeInitialConfirmationRequest).toHaveBeenLastCalledWith(orderId.toString(), wait + 1);
+      }
+      expect(enqueueOrderConfirmation).not.toHaveBeenCalled();
+
+      await mockWorkerRegistry.processor?.(initialJob(MAX_INITIAL_REQUEST_REMINDER_WAITS));
+
+      expect(postponeInitialConfirmationRequest).toHaveBeenCalledTimes(MAX_INITIAL_REQUEST_REMINDER_WAITS);
+      expect(enqueueOrderConfirmation).toHaveBeenCalledTimes(1);
+      expect(log.warn).toHaveBeenCalledWith(
+        expect.objectContaining({ orderId: orderId.toString(), reminderWaitCount: MAX_INITIAL_REQUEST_REMINDER_WAITS }),
+        'Reminder still not sent after the last wait, sending the delayed initial confirmation request'
+      );
+    });
+
+    const expectHandedOverOnce = () => {
+      expect(postponeInitialConfirmationRequest).not.toHaveBeenCalled();
+      expect(enqueueOrderConfirmation).toHaveBeenCalledTimes(1);
+      expect(enqueueOrderConfirmation).toHaveBeenCalledWith(
+        { orderId: orderId.toString(), messageId: initialRequestId.toString(), channel: MessageChannel.WHATSAPP },
+        { jobId: `confirm-send-${initialRequestId.toString()}` }
+      );
+    };
+
+    const expectSkipped = () => {
+      expect(postponeInitialConfirmationRequest).not.toHaveBeenCalled();
+      expect(Message.create).not.toHaveBeenCalled();
+      expect(enqueueOrderConfirmation).not.toHaveBeenCalled();
+      expect(order.notificationStatus).toBe(NotificationStatus.SKIPPED);
+    };
+
+    it('ignores a reminder sent for another order of the same customer', async () => {
+      const otherReminderId = new Types.ObjectId();
+      Object.assign(messages[messageId.toString()], { status: MessageStatus.FAILED });
+      messages[otherReminderId.toString()] = {
+        _id: otherReminderId,
+        orderId: new Types.ObjectId(),
+        templatePurpose: TemplatePurpose.REMINDER,
+        status: MessageStatus.SENT
+      };
+
+      await mockWorkerRegistry.processor?.(initialJob());
+
+      expectHandedOverOnce();
+      expect(Message.find).toHaveBeenCalledWith(
+        expect.objectContaining({ orderId, templatePurpose: TemplatePurpose.REMINDER }),
+        expect.anything()
+      );
+    });
+
+    // Several reminders of this order (agent reminder, then the 24 h one): any of them that
+    // reached the customer wins over one that failed or is still being sent.
+    const addSecondReminder = (status: MessageStatus) => {
+      const secondReminderId = new Types.ObjectId();
+      messages[secondReminderId.toString()] = {
+        _id: secondReminderId,
+        orderId,
+        templatePurpose: TemplatePurpose.REMINDER,
+        status
+      };
+      return secondReminderId;
+    };
+
+    it.each([
+      ['failed, then sent', MessageStatus.FAILED, MessageStatus.SENT],
+      ['sent, then failed', MessageStatus.SENT, MessageStatus.FAILED],
+      ['sent, then still queued', MessageStatus.SENT, MessageStatus.QUEUED],
+      ['still sending, then delivered', MessageStatus.SENDING, MessageStatus.DELIVERED]
+    ])('skips the initial request when the reminders were %s', async (_label, first, second) => {
+      Object.assign(messages[messageId.toString()], { status: first });
+      addSecondReminder(second);
+
+      await mockWorkerRegistry.processor?.(initialJob());
+
+      expectSkipped();
+    });
+
+    it('waits for a second reminder still being sent after a failed one, then sends once it failed too', async () => {
+      Object.assign(messages[messageId.toString()], { status: MessageStatus.FAILED });
+      const secondReminderId = addSecondReminder(MessageStatus.SENDING);
+
+      await mockWorkerRegistry.processor?.(initialJob());
+
+      expect(postponeInitialConfirmationRequest).toHaveBeenCalledWith(orderId.toString(), 1);
+      expect(enqueueOrderConfirmation).not.toHaveBeenCalled();
+
+      messages[secondReminderId.toString()].status = MessageStatus.FAILED;
+      await mockWorkerRegistry.processor?.(initialJob(1));
+
+      expect(postponeInitialConfirmationRequest).toHaveBeenCalledTimes(1);
+      expect(enqueueOrderConfirmation).toHaveBeenCalledTimes(1);
+    });
+
+    describe('reminder claimed but its Message not created yet', () => {
+      beforeEach(() => {
+        // The claim (reminderCount, lastReminderAt) is written before the reminder Message.
+        delete messages[messageId.toString()];
+      });
+
+      it('waits for a reminder claimed moments ago, then skips once it is sent', async () => {
+        order.lastReminderAt = new Date(Date.now() - 30 * 1000);
+
+        await mockWorkerRegistry.processor?.(initialJob());
+
+        expect(postponeInitialConfirmationRequest).toHaveBeenCalledWith(orderId.toString(), 1);
+        expect(Message.create).not.toHaveBeenCalled();
+        expect(enqueueOrderConfirmation).not.toHaveBeenCalled();
+
+        // The reminder Message is created and sent before the postponed request runs.
+        messages[messageId.toString()] = {
+          _id: messageId,
+          orderId,
+          templatePurpose: TemplatePurpose.REMINDER,
+          status: MessageStatus.SENT
+        };
+        await mockWorkerRegistry.processor?.(initialJob(1));
+
+        expect(postponeInitialConfirmationRequest).toHaveBeenCalledTimes(1);
+        expect(enqueueOrderConfirmation).not.toHaveBeenCalled();
+      });
+
+      it('sends the request when an older claim never produced a reminder Message', async () => {
+        order.lastReminderAt = new Date(Date.now() - RECENT_REMINDER_CLAIM_MS - 60 * 1000);
+
+        await mockWorkerRegistry.processor?.(initialJob());
+
+        expectHandedOverOnce();
+      });
+
+      it('sends the request when no claim date is recorded', async () => {
+        await mockWorkerRegistry.processor?.(initialJob());
+
+        expectHandedOverOnce();
+      });
+    });
+
+    it('never looks for a reminder when the order was not reminded', async () => {
+      order.reminderCount = 0;
+
+      await mockWorkerRegistry.processor?.(initialJob());
+
+      expect(Message.find).not.toHaveBeenCalled();
+      expect(postponeInitialConfirmationRequest).not.toHaveBeenCalled();
+      expect(enqueueOrderConfirmation).toHaveBeenCalledTimes(1);
+    });
+
+    it('still skips a request whose order was confirmed meanwhile, whatever the reminder state', async () => {
+      Object.assign(messages[messageId.toString()], { status: MessageStatus.SENDING });
+      confirmOrder();
+
+      await mockWorkerRegistry.processor?.(initialJob());
+
+      expect(postponeInitialConfirmationRequest).not.toHaveBeenCalled();
+      expect(enqueueOrderConfirmation).not.toHaveBeenCalled();
+      expect(Message.create).not.toHaveBeenCalled();
+      expect(order.notificationStatus).toBe(NotificationStatus.SKIPPED);
+      expect(order.customerConfirmationStatus).toBe(CustomerConfirmationStatus.CONFIRMED);
     });
   });
 

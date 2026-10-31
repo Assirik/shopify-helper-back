@@ -24,7 +24,8 @@ import {
   SendOrderConfirmationJobData,
   enqueueOrderConfirmation,
   getInitialConfirmationSendJobId,
-  getRedisConnection
+  getRedisConnection,
+  postponeInitialConfirmationRequest
 } from '../queues/notification.queue';
 import config from '../utilities/config/env.config';
 import log from '../utilities/logger/logger';
@@ -480,16 +481,13 @@ const processOrderConfirmation = async (job: Job<SendOrderConfirmationJobData>) 
 
 // Why the delayed initial request must not be sent, or null when it must. Attention flags
 // (e.g. `phone_mismatch`) are deliberately ignored: such an order is still pending.
+// A reminder claimed during the delay is checked separately (`getReminderDeliveryState`):
+// only a reminder that actually reached the customer replaces the initial request (C5.18).
 export const getInitialConfirmationSkipReason = (
-  order: Pick<IOrder, 'customerConfirmationStatus' | 'shopifyCancelledAt' | 'operationalStatus' | 'reminderCount'>
+  order: Pick<IOrder, 'customerConfirmationStatus' | 'shopifyCancelledAt' | 'operationalStatus'>
 ) => {
   if (order.customerConfirmationStatus !== CustomerConfirmationStatus.PENDING) {
     return 'not_pending';
-  }
-
-  // A reminder (admin or bulk) sent during the delay already was the first contact.
-  if ((order.reminderCount || 0) > 0) {
-    return 'already_reminded';
   }
 
   if (order.shopifyCancelledAt) {
@@ -501,6 +499,46 @@ export const getInitialConfirmationSkipReason = (
   }
 
   return null;
+};
+
+// C5.18: how many times the delayed initial request waits for a reminder still being sent.
+// Past this bound the reminder is considered stuck (lost job, hung provider call) and the
+// initial request is sent: the customer is never left without any request.
+export const MAX_INITIAL_REQUEST_REMINDER_WAITS = 3;
+
+// C5.18: a reminder is claimed on the order (`reminderCount`, `lastReminderAt`) before its
+// Message is created. A claim this recent without any reminder Message is still being dispatched.
+export const RECENT_REMINDER_CLAIM_MS = 2 * 60 * 1000;
+
+type ReminderDeliveryState = 'reached' | 'in_progress' | 'none';
+
+// Whether a reminder claimed for this order reached the customer, is still being sent (claimed
+// moments ago, queued or retrying), or failed / never existed.
+const getReminderDeliveryState = async (
+  order: Pick<IOrder, '_id' | 'lastReminderAt'>
+): Promise<ReminderDeliveryState> => {
+  const reminders = await Message.find(
+    { orderId: order._id, templatePurpose: TemplatePurpose.REMINDER },
+    { status: 1 }
+  );
+
+  if (
+    reminders.length === 0 &&
+    order.lastReminderAt &&
+    Date.now() - new Date(order.lastReminderAt).getTime() < RECENT_REMINDER_CLAIM_MS
+  ) {
+    return 'in_progress';
+  }
+
+  if (reminders.some(reminder => isMessageAlreadySent(reminder.status))) {
+    return 'reached';
+  }
+
+  if (reminders.some(reminder => reminder.status === MessageStatus.QUEUED || reminder.status === MessageStatus.SENDING)) {
+    return 'in_progress';
+  }
+
+  return 'none';
 };
 
 // Settles the initial request status of an order whose delayed request will never be sent.
@@ -545,7 +583,32 @@ export const processInitialConfirmationRequest = async (job: Job<InitialConfirma
     return;
   }
 
-  const skipReason = getInitialConfirmationSkipReason(order);
+  let skipReason: string | null = getInitialConfirmationSkipReason(order);
+
+  // C5.18: a reminder claimed during the delay replaces the initial request only once it
+  // actually reached the customer. A failed one does not: the request (and its SMS fallback)
+  // still goes out. One still being sent is waited for, a bounded number of times, so the
+  // customer gets neither two requests nor none.
+  if (!skipReason && (order.reminderCount || 0) > 0) {
+    const reminderState = await getReminderDeliveryState(order);
+    const reminderWaitCount = job.data.reminderWaitCount || 0;
+
+    if (reminderState === 'reached') {
+      skipReason = 'already_reminded';
+    } else if (reminderState === 'in_progress' && reminderWaitCount < MAX_INITIAL_REQUEST_REMINDER_WAITS) {
+      const postponedJob = await postponeInitialConfirmationRequest(orderId, reminderWaitCount + 1);
+      log.info(
+        { jobId: job.id, orderId, reminderWaitCount: reminderWaitCount + 1, postponedJobId: postponedJob.id },
+        'Delayed initial confirmation request postponed, a reminder is still being sent'
+      );
+      return;
+    } else if (reminderState === 'in_progress') {
+      log.warn(
+        { jobId: job.id, orderId, reminderWaitCount },
+        'Reminder still not sent after the last wait, sending the delayed initial confirmation request'
+      );
+    }
+  }
 
   if (skipReason) {
     log.info(

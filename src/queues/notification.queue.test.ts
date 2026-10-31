@@ -102,3 +102,29 @@ describe('enqueueOrderConfirmation', () => {
     expect(opts).not.toHaveProperty('delay');
   });
 });
+
+describe('postponeInitialConfirmationRequest (C5.18)', () => {
+  afterEach(() => {
+    queueAdd.mockClear();
+  });
+
+  it('re-schedules the delayed request later under a deterministic id per wait', async () => {
+    const queue = loadQueue();
+
+    await queue.postponeInitialConfirmationRequest(ORDER_ID, 1);
+    await queue.postponeInitialConfirmationRequest(ORDER_ID, 1);
+    await queue.postponeInitialConfirmationRequest(ORDER_ID, 2);
+
+    expect(queueAdd).toHaveBeenCalledTimes(3);
+    const [name, data, opts] = queueAdd.mock.calls[0];
+    expect(name).toBe(queue.SEND_INITIAL_CONFIRMATION_REQUEST_JOB);
+    expect(data).toEqual({ orderId: ORDER_ID, reminderWaitCount: 1 });
+    expect(opts).toEqual(expect.objectContaining({ delay: queue.INITIAL_REQUEST_REMINDER_WAIT_MS }));
+    expect(queueAdd.mock.calls.map(call => call[2].jobId)).toEqual([
+      `confirm-initial-${ORDER_ID}-wait-1`,
+      `confirm-initial-${ORDER_ID}-wait-1`,
+      `confirm-initial-${ORDER_ID}-wait-2`
+    ]);
+    expect(String(opts.jobId)).not.toContain(':');
+  });
+});
