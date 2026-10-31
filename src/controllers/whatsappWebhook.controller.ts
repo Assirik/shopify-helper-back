@@ -288,15 +288,23 @@ const handleCustomerReaction = async (message: MetaWhatsAppMessagePayload, rawPa
     set.attentionReason = reason;
     set.attentionReasonCode = AttentionReasonCode.FREE_TEXT;
     set.attentionRequiredAt = new Date();
-
-    // Only downgrade to needs_attention when the order is not yet in a final
-    // confirmation state; otherwise keep its status and just flag the helpdesk.
-    if (!preserveStatus) {
-      set.customerConfirmationStatus = CustomerConfirmationStatus.NEEDS_ATTENTION;
-    }
   }
 
-  await Order.findByIdAndUpdate(order._id, { $set: set });
+  // Only downgrade to needs_attention when the order is not yet in a final confirmation
+  // state; otherwise keep its status and just flag the helpdesk. The downgrade is
+  // conditional: an order confirmed (or closed) since it was read keeps its status and gets
+  // the same write as if it had been read so (a confirmed sale must keep its Purchase).
+  const downgraded =
+    !isCompleted && !preserveStatus
+      ? await Order.findOneAndUpdate(
+          { _id: order._id, customerConfirmationStatus: { $nin: PRESERVED_CONFIRMATION_STATUSES } },
+          { $set: { ...set, customerConfirmationStatus: CustomerConfirmationStatus.NEEDS_ATTENTION } }
+        )
+      : null;
+
+  if (!downgraded) {
+    await Order.findByIdAndUpdate(order._id, { $set: set });
+  }
 
   return InboundWhatsAppEvent.create({
     waMessageId: message.id,

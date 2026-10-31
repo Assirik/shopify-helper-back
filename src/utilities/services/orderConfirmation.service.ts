@@ -321,13 +321,19 @@ export const matchPrefilledConfirmationText = (
 };
 
 // Compiled once at startup: an invalid template is logged and disables the confirmation by
-// message (every message then follows the regular free-text handling).
+// message (every message then follows the regular free-text handling). A valid one is logged
+// as loaded (configuration, not customer data) so it can be compared with the EasySell text.
 const prefilledConfirmationTemplate = compilePrefilledConfirmationTemplate(config.confirmation.prefilledTemplate);
 
 if ('error' in prefilledConfirmationTemplate) {
   log.error(
     { template: config.confirmation.prefilledTemplate },
     `${prefilledConfirmationTemplate.error}: confirmation by pre-filled message is disabled`
+  );
+} else {
+  log.info(
+    { template: config.confirmation.prefilledTemplate },
+    'Pre-filled confirmation template loaded: confirmation by pre-filled message is enabled'
   );
 }
 
@@ -504,17 +510,36 @@ export class OrderConfirmationService {
     // Late confirmation on an expired/cancelled order: never auto-confirm, route to helpdesk.
     // A new press on an order cancelled or expired then re-opened lands here too (the write
     // above excludes it): it is flagged late_confirm again, never confirmed.
-    order.customerConfirmationStatus = CustomerConfirmationStatus.NEEDS_ATTENTION;
-    order.needsHelpdeskAttention = true;
-    order.lastCustomerMessageAt = now;
-    order.lastCustomerMessageText = lastCustomerMessageText;
-    order.confirmationPayload = payload;
-    order.attentionReason = 'Confirmation received after expiration or cancellation';
-    order.attentionReasonCode = AttentionReasonCode.LATE_CONFIRM;
-    order.attentionRequiredAt = now;
-    await order.save();
+    // Conditional write: an agent confirmation landing between the read above and this write
+    // is never demoted (a stale save() would overwrite it and lose its Purchase).
+    const flagged = await Order.findOneAndUpdate(
+      { _id: order._id, customerConfirmationStatus: { $ne: CustomerConfirmationStatus.CONFIRMED } },
+      {
+        $set: {
+          customerConfirmationStatus: CustomerConfirmationStatus.NEEDS_ATTENTION,
+          needsHelpdeskAttention: true,
+          lastCustomerMessageAt: now,
+          lastCustomerMessageText,
+          confirmationPayload: payload,
+          attentionReason: 'Confirmation received after expiration or cancellation',
+          attentionReasonCode: AttentionReasonCode.LATE_CONFIRM,
+          attentionRequiredAt: now
+        }
+      },
+      { new: true }
+    );
 
-    return { order, message: undefined, job: undefined, alreadyConfirmed: false, needsAttention: true };
+    if (!flagged) {
+      const current = await getOrderOrThrow(orderId);
+
+      if (current.customerConfirmationStatus === CustomerConfirmationStatus.CONFIRMED) {
+        return { order: current, message: undefined, job: undefined, alreadyConfirmed: true, needsAttention: false };
+      }
+
+      return { order: current, message: undefined, job: undefined, alreadyConfirmed: false, needsAttention: true };
+    }
+
+    return { order: flagged, message: undefined, job: undefined, alreadyConfirmed: false, needsAttention: true };
   }
 
   /**

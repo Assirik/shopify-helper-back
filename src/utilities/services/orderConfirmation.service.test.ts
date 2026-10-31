@@ -695,6 +695,7 @@ describe('pre-filled WhatsApp confirmation (C5.6b)', () => {
       ['without {{order.number}}', 'Je confirme ma commande']
     ])('is logged at startup and disables the confirmation by message (%s)', async (_label, template) => {
       const logError = jest.fn();
+      const logInfo = jest.fn();
       let isolated!: {
         service: typeof import('./orderConfirmation.service');
         order: typeof import('../../models/Order');
@@ -711,7 +712,7 @@ describe('pre-filled WhatsApp confirmation (C5.6b)', () => {
         });
         jest.doMock('../logger/logger', () => ({
           __esModule: true,
-          default: { error: logError, info: jest.fn(), warn: jest.fn(), debug: jest.fn() }
+          default: { error: logError, info: logInfo, warn: jest.fn(), debug: jest.fn() }
         }));
         isolated = {
           service: require('./orderConfirmation.service'),
@@ -724,6 +725,7 @@ describe('pre-filled WhatsApp confirmation (C5.6b)', () => {
         { template },
         expect.stringContaining('confirmation by pre-filled message is disabled')
       );
+      expect(logInfo).not.toHaveBeenCalled();
 
       const findOne = jest.spyOn(isolated.order.Order, 'findOne');
       const update = jest.spyOn(isolated.order.Order, 'findOneAndUpdate');
@@ -737,6 +739,34 @@ describe('pre-filled WhatsApp confirmation (C5.6b)', () => {
       expect(findOne).not.toHaveBeenCalled();
       expect(update).not.toHaveBeenCalled();
     });
+  });
+
+  it('logs the loaded template at startup when it is valid', () => {
+    const template = 'Bonjour, je confirme ma commande #{{order.number}}';
+    const logError = jest.fn();
+    const logInfo = jest.fn();
+
+    jest.isolateModules(() => {
+      jest.doMock('../config/env.config', () => {
+        const actual = jest.requireActual<typeof import('../config/env.config')>('../config/env.config');
+        return {
+          ...actual,
+          __esModule: true,
+          default: { ...actual.default, confirmation: { ...actual.default.confirmation, prefilledTemplate: template } }
+        };
+      });
+      jest.doMock('../logger/logger', () => ({
+        __esModule: true,
+        default: { error: logError, info: logInfo, warn: jest.fn(), debug: jest.fn() }
+      }));
+      require('./orderConfirmation.service');
+    });
+
+    expect(logError).not.toHaveBeenCalled();
+    expect(logInfo).toHaveBeenCalledWith(
+      { template },
+      'Pre-filled confirmation template loaded: confirmation by pre-filled message is enabled'
+    );
   });
 
   it.each([
@@ -1219,8 +1249,9 @@ describe('late confirmation is confirmed by an agent only (C5.16)', () => {
       const firstAttentionAt = state.attentionRequiredAt;
       const result = await pressConfirm('Confirmer encore');
 
-      expect(update).toHaveBeenCalledTimes(2);
-      expect(update.mock.calls[1]?.[0]).toEqual(
+      // Each press: the guarded confirmation write (not applied), then the late_confirm flag.
+      expect(update).toHaveBeenCalledTimes(4);
+      expect(update.mock.calls[2]?.[0]).toEqual(
         expect.objectContaining({ attentionReasonCode: { $ne: AttentionReasonCode.LATE_CONFIRM } })
       );
       expect(result).toEqual(expect.objectContaining({ alreadyConfirmed: false, needsAttention: true }));
@@ -1252,7 +1283,8 @@ describe('late confirmation is confirmed by an agent only (C5.16)', () => {
       const result = await OrderConfirmationService.confirmByPrefilledMessage({ from, text: prefilledText, waMessageId: 'wamid.late' });
 
       expect(result).toEqual({ outcome: 'not_applicable' });
-      expect(update).toHaveBeenCalledTimes(1);
+      // Only the first press wrote (guarded confirmation, then late_confirm flag).
+      expect(update).toHaveBeenCalledTimes(2);
       expect(state).toEqual(afterFirstPress);
       expect(triggerCapiPurchase).not.toHaveBeenCalled();
       expect(createEvent).not.toHaveBeenCalled();
@@ -1273,6 +1305,66 @@ describe('late confirmation is confirmed by an agent only (C5.16)', () => {
       expect(createEvent).toHaveBeenCalledTimes(1);
       expect(createMessage).toHaveBeenCalledTimes(1);
     });
+  });
+
+  // C5.24: an agent confirmation landing between the late-press read and its write is kept.
+  it.each([
+    ['cancelled by an agent', CustomerConfirmationStatus.CANCELLED],
+    ['expired', CustomerConfirmationStatus.EXPIRED]
+  ])('keeps an order %s then confirmed by an agent between the late-press read and its write', async (_label, closedStatus) => {
+    const state: Record<string, unknown> = {
+      ...closedOrder(CustomerConfirmationStatus.CONFIRMED),
+      confirmationSource: ConfirmationSource.PHONE_CALL,
+      confirmedAt: new Date(),
+      operationalStatus: OrderOperationalStatus.TO_DELIVER
+    };
+    const { createEvent, createMessage } = mockOrderStore(state);
+    // Stale read: still closed when read after the guarded confirmation write.
+    const stale: Record<string, unknown> = { ...closedOrder(closedStatus) };
+    stale.save = async () => {
+      const { save: _save, ...fields } = stale;
+      Object.assign(state, fields);
+    };
+    jest.mocked(Order.findById).mockResolvedValueOnce(stale as never);
+
+    const result = await pressConfirm();
+
+    expect(result).toEqual(expect.objectContaining({ alreadyConfirmed: true, needsAttention: false }));
+    expect(state).toEqual(
+      expect.objectContaining({
+        customerConfirmationStatus: CustomerConfirmationStatus.CONFIRMED,
+        confirmationSource: ConfirmationSource.PHONE_CALL,
+        operationalStatus: OrderOperationalStatus.TO_DELIVER
+      })
+    );
+    expect(state.attentionReasonCode).toBeUndefined();
+    expect(triggerCapiPurchase).not.toHaveBeenCalled();
+    expect(createEvent).not.toHaveBeenCalled();
+    expect(createMessage).not.toHaveBeenCalled();
+  });
+
+  // C5.24: only a concurrent confirmation blocks the late-press write; any other change
+  // (here an expired order cancelled by an agent) still gets the late_confirm flag.
+  it('still flags late_confirm when an expired order is cancelled between the late-press read and its write', async () => {
+    const state = closedOrder(CustomerConfirmationStatus.CANCELLED);
+    const { createEvent, createMessage } = mockOrderStore(state);
+    const stale: Record<string, unknown> = { ...closedOrder(CustomerConfirmationStatus.EXPIRED) };
+    jest.mocked(Order.findById).mockResolvedValueOnce(stale as never);
+
+    const result = await pressConfirm();
+
+    expect(result).toEqual(expect.objectContaining({ alreadyConfirmed: false, needsAttention: true }));
+    expect(state).toEqual(
+      expect.objectContaining({
+        customerConfirmationStatus: CustomerConfirmationStatus.NEEDS_ATTENTION,
+        attentionReasonCode: AttentionReasonCode.LATE_CONFIRM,
+        needsHelpdeskAttention: true
+      })
+    );
+    expect(state.confirmedAt).toBeUndefined();
+    expect(triggerCapiPurchase).not.toHaveBeenCalled();
+    expect(createEvent).not.toHaveBeenCalled();
+    expect(createMessage).not.toHaveBeenCalled();
   });
 
   it('never writes a late_confirm order flagged between the read and the pre-filled write', async () => {
