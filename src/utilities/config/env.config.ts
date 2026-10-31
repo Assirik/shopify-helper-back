@@ -15,10 +15,19 @@ const initialAdminBootstrapSecret = process.env.INITIAL_ADMIN_BOOTSTRAP_SECRET |
 
 export const DEFAULT_FX_XOF_EUR = 655.957;
 
+// META_CAPI_ENABLED: 'true' / 'false' (case and surrounding spaces ignored); absent or blank = off.
+// Any other value is flagged `enabledInvalid` (sending stays off) and refused at startup by checkCapiStartup.
+const parseCapiEnabled = (value?: string): { enabled: boolean; enabledInvalid: boolean } => {
+  const normalized = (value || '').trim().toLowerCase();
+  if (normalized === '' || normalized === 'false') return { enabled: false, enabledInvalid: false };
+  if (normalized === 'true') return { enabled: true, enabledInvalid: false };
+  return { enabled: false, enabledInvalid: true };
+};
+
 export const buildMetaCapiConfig = (env: NodeJS.ProcessEnv) => {
   const fx = Number(env.META_CAPI_FX_XOF_EUR);
   return {
-    enabled: env.META_CAPI_ENABLED === 'true',
+    ...parseCapiEnabled(env.META_CAPI_ENABLED),
     datasetId: (env.META_CAPI_DATASET_ID || '').trim(),
     accessToken: (env.META_CAPI_ACCESS_TOKEN || '').trim(),
     graphApiVersion: (env.META_CAPI_GRAPH_API_VERSION || '').trim() || 'v26.0',
