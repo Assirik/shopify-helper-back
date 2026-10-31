@@ -155,6 +155,8 @@ const OrderSchema = new Schema<IOrder>(
     capiPurchaseError: { type: String, trim: true },
     confirmationCancelledAt: { type: Date },
     expiredAt: { type: Date },
+    // Set when a confirmation message came from another phone number; never cleared.
+    phoneMismatchAt: { type: Date },
     confirmationCancelReason: { type: String, trim: true },
     lastCustomerMessageAt: { type: Date },
     lastCustomerMessageText: { type: String, trim: true },
@@ -269,6 +271,7 @@ export interface IOrder extends Document {
   capiPurchaseError?: string;
   confirmationCancelledAt?: Date;
   expiredAt?: Date;
+  phoneMismatchAt?: Date;
   confirmationCancelReason?: string;
   lastCustomerMessageAt?: Date;
   lastCustomerMessageText?: string;

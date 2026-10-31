@@ -274,6 +274,11 @@ const swaggerOptions: swaggerJSDoc.Options = {
             capiPurchaseError: { type: 'string' },
             confirmationCancelledAt: dateTime,
             expiredAt: dateTime,
+            phoneMismatchAt: {
+              ...dateTime,
+              description:
+                'Date du signalement « Numéro différent » (message de confirmation reçu d’un autre numéro). Jamais effacée : tant qu’elle est présente, la commande ne se confirme que par appel (source phone_call).'
+            },
             confirmationCancelReason: { type: 'string' },
             lastCustomerMessageAt: dateTime,
             lastCustomerMessageText: { type: 'string' },
@@ -320,6 +325,11 @@ const swaggerOptions: swaggerJSDoc.Options = {
             },
             isCashOnDelivery: { type: 'boolean' },
             reason: { type: 'string', enum: ['free_text', 'sms_only', 'invalid_number', 'late_confirm', 'phone_mismatch', 'notification_not_scheduled'] },
+            phoneMismatchAt: {
+              ...dateTime,
+              description:
+                'Date du signalement « Numéro différent », conservée même si le motif courant change : la commande ne se confirme que par appel.'
+            },
             lastCustomerMessage: { type: 'string' },
             receivedAt: dateTime,
             customerConfirmationStatus: { type: 'string', enum: ['pending', 'confirmed', 'needs_attention', 'expired', 'cancelled', 'sms_only'] },
