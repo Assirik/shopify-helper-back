@@ -342,6 +342,8 @@ export const toAttentionOrder = (order: IOrder) => {
     },
     isCashOnDelivery: order.isCashOnDelivery,
     reason: order.attentionReasonCode,
+    // Durable "confirmation from another number" marker: the order is confirmed by call only.
+    phoneMismatchAt: order.phoneMismatchAt,
     lastCustomerMessage: order.lastCustomerMessageText || '',
     receivedAt: order.attentionRequiredAt || order.lastCustomerMessageAt || order.updatedAt || order.createdAt,
     customerConfirmationStatus: order.customerConfirmationStatus,

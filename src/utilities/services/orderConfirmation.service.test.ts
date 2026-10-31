@@ -254,7 +254,8 @@ describe('mark order unreachable', () => {
 
     expect(update.mock.calls[0]?.[0]).toEqual({
       _id: orderId.toString(),
-      customerConfirmationStatus: { $in: CONFIRMABLE_BY_ADMIN }
+      customerConfirmationStatus: { $in: CONFIRMABLE_BY_ADMIN },
+      attentionReasonCode: { $ne: AttentionReasonCode.PHONE_MISMATCH }
     });
     expect(update.mock.calls[0]?.[1]).toEqual({
       $set: {
@@ -636,6 +637,7 @@ describe('pre-filled WhatsApp confirmation (C5.6b)', () => {
         attentionReasonCode: AttentionReasonCode.PHONE_MISMATCH,
         attentionReason: PHONE_MISMATCH_ATTENTION_REASON,
         attentionRequiredAt: expect.any(Date),
+        phoneMismatchAt: expect.any(Date),
         lastCustomerMessageAt: expect.any(Date),
         lastCustomerMessageText: 'Je confirme ma commande #1234'
       }
@@ -1092,7 +1094,10 @@ describe('Meta Purchase trigger on confirmation (C5.5)', () => {
 
   it('does not trigger when the agent confirmation is refused', async () => {
     jest.spyOn(Order, 'findOneAndUpdate').mockResolvedValue(null as never);
-    jest.spyOn(Order, 'exists').mockResolvedValue({ _id: orderId } as never);
+    jest.spyOn(Order, 'findById').mockResolvedValue({
+      _id: orderId,
+      customerConfirmationStatus: CustomerConfirmationStatus.CONFIRMED
+    } as never);
 
     await expect(OrderConfirmationService.confirmByAdmin(orderId.toString())).rejects.toMatchObject({
       code: 'OrderConfirmationNotAllowed',
@@ -1102,6 +1107,65 @@ describe('Meta Purchase trigger on confirmation (C5.5)', () => {
   });
 });
 
+// Evaluates the operators the service writes with, using MongoDB semantics: `null`
+// and `$nin` / `$ne` also match a missing field.
+const matchesFilter = (doc: Record<string, unknown>, filter: Record<string, unknown>) =>
+  Object.entries(filter).every(([key, condition]) => {
+    const value = doc[key];
+
+    if (condition === null) {
+      return value === null || value === undefined;
+    }
+
+    if (condition && typeof condition === 'object' && !(condition instanceof Types.ObjectId)) {
+      const ops = condition as { $in?: unknown[]; $nin?: unknown[]; $ne?: unknown };
+
+      if (ops.$in) {
+        return ops.$in.includes(value);
+      }
+
+      if (ops.$nin) {
+        return !ops.$nin.includes(value ?? null);
+      }
+
+      return value !== ops.$ne;
+    }
+
+    return String(value) === String(condition);
+  });
+
+// In-memory order honouring the conditional writes and `save()`, as MongoDB would.
+const mockOrderStore = (state: Record<string, unknown>) => {
+  jest.spyOn(Order, 'findOne').mockImplementation(((filter: { shopifyOrderName?: string }) =>
+    Promise.resolve(filter.shopifyOrderName === state.shopifyOrderName ? { ...state } : null)) as never);
+  jest.spyOn(Order, 'findById').mockImplementation((() => {
+    const doc: Record<string, unknown> = { ...state };
+    doc.save = async () => {
+      const { save: _save, ...fields } = doc;
+      Object.assign(state, fields);
+    };
+    return Promise.resolve(doc);
+  }) as never);
+  const update = jest.spyOn(Order, 'findOneAndUpdate').mockImplementation(((
+    filter: Record<string, unknown>,
+    change: { $set: Record<string, unknown>; $unset?: Record<string, unknown> }
+  ) =>
+    Promise.resolve().then(() => {
+      if (!matchesFilter(state, filter)) {
+        return null;
+      }
+      Object.assign(state, change.$set);
+      for (const key of Object.keys(change.$unset ?? {})) {
+        delete state[key];
+      }
+      return { ...state };
+    })) as never);
+  const createEvent = jest.spyOn(OrderEvent, 'create').mockResolvedValue({} as never);
+  const createMessage = jest.spyOn(Message, 'create').mockResolvedValue({ _id: new Types.ObjectId() } as never);
+
+  return { update, createEvent, createMessage };
+};
+
 describe('late confirmation is confirmed by an agent only (C5.16)', () => {
   const orderId = new Types.ObjectId();
   const orderPhone = '+221776986780';
@@ -1110,65 +1174,6 @@ describe('late confirmation is confirmed by an agent only (C5.16)', () => {
   afterEach(() => {
     jest.restoreAllMocks();
   });
-
-  // Evaluates the operators the service writes with, using MongoDB semantics: `null`
-  // and `$nin` / `$ne` also match a missing field.
-  const matchesFilter = (doc: Record<string, unknown>, filter: Record<string, unknown>) =>
-    Object.entries(filter).every(([key, condition]) => {
-      const value = doc[key];
-
-      if (condition === null) {
-        return value === null || value === undefined;
-      }
-
-      if (condition && typeof condition === 'object' && !(condition instanceof Types.ObjectId)) {
-        const ops = condition as { $in?: unknown[]; $nin?: unknown[]; $ne?: unknown };
-
-        if (ops.$in) {
-          return ops.$in.includes(value);
-        }
-
-        if (ops.$nin) {
-          return !ops.$nin.includes(value ?? null);
-        }
-
-        return value !== ops.$ne;
-      }
-
-      return String(value) === String(condition);
-    });
-
-  // In-memory order honouring the conditional writes and `save()`, as MongoDB would.
-  const mockOrderStore = (state: Record<string, unknown>) => {
-    jest.spyOn(Order, 'findOne').mockImplementation(((filter: { shopifyOrderName?: string }) =>
-      Promise.resolve(filter.shopifyOrderName === state.shopifyOrderName ? { ...state } : null)) as never);
-    jest.spyOn(Order, 'findById').mockImplementation((() => {
-      const doc: Record<string, unknown> = { ...state };
-      doc.save = async () => {
-        const { save: _save, ...fields } = doc;
-        Object.assign(state, fields);
-      };
-      return Promise.resolve(doc);
-    }) as never);
-    const update = jest.spyOn(Order, 'findOneAndUpdate').mockImplementation(((
-      filter: Record<string, unknown>,
-      change: { $set: Record<string, unknown>; $unset?: Record<string, unknown> }
-    ) =>
-      Promise.resolve().then(() => {
-        if (!matchesFilter(state, filter)) {
-          return null;
-        }
-        Object.assign(state, change.$set);
-        for (const key of Object.keys(change.$unset ?? {})) {
-          delete state[key];
-        }
-        return { ...state };
-      })) as never);
-    const createEvent = jest.spyOn(OrderEvent, 'create').mockResolvedValue({} as never);
-    const createMessage = jest.spyOn(Message, 'create').mockResolvedValue({ _id: new Types.ObjectId() } as never);
-
-    return { update, createEvent, createMessage };
-  };
 
   const closedOrder = (customerConfirmationStatus: CustomerConfirmationStatus): Record<string, unknown> => ({
     _id: orderId,
@@ -1312,21 +1317,236 @@ describe('late confirmation is confirmed by an agent only (C5.16)', () => {
         jest.mocked(triggerCapiPurchase).mockClear();
       }
     });
+  });
+});
 
-    it('lets an agent confirm a phone_mismatch order', async () => {
-      const state: Record<string, unknown> = {
-        ...closedOrder(CustomerConfirmationStatus.PENDING),
+describe('phone_mismatch order is confirmed by a phone call only (C5.23)', () => {
+  const orderId = new Types.ObjectId();
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  const mismatchOrder = (
+    customerConfirmationStatus = CustomerConfirmationStatus.PENDING
+  ): Record<string, unknown> => ({
+    _id: orderId,
+    shopifyOrderName: '#1234',
+    customerPhoneE164: '+221776986780',
+    customerConfirmationStatus,
+    needsHelpdeskAttention: true,
+    attentionReasonCode: AttentionReasonCode.PHONE_MISMATCH,
+    attentionReason: PHONE_MISMATCH_ATTENTION_REASON
+  });
+
+  it.each([
+    ['no source', undefined],
+    ['admin', ConfirmationSource.ADMIN],
+    ['another source', ConfirmationSource.WHATSAPP_BUTTON]
+  ])('refuses an agent confirmation with %s (409, no write)', async (_label, source) => {
+    for (const status of [CustomerConfirmationStatus.PENDING, CustomerConfirmationStatus.NEEDS_ATTENTION]) {
+      const state = mismatchOrder(status);
+      const before = { ...state };
+      const { update, createEvent, createMessage } = mockOrderStore(state);
+
+      await expect(
+        OrderConfirmationService.confirmByAdmin(orderId.toString(), undefined, source as never)
+      ).rejects.toMatchObject({ code: 'PhoneMismatchRequiresCall', status: 409 });
+
+      // The rule is part of the write filter, not only of a prior read.
+      expect(update.mock.calls[0]?.[0]).toEqual(
+        expect.objectContaining({
+          attentionReasonCode: { $ne: AttentionReasonCode.PHONE_MISMATCH },
+          phoneMismatchAt: null
+        })
+      );
+      expect(state).toEqual(before);
+      expect(createEvent).not.toHaveBeenCalled();
+      expect(createMessage).not.toHaveBeenCalled();
+      expect(triggerCapiPurchase).not.toHaveBeenCalled();
+      jest.restoreAllMocks();
+    }
+  });
+
+  it('confirms it by phone call with a single Purchase', async () => {
+    const state = mismatchOrder();
+    const { update, createEvent, createMessage } = mockOrderStore(state);
+
+    await OrderConfirmationService.confirmByAdmin(orderId.toString(), undefined, ConfirmationSource.PHONE_CALL);
+
+    expect(update).toHaveBeenCalledTimes(1);
+    expect(state).toEqual(
+      expect.objectContaining({
+        customerConfirmationStatus: CustomerConfirmationStatus.CONFIRMED,
+        confirmationSource: ConfirmationSource.PHONE_CALL,
+        operationalStatus: OrderOperationalStatus.TO_DELIVER,
+        needsHelpdeskAttention: false
+      })
+    );
+    expect(state.attentionReasonCode).toBeUndefined();
+    expect(triggerCapiPurchase).toHaveBeenCalledTimes(1);
+    expect(triggerCapiPurchase).toHaveBeenCalledWith(orderId, 'confirmation');
+    expect(createEvent).toHaveBeenCalledTimes(1);
+    expect(createEvent.mock.calls[0]?.[0]).toEqual(
+      expect.objectContaining({ metadata: { source: ConfirmationSource.PHONE_CALL } })
+    );
+    expect(createMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps the regular refusal for a phone_mismatch order that is no longer confirmable', async () => {
+    const state = mismatchOrder(CustomerConfirmationStatus.CANCELLED);
+    mockOrderStore(state);
+
+    await expect(OrderConfirmationService.confirmByAdmin(orderId.toString())).rejects.toMatchObject({
+      code: 'OrderConfirmationNotAllowed',
+      status: 409
+    });
+  });
+
+  it('keeps the phone_mismatch reason when the customer is marked unreachable, so a call is still required', async () => {
+    const state = mismatchOrder();
+    const { createEvent } = mockOrderStore(state);
+
+    await OrderConfirmationService.markUnreachable(orderId.toString(), 'Pas de réponse');
+
+    expect(state).toEqual(
+      expect.objectContaining({
+        needsHelpdeskAttention: true,
         attentionReasonCode: AttentionReasonCode.PHONE_MISMATCH,
-        needsHelpdeskAttention: true
+        attentionReason: PHONE_MISMATCH_ATTENTION_REASON,
+        attentionRequiredAt: expect.any(Date),
+        lastNoteText: 'Pas de réponse',
+        lastNoteAt: expect.any(Date)
+      })
+    );
+    expect(createEvent.mock.calls[0]?.[0]).toEqual(
+      expect.objectContaining({ type: OrderEventType.NOTE, note: 'Pas de réponse' })
+    );
+
+    await expect(
+      OrderConfirmationService.confirmByAdmin(orderId.toString(), undefined, ConfirmationSource.ADMIN)
+    ).rejects.toMatchObject({ code: 'PhoneMismatchRequiresCall', status: 409 });
+    expect(state.customerConfirmationStatus).toBe(CustomerConfirmationStatus.PENDING);
+    expect(triggerCapiPurchase).not.toHaveBeenCalled();
+
+    await OrderConfirmationService.confirmByAdmin(orderId.toString(), undefined, ConfirmationSource.PHONE_CALL);
+
+    expect(state.customerConfirmationStatus).toBe(CustomerConfirmationStatus.CONFIRMED);
+    expect(state.confirmationSource).toBe(ConfirmationSource.PHONE_CALL);
+    expect(triggerCapiPurchase).toHaveBeenCalledTimes(1);
+  });
+
+  describe('durable phoneMismatchAt marker', () => {
+    it.each([
+      ['a free text', AttentionReasonCode.FREE_TEXT, CustomerConfirmationStatus.NEEDS_ATTENTION],
+      ['the SMS fallback', AttentionReasonCode.SMS_ONLY, CustomerConfirmationStatus.SMS_ONLY]
+    ])(
+      'still requires a call once the reason is replaced by %s',
+      async (_label, laterReason, laterStatus) => {
+        const state: Record<string, unknown> = {
+          _id: orderId,
+          shopifyOrderName: '#1234',
+          customerPhoneE164: '+221776986780',
+          customerConfirmationStatus: CustomerConfirmationStatus.PENDING
+        };
+        mockOrderStore(state);
+
+        const flagged = await OrderConfirmationService.confirmByPrefilledMessage({
+          from: '221771112233',
+          text: 'Je confirme ma commande #1234'
+        });
+
+        expect(flagged.outcome).toBe('phone_mismatch');
+        expect(state.attentionReasonCode).toBe(AttentionReasonCode.PHONE_MISMATCH);
+        expect(state.phoneMismatchAt).toEqual(expect.any(Date));
+        const flaggedAt = state.phoneMismatchAt;
+
+        // Later write by the inbound free-text handling or the SMS fallback.
+        Object.assign(state, {
+          customerConfirmationStatus: laterStatus,
+          attentionReasonCode: laterReason,
+          attentionReason: 'Later reason'
+        });
+        const before = { ...state };
+
+        for (const source of [undefined, ConfirmationSource.ADMIN] as const) {
+          await expect(
+            OrderConfirmationService.confirmByAdmin(orderId.toString(), undefined, source)
+          ).rejects.toMatchObject({ code: 'PhoneMismatchRequiresCall', status: 409 });
+        }
+        expect(state).toEqual(before);
+        expect(triggerCapiPurchase).not.toHaveBeenCalled();
+
+        await OrderConfirmationService.confirmByAdmin(orderId.toString(), undefined, ConfirmationSource.PHONE_CALL);
+
+        expect(state.customerConfirmationStatus).toBe(CustomerConfirmationStatus.CONFIRMED);
+        expect(state.confirmationSource).toBe(ConfirmationSource.PHONE_CALL);
+        expect(state.phoneMismatchAt).toBe(flaggedAt);
+        expect(triggerCapiPurchase).toHaveBeenCalledTimes(1);
+      }
+    );
+
+    it('still requires a call after an unreachable attempt on a marked order', async () => {
+      const state: Record<string, unknown> = {
+        ...mismatchOrder(CustomerConfirmationStatus.NEEDS_ATTENTION),
+        attentionReasonCode: AttentionReasonCode.FREE_TEXT,
+        phoneMismatchAt: new Date('2026-10-01T10:00:00.000Z')
       };
       mockOrderStore(state);
 
-      await OrderConfirmationService.confirmByAdmin(orderId.toString());
+      await OrderConfirmationService.markUnreachable(orderId.toString(), 'Pas de réponse');
+
+      expect(state.attentionReasonCode).toBe(AttentionReasonCode.UNREACHABLE);
+      await expect(OrderConfirmationService.confirmByAdmin(orderId.toString())).rejects.toMatchObject({
+        code: 'PhoneMismatchRequiresCall',
+        status: 409
+      });
+      expect(state.customerConfirmationStatus).toBe(CustomerConfirmationStatus.NEEDS_ATTENTION);
+    });
+  });
+
+  it('still replaces any other reason by unreachable', async () => {
+    const state: Record<string, unknown> = {
+      ...mismatchOrder(CustomerConfirmationStatus.NEEDS_ATTENTION),
+      attentionReasonCode: AttentionReasonCode.FREE_TEXT,
+      attentionReason: 'Customer replied with free text'
+    };
+    mockOrderStore(state);
+
+    await OrderConfirmationService.markUnreachable(orderId.toString(), 'Pas de réponse');
+
+    expect(state).toEqual(
+      expect.objectContaining({
+        attentionReasonCode: AttentionReasonCode.UNREACHABLE,
+        attentionReason: 'Pas de réponse'
+      })
+    );
+  });
+
+  it.each([
+    AttentionReasonCode.FREE_TEXT,
+    AttentionReasonCode.UNREACHABLE,
+    AttentionReasonCode.LATE_CONFIRM,
+    AttentionReasonCode.SMS_ONLY,
+    AttentionReasonCode.INVALID_NUMBER,
+    AttentionReasonCode.NOTIFICATION_NOT_SCHEDULED
+  ])('lets an agent confirm a %s order with any source, as before', async reason => {
+    for (const source of [undefined, ConfirmationSource.ADMIN, ConfirmationSource.PHONE_CALL] as const) {
+      const state: Record<string, unknown> = {
+        ...mismatchOrder(CustomerConfirmationStatus.NEEDS_ATTENTION),
+        attentionReasonCode: reason
+      };
+      mockOrderStore(state);
+
+      await OrderConfirmationService.confirmByAdmin(orderId.toString(), undefined, source);
 
       expect(state.customerConfirmationStatus).toBe(CustomerConfirmationStatus.CONFIRMED);
+      expect(state.confirmationSource).toBe(source ?? ConfirmationSource.ADMIN);
       expect(state.attentionReasonCode).toBeUndefined();
       expect(triggerCapiPurchase).toHaveBeenCalledTimes(1);
-    });
+      jest.restoreAllMocks();
+      jest.mocked(triggerCapiPurchase).mockClear();
+    }
   });
 });
 

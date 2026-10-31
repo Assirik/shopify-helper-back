@@ -320,6 +320,18 @@ describe('order controller bulk actions', () => {
     orderIds.forEach(orderId => expect(service).toHaveBeenCalledWith(orderId, userId));
   });
 
+  it('bulkConfirm ignores a source sent in the body: a bulk confirmation is never a phone call (C5.23)', async () => {
+    const orderIds = [new Types.ObjectId().toString()];
+    const service = jest.spyOn(OrderConfirmationService, 'confirmByAdmin').mockResolvedValue({} as never);
+    const { req, res, userId } = buildBulkCall(orderIds);
+    (req.body as Record<string, unknown>).source = 'phone_call';
+
+    await OrderController.bulkConfirm(req, res);
+
+    expect(service).toHaveBeenCalledTimes(1);
+    expect(service.mock.calls[0]).toEqual([orderIds[0], userId]);
+  });
+
   it('bulkConfirm triggers the Meta Purchase once per confirmed order (C5.5)', async () => {
     const orderIds = [new Types.ObjectId(), new Types.ObjectId()];
     jest
@@ -334,6 +346,87 @@ describe('order controller bulk actions', () => {
     expect(res.status).toHaveBeenCalledWith(200);
     expect(triggerCapiPurchase).toHaveBeenCalledTimes(orderIds.length);
     orderIds.forEach(id => expect(triggerCapiPurchase).toHaveBeenCalledWith(id.toString(), 'confirmation'));
+  });
+
+  it('bulkConfirm never confirms a phone_mismatch order and lists it as not processed (C5.23)', async () => {
+    const regularId = new Types.ObjectId().toString();
+    const mismatchId = new Types.ObjectId().toString();
+    const markedId = new Types.ObjectId().toString();
+    const store: Record<string, Record<string, unknown>> = {
+      [regularId]: { _id: regularId, customerConfirmationStatus: CustomerConfirmationStatus.PENDING },
+      [mismatchId]: {
+        _id: mismatchId,
+        customerConfirmationStatus: CustomerConfirmationStatus.PENDING,
+        attentionReasonCode: AttentionReasonCode.PHONE_MISMATCH
+      },
+      // Flagged earlier, reason since replaced by a free text: the durable marker remains.
+      [markedId]: {
+        _id: markedId,
+        customerConfirmationStatus: CustomerConfirmationStatus.NEEDS_ATTENTION,
+        attentionReasonCode: AttentionReasonCode.FREE_TEXT,
+        phoneMismatchAt: new Date()
+      }
+    };
+    // Honours the write filter as MongoDB would (`$in` on the status, `$ne` on the reason,
+    // `null` matching a missing marker).
+    jest.spyOn(Order, 'findOneAndUpdate').mockImplementation(((
+      filter: {
+        _id: string;
+        customerConfirmationStatus: { $in: string[] };
+        attentionReasonCode?: { $ne: string };
+        phoneMismatchAt?: null;
+      },
+      change: { $set: Record<string, unknown>; $unset: Record<string, unknown> }
+    ) => {
+      const order = store[filter._id];
+      if (
+        !order ||
+        !filter.customerConfirmationStatus.$in.includes(order.customerConfirmationStatus as string) ||
+        (filter.attentionReasonCode && order.attentionReasonCode === filter.attentionReasonCode.$ne) ||
+        (filter.phoneMismatchAt === null && order.phoneMismatchAt != null)
+      ) {
+        return Promise.resolve(null);
+      }
+      Object.assign(order, change.$set);
+      Object.keys(change.$unset).forEach(key => delete order[key]);
+      return Promise.resolve({ ...order });
+    }) as never);
+    jest
+      .spyOn(Order, 'findById')
+      .mockImplementation(((id: string) => Promise.resolve(store[id] ? { ...store[id] } : null)) as never);
+    jest.spyOn(OrderEvent, 'create').mockResolvedValue({} as never);
+    jest.spyOn(Message, 'create').mockResolvedValue({ _id: new Types.ObjectId() } as never);
+    const json = jest.fn();
+    const res = { status: jest.fn(() => ({ json })) } as unknown as Response;
+    const req = {
+      body: { orderIds: [mismatchId, regularId, markedId] },
+      userId: new Types.ObjectId().toString()
+    } as unknown as Request;
+
+    await OrderController.bulkConfirm(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(207);
+    expect(json).toHaveBeenCalledWith({
+      data: {
+        requested: 3,
+        succeeded: [{ orderId: regularId }],
+        failed: [
+          { orderId: mismatchId, error: 'PhoneMismatchRequiresCall', status: 409 },
+          { orderId: markedId, error: 'PhoneMismatchRequiresCall', status: 409 }
+        ],
+        summary: { succeeded: 1, failed: 2 }
+      }
+    });
+    expect(store[markedId].customerConfirmationStatus).toBe(CustomerConfirmationStatus.NEEDS_ATTENTION);
+    expect(store[regularId].customerConfirmationStatus).toBe(CustomerConfirmationStatus.CONFIRMED);
+    expect(store[mismatchId]).toEqual(
+      expect.objectContaining({
+        customerConfirmationStatus: CustomerConfirmationStatus.PENDING,
+        attentionReasonCode: AttentionReasonCode.PHONE_MISMATCH
+      })
+    );
+    expect(triggerCapiPurchase).toHaveBeenCalledTimes(1);
+    expect(triggerCapiPurchase).toHaveBeenCalledWith(regularId, 'confirmation');
   });
 });
 
@@ -615,5 +708,90 @@ describe('order controller list endpoint (Lot 0 · F20/F21)', () => {
     expect(filters.$or).toBeUndefined();
     expect(filters.$and).toHaveLength(2);
     expect(filters.customerConfirmationStatus).toEqual({ $ne: CustomerConfirmationStatus.CANCELLED });
+  });
+});
+
+describe('phoneMismatchAt marker is exposed to the helpdesk (C5.23)', () => {
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  const phoneMismatchAt = new Date('2026-10-01T10:00:00.000Z');
+  // Real Mongoose document (no database needed): proves the schema field is serialized.
+  const markedOrder = () =>
+    new Order({
+      shopifyOrderId: '1001',
+      shopifyOrderName: '#1001',
+      totalPrice: '18500',
+      currency: 'XOF',
+      customerPhoneE164: '+221776986780',
+      customerConfirmationStatus: CustomerConfirmationStatus.NEEDS_ATTENTION,
+      needsHelpdeskAttention: true,
+      attentionReasonCode: AttentionReasonCode.FREE_TEXT,
+      phoneMismatchAt
+    });
+
+  const mockFindResult = (orders: unknown[]) => {
+    const query = { sort: jest.fn(), skip: jest.fn(), limit: jest.fn() };
+    query.sort.mockReturnValue(query);
+    query.skip.mockReturnValue(query);
+    query.limit.mockResolvedValue(orders as never);
+    return jest.spyOn(Order, 'find').mockReturnValue(query as never);
+  };
+
+  it('in the order list (GET /orders)', async () => {
+    const order = markedOrder();
+    mockFindResult([order]);
+    jest.spyOn(Order, 'countDocuments').mockResolvedValue(1 as never);
+    const { res, json } = mockResponse();
+
+    await OrderController.list(mockRequest({}), res);
+
+    const body = json.mock.calls[0]?.[0] as { data: Array<Record<string, unknown>> };
+    expect(body.data[0]).toEqual(expect.objectContaining({ id: order._id.toString(), phoneMismatchAt }));
+  });
+
+  it('in the order detail (GET /orders/:id)', async () => {
+    const order = markedOrder();
+    jest.spyOn(Order, 'findById').mockResolvedValue(order as never);
+    jest.spyOn(Message, 'find').mockReturnValue({ sort: jest.fn(async () => []) } as never);
+    jest
+      .spyOn(OrderEvent, 'find')
+      .mockReturnValue({ sort: jest.fn(() => ({ populate: jest.fn(async () => []) })) } as never);
+    const { res, status, json } = mockResponse();
+
+    await OrderController.detail(mockRequest({ params: { id: order._id.toString() } }), res);
+
+    expect(status).toHaveBeenCalledWith(200);
+    const body = json.mock.calls[0]?.[0] as { data: { order: Record<string, unknown> } };
+    expect(body.data.order).toEqual(expect.objectContaining({ phoneMismatchAt }));
+  });
+
+  it('in the attention queue (GET /orders/attention)', async () => {
+    const order = markedOrder();
+    mockFindResult([order]);
+    jest.spyOn(Order, 'countDocuments').mockResolvedValue(1 as never);
+    jest.spyOn(Order, 'aggregate').mockResolvedValue([] as never);
+    const { res, json } = mockResponse();
+
+    await OrderController.attentionQueue(mockRequest({}), res);
+
+    const body = json.mock.calls[0]?.[0] as { data: Array<Record<string, unknown>> };
+    expect(body.data[0]).toEqual(
+      expect.objectContaining({ reason: AttentionReasonCode.FREE_TEXT, phoneMismatchAt })
+    );
+  });
+
+  it('is absent for an order never flagged', () => {
+    const order = new Order({
+      shopifyOrderId: '1002',
+      shopifyOrderName: '#1002',
+      totalPrice: '18500',
+      currency: 'XOF',
+      attentionReasonCode: AttentionReasonCode.FREE_TEXT
+    });
+
+    expect(toAttentionOrder(order).phoneMismatchAt).toBeUndefined();
+    expect(toOrderResponse(order)).not.toHaveProperty('phoneMismatchAt');
   });
 });
