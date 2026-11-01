@@ -17,7 +17,10 @@ docker compose -f docker-compose.dev.yml up     # API (ts-node-dev, port 3600) +
 
 Le conteneur de dev monte **le checkout principal** et recharge à chaque modification.
 Travailler dans un worktree (`.claude/worktrees/<tâche>`), jamais dans le checkout
-principal : sinon on modifie l'API que l'humain est en train d'utiliser.
+principal : sinon on modifie l'API que l'humain est en train d'utiliser. Un worktree neuf
+n'a pas de `node_modules` : le relier à celui du checkout principal
+(`ln -s ../../../node_modules .claude/worktrees/<tâche>/node_modules`) plutôt que de
+réinstaller.
 
 ## Commandes
 
@@ -29,6 +32,11 @@ npx jest src/utilities/services/orderConfirmation.service.test.ts   # un seul fi
 
 `npm run lint` échoue déjà sur `dev` (ESLint 9 installé sans fichier de configuration) :
 ne pas le corriger dans une tâche, ne pas le compter comme une régression.
+
+**Redis.** Sur la machine de dev, le Redis du port 6379 est celui de Chatwoot (avec mot de
+passe) : ni test ni script ne doit s'y connecter. Lancer tout ce qui charge le code (les
+files se connectent au chargement) avec `REDIS_URL` explicite : `REDIS_URL=redis://127.0.0.1:1 npm test`
+pour Jest, ou un Redis jetable sur un autre port pour rejouer un scénario.
 
 ## Données et secrets
 
@@ -53,9 +61,36 @@ règle pour tout enum exposé par l'API.
 dans les contrôleurs. La transition de statut est atomique (`findOneAndUpdate` conditionné
 au statut courant) : garder ce modèle pour toute transition.
 
+- **Jamais de lecture puis `save()` ou `findByIdAndUpdate` sans condition sur un statut** :
+  une confirmation arrivée entre les deux est écrasée. Une commande `confirmed` n'en sort
+  que par `cancelByAdmin` (seule exception assumée : lecture puis `save()`, l'annulation
+  volontaire de l'agent l'emporte) ; toute autre écriture qui change
+  `customerConfirmationStatus` exclut `confirmed` dans son filtre (C5.24 : la rétrogradation
+  faisait perdre le Purchase).
+- **Une garde se fonde sur un fait durable, pas sur le motif « À traiter »** :
+  `attentionReasonCode` est remplacé par presque tout (message libre → `free_text`,
+  « Injoignable », repli SMS). Utiliser les marqueurs jamais effacés :
+  `confirmationCancelledAt`, `expiredAt`, `phoneMismatchAt` (C5.16, C5.23).
+- **Envoi Meta (CAPI)** : seulement pour une commande `confirmed` ou livrée (`deliveredAt`),
+  décidé par le worker au moment de l'envoi (`getSkipReason`).
+
+**Configuration qui casse au démarrage ou en silence.** `META_CAPI_ENABLED` n'accepte que
+`true` / `false` : toute autre valeur empêche l'API de démarrer (choix assumé, C5.19).
+`PREFILLED_CONFIRMATION_TEMPLATE` se met entre guillemets (dotenv et Compose coupent au
+`#`) et contient `{{order.number}}` ; sinon l'API démarre mais la confirmation par message
+pré-rempli est coupée : seule une ligne d'erreur au démarrage le signale.
+
 **Files BullMQ.** Un job lié à une commande a un `jobId` déterministe : rejouer un webhook ne
 doit jamais doubler un envoi. Un échec d'enqueue ne fait jamais échouer la requête qui l'a
 déclenché. Modèles : `src/queues/notification.queue.ts`, `src/workers/notification.worker.ts`.
+Un `jobId` BullMQ ne contient jamais `:` (refusé) : `confirm-initial-<id>`, pas
+`confirm-initial:<id>`. Un ajout dans une file attend Redis : l'entourer du `withTimeout`
+de `src/queues/queueTimeout.ts` (3 s) pour qu'un Redis injoignable ne bloque pas la requête.
+
+**Mongoose.** Mongoose 9 ne filtre pas les clés de requête inconnues (`strictQuery` faux par
+défaut), et `null` dans un filtre correspond aussi à un
+champ absent (`{ phoneMismatchAt: null }` = « jamais posé ») : pratique pour une garde, mais
+un nom de champ mal orthographié dans un filtre ne lève aucune erreur.
 
 **Webhook Shopify.** Shopify peut rejouer un webhook : l'ingestion
 (`src/controllers/shopifyWebhook.controller.ts`) reste idempotente. Les attributs EasySell
@@ -112,6 +147,8 @@ sont simulés (`jest.spyOn(Order, 'findOneAndUpdate')…`) et les files par
 ## Où regarder
 
 - Cartes Trello du tableau ecom_helper — le détail de chaque tâche ; la carte fait foi.
+- `docs/CHANTIER5_STATUT.md` — ce que le Chantier 5 a livré, la liste de bascule, les
+  points ouverts et les limites acceptées.
 - `../docs/SPEC_MASTER_ecom_helper.md` (hors dépôt) — spécification de référence des lots
   et du Chantier 5.
 - `../docs/CHANTIER5_PROPOSITIONS_MAJ.md` (hors dépôt) — décisions du Chantier 5 (devise,
