@@ -272,6 +272,26 @@ const swaggerOptions: swaggerJSDoc.Options = {
             capiPurchaseSentAt: dateTime,
             capiEventId: { type: 'string' },
             capiPurchaseError: { type: 'string' },
+            capiSkipReason: {
+              type: 'string',
+              enum: ['test', 'cancelled', 'disabled', 'too_old'],
+              description:
+                'Raison pour laquelle le Purchase n’a pas été envoyé à Meta (présente seulement avec capiPurchaseStatus skipped ; effacée dès que le Purchase repasse pending). cancelled : commande ni confirmée ni livrée au moment de l’envoi (reprise automatiquement à la confirmation ou à la livraison suivante), ou commande annulée sur Shopify (jamais envoyée) ; disabled : CAPI coupée ; test : commande de test ; too_old : événement de plus de 7 jours − 1 h.'
+            },
+            capiPurchaseFailedAt: {
+              ...dateTime,
+              description: 'Date de l’échec définitif de l’envoi (présente seulement avec capiPurchaseStatus failed ; effacée dès que le Purchase repasse pending).'
+            },
+            capiPurchaseFailureDefinitive: {
+              type: 'boolean',
+              description:
+                'Présent seulement avec capiPurchaseStatus failed. true : refus certain de Meta (réponse HTTP 4xx non réessayée) et aucune tentative antérieure n’a pu atteindre Meta (pas de capiPossiblyReceivedAt) ; false sinon (délai dépassé, réseau, 5xx, erreur après acceptation, ou tentative antérieure ambiguë). Effacé dès que le Purchase repasse pending.'
+            },
+            capiPossiblyReceivedAt: {
+              ...dateTime,
+              description:
+                'Date de la première tentative d’envoi que Meta a pu enregistrer (échec ambigu, réessayé ou final, ou événement accepté mais non enregistré comme envoyé). Jamais effacée. Meta ne dédoublonne l’event_id que pendant environ 48 h : 47 h ou plus après cette date, ni la relance (409 CapiPurchaseMayHaveBeenReceived) ni la reprise automatique d’un skipped cancelled ne renvoient le Purchase. Champ technique, non destiné à l’affichage.'
+            },
             confirmationCancelledAt: dateTime,
             expiredAt: dateTime,
             phoneMismatchAt: {
@@ -299,11 +319,16 @@ const swaggerOptions: swaggerJSDoc.Options = {
         },
         OrderActionCapabilities: {
           type: 'object',
-          required: ['canConfirm', 'canRemind', 'canCancel'],
+          required: ['canConfirm', 'canRemind', 'canCancel', 'canResendCapi'],
           properties: {
             canConfirm: { type: 'boolean' },
             canRemind: { type: 'boolean' },
-            canCancel: { type: 'boolean' }
+            canCancel: { type: 'boolean' },
+            canResendCapi: {
+              type: 'boolean',
+              description:
+                'Le Purchase Meta peut être renvoyé par POST /api/orders/{id}/capi-purchase/resend (mêmes règles que la route : jamais pour une commande de test ou annulée sur Shopify ; statut failed sur refus certain de Meta ou échec de moins de 47 h, skipped avec la raison disabled, ou skipped avec la raison cancelled si la commande est maintenant confirmée ou livrée ; jamais 47 h ou plus après la première tentative ayant pu atteindre Meta (capiPossiblyReceivedAt) ; événement de moins de 7 jours − 1 h ; CAPI active). Ne tient pas compte du rôle : la route est réservée aux administrateurs.'
+            }
           }
         },
         AttentionOrder: {

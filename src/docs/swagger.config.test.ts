@@ -3,6 +3,7 @@ import { describe, expect, it } from '@jest/globals';
 import fs from 'fs';
 import path from 'path';
 import ts from 'typescript';
+import { CapiSkipReason } from '../models/Order';
 import { swaggerSpec } from './swagger.config';
 
 type HttpMethod = 'get' | 'post' | 'put' | 'patch';
@@ -26,6 +27,7 @@ const EXPECTED_OPERATIONS: Record<string, HttpMethod[]> = {
   '/api/orders/{id}/confirm': ['post'],
   '/api/orders/{id}/cancel': ['post'],
   '/api/orders/{id}/remind': ['post'],
+  '/api/orders/{id}/capi-purchase/resend': ['post'],
   '/api/messages': ['get'],
   '/api/messages/{id}': ['get'],
   '/api/messages/{id}/retry': ['post'],
@@ -55,6 +57,7 @@ const PROTECTED_OPERATIONS: Array<[string, HttpMethod]> = [
   ['/api/orders/{id}/confirm', 'post'],
   ['/api/orders/{id}/cancel', 'post'],
   ['/api/orders/{id}/remind', 'post'],
+  ['/api/orders/{id}/capi-purchase/resend', 'post'],
   ['/api/messages', 'get'],
   ['/api/messages/{id}', 'get'],
   ['/api/messages/{id}/retry', 'post'],
@@ -161,5 +164,25 @@ describe('Swagger MVP specification', () => {
     expect(document.components.schemas.Message.properties).toHaveProperty('fallbackOf');
     expect(document.components.schemas.DashboardStats.properties).toHaveProperty('jobsSucceeded');
     expect(paths['/api/dashboard/stats'].get.security).toEqual([{ bearerAuth: [] }]);
+  });
+
+  it('documents the admin resend of a Meta Purchase, its errors, the skip reason and the capability', () => {
+    const resend = paths['/api/orders/{id}/capi-purchase/resend'].post as any;
+
+    expect(Object.keys(resend.responses).sort()).toEqual(['202', '401', '403', '404', '409', '500']);
+    expect(resend.responses['409'].content['application/json'].schema.allOf[1].properties.error.enum).toEqual([
+      'CapiPurchaseAlreadySent',
+      'CapiPurchaseNotResendable',
+      'CapiPurchaseMayHaveBeenReceived',
+      'CapiPurchaseTooOld',
+      'CapiDisabled'
+    ]);
+    expect(resend.description).toContain('capi_purchase_resend_requested');
+    expect(document.components.schemas.Order.properties.capiSkipReason.enum).toEqual(Object.values(CapiSkipReason));
+    expect(document.components.schemas.Order.properties.capiPurchaseFailedAt.format).toBe('date-time');
+    expect(document.components.schemas.Order.properties.capiPurchaseFailureDefinitive.type).toBe('boolean');
+    expect(document.components.schemas.Order.properties.capiPossiblyReceivedAt.format).toBe('date-time');
+    expect(document.components.schemas.OrderActionCapabilities.properties).toHaveProperty('canResendCapi');
+    expect(document.components.schemas.OrderActionCapabilities.required).toContain('canResendCapi');
   });
 });

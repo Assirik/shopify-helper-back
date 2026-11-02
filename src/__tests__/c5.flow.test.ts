@@ -130,7 +130,7 @@ import { OrderEvent, OrderEventType } from '../models/OrderEvent';
 import { Product } from '../models/Product';
 import { WebhookEvent } from '../models/WebhookEvent';
 import config from '../utilities/config/env.config';
-import { runCapiPurchaseSweep } from '../utilities/services/capiPurchase.service';
+import { resendCapiPurchase, runCapiPurchaseSweep } from '../utilities/services/capiPurchase.service';
 import { ChatwootForwardService } from '../utilities/services/chatwootForward.service';
 import { ChatwootOutboundMirrorService } from '../utilities/services/chatwootOutboundMirror.service';
 import { MessageVariableConfigService } from '../utilities/services/messageVariableConfig.service';
@@ -197,6 +197,8 @@ const matchesCondition = (key: string, value: unknown, condition: unknown): bool
           return (value !== undefined) === argument;
         case '$lte':
           return value instanceof Date && value.getTime() <= (argument as Date).getTime();
+        case '$gt':
+          return value instanceof Date && value.getTime() > (argument as Date).getTime();
         default:
           throw new Error(`Unsupported operator in the in-memory MongoDB: ${operator}`);
       }
@@ -206,8 +208,12 @@ const matchesCondition = (key: string, value: unknown, condition: unknown): bool
   return value === condition;
 };
 
-const matches = (doc: Doc, filter: Record<string, unknown>) =>
-  Object.entries(filter).every(([key, condition]) => matchesCondition(key, doc[key], condition));
+const matches = (doc: Doc, filter: Record<string, unknown>): boolean =>
+  Object.entries(filter).every(([key, condition]) =>
+    key === '$or'
+      ? (condition as Record<string, unknown>[]).some(branch => matches(doc, branch))
+      : matchesCondition(key, doc[key], condition)
+  );
 
 // Mongoose strict mode: a path missing from the schema is silently dropped from an update.
 const inSchema = (model: { schema: { pathType: (path: string) => string } }, key: string) =>
@@ -229,6 +235,11 @@ const applyUpdate = (doc: Doc, update: Doc, model: { schema: { pathType: (path: 
   });
   Object.entries(known(update.$push)).forEach(([key, value]) => {
     doc[key] = [...(doc[key] ?? []), value];
+  });
+  Object.entries(known(update.$min)).forEach(([key, value]) => {
+    if (doc[key] === undefined || (value as Date) < doc[key]) {
+      doc[key] = value;
+    }
   });
   // Mongoose timestamps: every write bumps updatedAt.
   doc.updatedAt = new Date();
@@ -793,7 +804,184 @@ describe('Meta Purchase, end to end (C5)', () => {
 
       expect(capiCalls()).toEqual([]);
       expect(stored(orderId).capiPurchaseStatus).toBe(CapiPurchaseStatus.SKIPPED);
+      expect(stored(orderId).capiSkipReason).toBe('cancelled');
       expect(events.find(event => event.type === OrderEventType.CAPI_PURCHASE_SKIPPED)?.metadata).toEqual({ reason: 'cancelled' });
+    });
+
+    // Second chance (C5.7): the skip was right when the worker ran, the sale came afterwards.
+    const skipAfterCancellation = async () => {
+      const orderId = await ingest();
+      await prefilledText('221776986780');
+      await OrderConfirmationService.cancelByAdmin(orderId, 'Le client a changé d’avis');
+      await runCapiJob();
+      expect(stored(orderId)).toEqual(
+        expect.objectContaining({ capiPurchaseStatus: CapiPurchaseStatus.SKIPPED, capiSkipReason: 'cancelled' })
+      );
+      expect(capiCalls()).toEqual([]);
+      return orderId;
+    };
+
+    it('skipped as cancelled, then confirmed again by the agent: pending again, one more job, then sent', async () => {
+      const orderId = await skipAfterCancellation();
+
+      // The customer presses Confirm on the cancelled order (late_confirm), the agent confirms it.
+      await pressConfirm(orderId);
+      expect(stored(orderId).capiPurchaseStatus).toBe(CapiPurchaseStatus.SKIPPED);
+      await OrderConfirmationService.confirmByAdmin(orderId);
+      await flush();
+
+      expect(stored(orderId).capiPurchaseStatus).toBe(CapiPurchaseStatus.PENDING);
+      expect(stored(orderId)).not.toHaveProperty('capiSkipReason');
+      expect(addedTo('capi-purchase')).toHaveLength(2);
+      expect(capiJobs().map(job => job.id)).toEqual([`capi-purchase-${orderId}`]);
+
+      await runCapiJob();
+
+      expect(capiCalls()).toHaveLength(1);
+      expectSentOnOrder(orderId);
+
+      // Delivery afterwards: the Purchase is sent, nothing is taken back.
+      startDelivery(orderId);
+      await deliver(orderId);
+      expect(addedTo('capi-purchase')).toHaveLength(2);
+      expect(capiCalls()).toHaveLength(1);
+    });
+
+    it('skipped as cancelled, then delivered: pending again, one more job, then sent', async () => {
+      const orderId = await skipAfterCancellation();
+
+      startDelivery(orderId);
+      await deliver(orderId);
+
+      expect(stored(orderId).capiPurchaseStatus).toBe(CapiPurchaseStatus.PENDING);
+      expect(stored(orderId)).not.toHaveProperty('capiSkipReason');
+      expect(addedTo('capi-purchase')).toHaveLength(2);
+
+      await runCapiJob();
+
+      expect(capiCalls()).toHaveLength(1);
+      expectSentOnOrder(orderId);
+    });
+
+    it('skipped as cancelled, still not a sale: the admin resend is refused (409), nothing written nor queued', async () => {
+      const orderId = await skipAfterCancellation();
+      const before = { ...stored(orderId) };
+
+      await expect(resendCapiPurchase(orderId, new Types.ObjectId().toString())).rejects.toEqual(
+        expect.objectContaining({ code: 'CapiPurchaseNotResendable', status: 409 })
+      );
+
+      expect(stored(orderId)).toEqual(before);
+      expect(addedTo('capi-purchase')).toHaveLength(1);
+      expect(eventCount(OrderEventType.CAPI_PURCHASE_RESEND_REQUESTED)).toBe(0);
+    });
+  });
+
+  describe('admin resend (C5.7)', () => {
+    it('timeouts until failed: marked at the first attempt, resent within 47 h, mark kept after success', async () => {
+      const orderId = await ingest();
+      await prefilledText('221776986780');
+      const timeout = () => Object.assign(new Error('timeout of 10000ms exceeded'), { isAxiosError: true, code: 'ECONNABORTED' });
+      const [job] = capiJobs();
+
+      // Attempt 1 times out (retried), attempt 5 times out too (final): Meta may have both.
+      mockedPost.mockRejectedValueOnce(timeout());
+      await expect(processCapiPurchaseJob(asJob(job))).rejects.toThrow();
+      const firstAttempt = stored(orderId).capiPossiblyReceivedAt;
+      expect(firstAttempt).toBeInstanceOf(Date);
+
+      await new Promise(resolve => setTimeout(resolve, 5));
+      job.attemptsMade = 4;
+      mockedPost.mockRejectedValueOnce(timeout());
+      await expect(processCapiPurchaseJob(asJob(job))).rejects.toThrow();
+      job.state = 'failed';
+
+      expect(stored(orderId)).toEqual(
+        expect.objectContaining({ capiPurchaseStatus: CapiPurchaseStatus.FAILED, capiPurchaseFailureDefinitive: false })
+      );
+      // `$min`: the oldest attempt is kept.
+      expect(stored(orderId).capiPossiblyReceivedAt).toEqual(firstAttempt);
+
+      await resendCapiPurchase(orderId, new Types.ObjectId().toString());
+      expect(stored(orderId).capiPurchaseStatus).toBe(CapiPurchaseStatus.PENDING);
+      expect(stored(orderId).capiPossiblyReceivedAt).toEqual(firstAttempt);
+
+      capiJobs()[0].attemptsMade = 0;
+      await runCapiJob();
+
+      expectSentOnOrder(orderId);
+      expect(stored(orderId).capiPossiblyReceivedAt).toEqual(firstAttempt);
+    });
+
+    it('refused by Meta (400, not retried): failed as a certain refusal, resend by an admin, one Purchase', async () => {
+      const orderId = await ingest();
+      await prefilledText('221776986780');
+      const graphRefusal = Object.assign(new Error('Request failed with status code 400'), {
+        isAxiosError: true,
+        response: { status: 400, data: { error: { message: 'Invalid parameter', code: 100, error_subcode: 2804050 } } }
+      });
+      mockedPost.mockRejectedValueOnce(graphRefusal);
+
+      const [job] = capiJobs();
+      await expect(processCapiPurchaseJob(asJob(job))).rejects.toThrow();
+      job.state = 'failed';
+
+      expect(stored(orderId)).toEqual(
+        expect.objectContaining({
+          capiPurchaseStatus: CapiPurchaseStatus.FAILED,
+          capiPurchaseFailureDefinitive: true,
+          capiPurchaseFailedAt: expect.any(Date)
+        })
+      );
+
+      await resendCapiPurchase(orderId, new Types.ObjectId().toString());
+
+      expect(stored(orderId).capiPurchaseStatus).toBe(CapiPurchaseStatus.PENDING);
+      expect(stored(orderId)).not.toHaveProperty('capiPurchaseFailedAt');
+      expect(stored(orderId)).not.toHaveProperty('capiPurchaseFailureDefinitive');
+      expect(stored(orderId)).not.toHaveProperty('capiPurchaseError');
+      expect(addedTo('capi-purchase')).toHaveLength(2);
+
+      await runCapiJob();
+
+      // The refused attempt plus the resent one: a single Purchase received.
+      expect(capiCalls()).toHaveLength(2);
+      expectSentOnOrder(orderId);
+    });
+
+    it('skipped while CAPI was off, CAPI back on, resend by an admin: one job, one Purchase', async () => {
+      const orderId = await ingest();
+      config.metaCapi.enabled = false;
+      await prefilledText('221776986780');
+      await runCapiJob();
+      expect(stored(orderId)).toEqual(
+        expect.objectContaining({ capiPurchaseStatus: CapiPurchaseStatus.SKIPPED, capiSkipReason: 'disabled' })
+      );
+
+      // A later confirmation-like trigger (delivery) does not take a `disabled` skip back.
+      startDelivery(orderId);
+      await deliver(orderId);
+      expect(stored(orderId).capiPurchaseStatus).toBe(CapiPurchaseStatus.SKIPPED);
+      expect(addedTo('capi-purchase')).toHaveLength(1);
+
+      config.metaCapi.enabled = true;
+      const adminId = new Types.ObjectId();
+      await resendCapiPurchase(orderId, adminId.toString());
+
+      expect(stored(orderId).capiPurchaseStatus).toBe(CapiPurchaseStatus.PENDING);
+      expect(stored(orderId)).not.toHaveProperty('capiSkipReason');
+      expect(addedTo('capi-purchase')).toHaveLength(2);
+      expect(events.find(event => event.type === OrderEventType.CAPI_PURCHASE_RESEND_REQUESTED)).toEqual(
+        expect.objectContaining({
+          actorId: adminId,
+          metadata: { previousStatus: CapiPurchaseStatus.SKIPPED, previousSkipReason: 'disabled' }
+        })
+      );
+
+      await runCapiJob();
+
+      expect(capiCalls()).toHaveLength(1);
+      expectSentOnOrder(orderId);
     });
   });
 

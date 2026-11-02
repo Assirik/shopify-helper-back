@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { OrderController } from '../controllers/order.controller';
 import { asyncHandler } from '../middlewares/asyncHandler';
+import { requireAdmin } from '../middlewares/requireAdmin';
 import { requireAuth } from '../middlewares/requireAuth';
 
 const router = Router();
@@ -19,6 +20,12 @@ router.post('/:id/delivery-failed', requireAuth, asyncHandler(OrderController.ma
 router.post('/:id/return', requireAuth, asyncHandler(OrderController.markReturned));
 router.post('/:id/notes', requireAuth, asyncHandler(OrderController.addNote));
 router.post('/:id/mark-unreachable', requireAuth, asyncHandler(OrderController.markUnreachable));
+router.post(
+  '/:id/capi-purchase/resend',
+  requireAuth,
+  asyncHandler(requireAdmin),
+  asyncHandler(OrderController.resendCapiPurchase)
+);
 router.get('/:id', requireAuth, asyncHandler(OrderController.detail));
 
 export default router;

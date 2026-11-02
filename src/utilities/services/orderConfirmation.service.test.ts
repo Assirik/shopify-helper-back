@@ -4,13 +4,15 @@ import { Message } from '../../models/Message';
 import { OrderEvent, OrderEventType } from '../../models/OrderEvent';
 import {
   AttentionReasonCode,
+  CapiPurchaseStatus,
+  CapiSkipReason,
   ConfirmationSource,
   CustomerConfirmationStatus,
   Order,
   OrderOperationalStatus
 } from '../../models/Order';
 import config, { DEFAULT_PREFILLED_CONFIRMATION_TEMPLATE } from '../config/env.config';
-import { CONFIRMABLE_BY_ADMIN, getOrderActionCapabilities } from './orderCapabilities.service';
+import { CAPI_MAX_EVENT_AGE_MS, CONFIRMABLE_BY_ADMIN, getOrderActionCapabilities } from './orderCapabilities.service';
 import {
   CONFIRMABLE_BY_BUTTON,
   OrderConfirmationService,
@@ -52,7 +54,8 @@ describe('order action capabilities', () => {
       canDeliver: false,
       canMarkFailed: false,
       canReturn: false,
-      canMarkUnreachable: true
+      canMarkUnreachable: true,
+      canResendCapi: false
     });
   });
 
@@ -111,7 +114,8 @@ describe('order action capabilities', () => {
       canDeliver: false,
       canMarkFailed: false,
       canReturn: false,
-      canMarkUnreachable: false
+      canMarkUnreachable: false,
+      canResendCapi: false
     });
   });
 
@@ -175,6 +179,134 @@ describe('order action capabilities', () => {
         reminderCount: 0,
         operationalStatus: OrderOperationalStatus.RETURNED
       }).canCancel
+    ).toBe(false);
+  });
+});
+
+describe('canResendCapi capability (C5.7)', () => {
+  const originalEnabled = config.metaCapi.enabled;
+  const now = Date.now();
+  const recent = new Date(now - 60 * 60 * 1000);
+  const tooOld = new Date(now - CAPI_MAX_EVENT_AGE_MS - 1);
+  // Failure fields as markFailed writes them (ignored for any other status): ambiguous, 1 h ago.
+  const base = {
+    customerConfirmationStatus: CustomerConfirmationStatus.CONFIRMED,
+    reminderCount: 0,
+    confirmedAt: recent,
+    capiPurchaseFailedAt: recent,
+    capiPurchaseFailureDefinitive: false
+  };
+  const hoursAgo = (hours: number) => new Date(now - hours * 60 * 60 * 1000);
+
+  afterEach(() => {
+    config.metaCapi.enabled = originalEnabled;
+  });
+
+  it.each([
+    ['failed', { capiPurchaseStatus: CapiPurchaseStatus.FAILED }, true],
+    ['skipped as cancelled', { capiPurchaseStatus: CapiPurchaseStatus.SKIPPED, capiSkipReason: CapiSkipReason.CANCELLED }, true],
+    ['skipped as disabled', { capiPurchaseStatus: CapiPurchaseStatus.SKIPPED, capiSkipReason: CapiSkipReason.DISABLED }, true],
+    ['skipped as test', { capiPurchaseStatus: CapiPurchaseStatus.SKIPPED, capiSkipReason: CapiSkipReason.TEST }, false],
+    ['skipped as too_old', { capiPurchaseStatus: CapiPurchaseStatus.SKIPPED, capiSkipReason: CapiSkipReason.TOO_OLD }, false],
+    ['skipped without reason', { capiPurchaseStatus: CapiPurchaseStatus.SKIPPED }, false],
+    ['pending', { capiPurchaseStatus: CapiPurchaseStatus.PENDING }, false],
+    ['without status', {}, false],
+    ['sent', { capiPurchaseStatus: CapiPurchaseStatus.SENT }, false],
+    ['failed but sent date set', { capiPurchaseStatus: CapiPurchaseStatus.FAILED, capiPurchaseSentAt: recent }, false],
+    ['failed, confirmed too long ago', { capiPurchaseStatus: CapiPurchaseStatus.FAILED, confirmedAt: tooOld }, false],
+    [
+      'failed, confirmed too long ago though delivered recently',
+      { capiPurchaseStatus: CapiPurchaseStatus.FAILED, confirmedAt: tooOld, deliveredAt: recent },
+      false
+    ],
+    [
+      'failed, certain refusal by Meta long ago',
+      { capiPurchaseStatus: CapiPurchaseStatus.FAILED, capiPurchaseFailedAt: hoursAgo(72), capiPurchaseFailureDefinitive: true },
+      true
+    ],
+    [
+      'failed, ambiguous failure 46 h ago',
+      { capiPurchaseStatus: CapiPurchaseStatus.FAILED, capiPurchaseFailedAt: hoursAgo(46), capiPurchaseFailureDefinitive: false },
+      true
+    ],
+    [
+      'failed, ambiguous failure 47 h ago',
+      { capiPurchaseStatus: CapiPurchaseStatus.FAILED, capiPurchaseFailedAt: hoursAgo(47), capiPurchaseFailureDefinitive: false },
+      false
+    ],
+    [
+      'failed, certain refusal last but an attempt possibly received 48 h ago',
+      { capiPurchaseStatus: CapiPurchaseStatus.FAILED, capiPurchaseFailureDefinitive: true, capiPossiblyReceivedAt: hoursAgo(48) },
+      false
+    ],
+    [
+      'failed, ambiguous, possibly received 46 h ago',
+      { capiPurchaseStatus: CapiPurchaseStatus.FAILED, capiPurchaseFailedAt: hoursAgo(60), capiPossiblyReceivedAt: hoursAgo(46) },
+      true
+    ],
+    [
+      'skipped as disabled, possibly received 47 h ago',
+      { capiPurchaseStatus: CapiPurchaseStatus.SKIPPED, capiSkipReason: CapiSkipReason.DISABLED, capiPossiblyReceivedAt: hoursAgo(47) },
+      false
+    ],
+    [
+      'skipped as cancelled (now confirmed), possibly received 50 h ago',
+      { capiPurchaseStatus: CapiPurchaseStatus.SKIPPED, capiSkipReason: CapiSkipReason.CANCELLED, capiPossiblyReceivedAt: hoursAgo(50) },
+      false
+    ],
+    [
+      'failed, ambiguous, possibly received 50 h ago and event older than 7 days',
+      { capiPurchaseStatus: CapiPurchaseStatus.FAILED, confirmedAt: tooOld, capiPossiblyReceivedAt: hoursAgo(50) },
+      false
+    ],
+    [
+      'failed, failure without date nor classification',
+      { capiPurchaseStatus: CapiPurchaseStatus.FAILED, capiPurchaseFailedAt: undefined, capiPurchaseFailureDefinitive: undefined },
+      false
+    ],
+    [
+      'skipped as cancelled, order still cancelled',
+      { capiPurchaseStatus: CapiPurchaseStatus.SKIPPED, capiSkipReason: CapiSkipReason.CANCELLED, customerConfirmationStatus: CustomerConfirmationStatus.CANCELLED },
+      false
+    ],
+    [
+      'skipped as cancelled, cancelled but delivered',
+      {
+        capiPurchaseStatus: CapiPurchaseStatus.SKIPPED,
+        capiSkipReason: CapiSkipReason.CANCELLED,
+        customerConfirmationStatus: CustomerConfirmationStatus.CANCELLED,
+        deliveredAt: recent
+      },
+      true
+    ],
+    [
+      'skipped as cancelled, cancelled on Shopify',
+      { capiPurchaseStatus: CapiPurchaseStatus.SKIPPED, capiSkipReason: CapiSkipReason.CANCELLED, shopifyCancelledAt: recent },
+      false
+    ],
+    ['failed, cancelled on Shopify', { capiPurchaseStatus: CapiPurchaseStatus.FAILED, shopifyCancelledAt: recent }, false],
+    ['failed, test order', { capiPurchaseStatus: CapiPurchaseStatus.FAILED, isTest: true }, false],
+    [
+      'failed, order cancelled since (the worker decides again)',
+      { capiPurchaseStatus: CapiPurchaseStatus.FAILED, customerConfirmationStatus: CustomerConfirmationStatus.CANCELLED },
+      true
+    ],
+    [
+      'skipped as cancelled, delivered too long ago without confirmation',
+      { capiPurchaseStatus: CapiPurchaseStatus.SKIPPED, capiSkipReason: CapiSkipReason.CANCELLED, confirmedAt: undefined, deliveredAt: tooOld },
+      false
+    ]
+  ])('%s: %p', (_label, capi, expected) => {
+    config.metaCapi.enabled = true;
+
+    expect(getOrderActionCapabilities({ ...base, ...capi }, now).canResendCapi).toBe(expected);
+  });
+
+  it('is false for an eligible order while CAPI is switched off', () => {
+    config.metaCapi.enabled = false;
+
+    expect(
+      getOrderActionCapabilities({ ...base, capiPurchaseStatus: CapiPurchaseStatus.FAILED }, now).canResendCapi
     ).toBe(false);
   });
 });

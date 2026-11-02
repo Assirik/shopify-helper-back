@@ -13,6 +13,7 @@ import {
   Order,
   OrderOperationalStatus
 } from '../models/Order';
+import { CapiPurchaseResendError, resendCapiPurchase } from '../utilities/services/capiPurchase.service';
 import { getOrderActionCapabilities } from '../utilities/services/orderCapabilities.service';
 import {
   ADMIN_CONFIRMATION_SOURCES,
@@ -762,6 +763,22 @@ export class OrderController {
       return res.status(200).json({ data: { order: toOrderResponse(order), event } });
     } catch (err) {
       if (err instanceof OrderConfirmationError) {
+        return res.status(err.status).json({ error: err.code });
+      }
+
+      throw err;
+    }
+  }
+
+  public static async resendCapiPurchase(req: Request, res: Response) {
+    const id = typeof req.params.id === 'string' ? req.params.id : '';
+
+    try {
+      const order = await resendCapiPurchase(id, req.userId);
+
+      return res.status(202).json({ data: { order: toOrderResponse(order) } });
+    } catch (err) {
+      if (err instanceof CapiPurchaseResendError) {
         return res.status(err.status).json({ error: err.code });
       }
 

@@ -66,6 +66,9 @@ export interface MetaCapiErrorDetails {
   metaUserTitle?: string;
   metaUserMessage?: string;
   retryable: boolean;
+  // True once the HTTP request to Graph was made (Meta may have recorded the event); absent
+  // for an error raised before any call (missing configuration or data).
+  requestSent?: boolean;
 }
 
 export class MetaCapiError extends Error {
@@ -76,6 +79,7 @@ export class MetaCapiError extends Error {
   public readonly metaUserTitle?: string;
   public readonly metaUserMessage?: string;
   public readonly retryable: boolean;
+  public readonly requestSent: boolean;
 
   constructor(message: string, details: MetaCapiErrorDetails) {
     super(message);
@@ -87,6 +91,7 @@ export class MetaCapiError extends Error {
     this.metaUserTitle = details.metaUserTitle;
     this.metaUserMessage = details.metaUserMessage;
     this.retryable = details.retryable;
+    this.requestSent = details.requestSent ?? false;
   }
 }
 
@@ -285,7 +290,8 @@ export const sendPurchase = async (order: IOrder): Promise<CapiSendResult> => {
         fbtraceId: metaError?.fbtrace_id,
         metaUserTitle: metaError?.error_user_title,
         metaUserMessage: metaError?.error_user_msg,
-        retryable
+        retryable,
+        requestSent: true
       });
     }
     throw err;

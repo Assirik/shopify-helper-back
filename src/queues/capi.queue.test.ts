@@ -111,7 +111,7 @@ describe('enqueue outcome (sweep counters)', () => {
     const job = existingJob('delayed');
     mockGetJob.mockResolvedValueOnce(job);
 
-    await expect(enqueueCapiPurchaseWithOutcome('abc')).resolves.toEqual({ job, reused: true });
+    await expect(enqueueCapiPurchaseWithOutcome('abc')).resolves.toEqual({ job, reused: true, state: 'delayed' });
     expect(mockAdd).not.toHaveBeenCalled();
   });
 

@@ -257,6 +257,80 @@
  *         content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } }
  *       500: { $ref: '#/components/responses/InternalError' }
  *
+ * /api/orders/{id}/capi-purchase/resend:
+ *   post:
+ *     tags: [Orders]
+ *     operationId: resendOrderCapiPurchase
+ *     summary: Renvoyer le Purchase Meta (CAPI) d’une commande
+ *     description: >-
+ *       Réservé aux administrateurs. Éligible (capacité `canResendCapi`), hors commande de
+ *       test ou annulée sur Shopify : `capiPurchaseStatus` `failed` si l’échec est un refus
+ *       certain de Meta (`capiPurchaseFailureDefinitive` true) ou date de moins de 47 h
+ *       (`capiPurchaseFailedAt`, fenêtre de dédoublonnage Meta) ; `skipped` avec
+ *       `capiSkipReason` `disabled` ; `skipped` avec `capiSkipReason` `cancelled` si la
+ *       commande est maintenant confirmée ou livrée (la raison ne tient plus). Dans tous
+ *       les cas, jamais 47 h ou plus après la première tentative ayant pu atteindre Meta
+ *       (`capiPossiblyReceivedAt`, jamais effacée). Le
+ *       Purchase repasse `pending` (écriture conditionnée au statut et à la raison lus ;
+ *       `capiPurchaseError` et `capiSkipReason` effacés), un envoi est mis en file et un
+ *       événement `capi_purchase_resend_requested` est ajouté à l’historique (`actorId` =
+ *       l’administrateur, `metadata.previousStatus` = `failed` ou `skipped`,
+ *       `metadata.previousSkipReason` = `cancelled` ou `disabled` si `skipped`). Le worker
+ *       applique ensuite ses règles habituelles (un `failed` ou `disabled` sur une commande
+ *       annulée depuis est de nouveau ignoré). Si la mise en file ou l’écriture de
+ *       l’événement échoue, la commande reste `pending` (le rattrapage périodique la
+ *       renvoie) : la réponse reste 202.
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { in: path, name: id, required: true, schema: { type: string, pattern: '^[a-fA-F0-9]{24}$' } }
+ *     responses:
+ *       202:
+ *         description: >-
+ *           Renvoi accepté. `data.order` est la commande au format de la fiche
+ *           (`capiPurchaseStatus` = `pending`, `capabilities` recalculées).
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               required: [data]
+ *               properties:
+ *                 data:
+ *                   type: object
+ *                   required: [order]
+ *                   properties:
+ *                     order: { $ref: '#/components/schemas/Order' }
+ *       401: { $ref: '#/components/responses/Unauthorized' }
+ *       403: { $ref: '#/components/responses/Forbidden' }
+ *       404:
+ *         description: Commande absente (`OrderNotFound`).
+ *         content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } }
+ *       409:
+ *         description: >-
+ *           Renvoi impossible, sans aucune écriture ni mise en file :
+ *           `CapiPurchaseAlreadySent` (Purchase déjà envoyé) ;
+ *           `CapiPurchaseNotResendable` (statut absent ou `pending`, raison `test` ou
+ *           `too_old`, raison `cancelled` sur une commande toujours ni confirmée ni livrée,
+ *           commande de test ou annulée sur Shopify, ou statut modifié entre la lecture et
+ *           l’écriture, par exemple un double clic) ;
+ *           `CapiPurchaseMayHaveBeenReceived` (une tentative a pu atteindre Meta il y a 47 h
+ *           ou plus, `capiPossiblyReceivedAt`, quel que soit le statut relançable ; ou, sans
+ *           cette marque, échec `failed` non définitif datant d’au moins 47 h : Meta a pu
+ *           compter l’événement et ne le dédoublonnerait plus, un renvoi risquerait un
+ *           doublon) ; `CapiPurchaseTooOld` (date de confirmation, à défaut de livraison,
+ *           de plus de 7 jours − 1 h : Meta refuserait l’événement) ; `CapiDisabled` (CAPI
+ *           coupée par `META_CAPI_ENABLED`).
+ *         content:
+ *           application/json:
+ *             schema:
+ *               allOf:
+ *                 - { $ref: '#/components/schemas/ApiError' }
+ *                 - type: object
+ *                   properties:
+ *                     error:
+ *                       type: string
+ *                       enum: [CapiPurchaseAlreadySent, CapiPurchaseNotResendable, CapiPurchaseMayHaveBeenReceived, CapiPurchaseTooOld, CapiDisabled]
+ *       500: { $ref: '#/components/responses/InternalError' }
+ *
  * /api/messages:
  *   get:
  *     tags: [Messages]

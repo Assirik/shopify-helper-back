@@ -15,6 +15,7 @@ export enum OrderEventType {
   CAPI_PURCHASE_SENT = 'capi_purchase_sent',
   CAPI_PURCHASE_FAILED = 'capi_purchase_failed',
   CAPI_PURCHASE_SKIPPED = 'capi_purchase_skipped',
+  CAPI_PURCHASE_RESEND_REQUESTED = 'capi_purchase_resend_requested',
   PHONE_MISMATCH = 'phone_mismatch'
 }
 
