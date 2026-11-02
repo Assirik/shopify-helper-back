@@ -17,6 +17,14 @@ export enum CapiPurchaseStatus {
   SKIPPED = 'skipped'
 }
 
+// Why the worker did not send the Purchase (`getSkipReason`, or Meta's "too old" rejection).
+export enum CapiSkipReason {
+  TEST = 'test',
+  CANCELLED = 'cancelled',
+  DISABLED = 'disabled',
+  TOO_OLD = 'too_old'
+}
+
 export enum CustomerConfirmationStatus {
   PENDING = 'pending',
   CONFIRMED = 'confirmed',
@@ -153,6 +161,16 @@ const OrderSchema = new Schema<IOrder>(
     capiPurchaseSentAt: { type: Date },
     capiEventId: { type: String, trim: true },
     capiPurchaseError: { type: String, trim: true },
+    // Set with SKIPPED, removed whenever the Purchase goes back to PENDING.
+    capiSkipReason: { type: String, enum: Object.values(CapiSkipReason) },
+    // Set with FAILED (both removed whenever the Purchase goes back to PENDING): when the final
+    // failure happened, and whether it was a certain refusal by Meta (4xx, not retryable: the
+    // event was not counted) rather than an ambiguous failure (timeout, network, 5xx…).
+    capiPurchaseFailedAt: { type: Date },
+    capiPurchaseFailureDefinitive: { type: Boolean },
+    // First attempt Meta may have recorded (ambiguous failure, or accepted but not recorded as
+    // SENT). A fact, never cleared: Meta deduplicates on event_id only for about 48 h.
+    capiPossiblyReceivedAt: { type: Date },
     confirmationCancelledAt: { type: Date },
     expiredAt: { type: Date },
     // Set when a confirmation message came from another phone number; never cleared.
@@ -269,6 +287,10 @@ export interface IOrder extends Document {
   capiPurchaseSentAt?: Date;
   capiEventId?: string;
   capiPurchaseError?: string;
+  capiSkipReason?: CapiSkipReason;
+  capiPurchaseFailedAt?: Date;
+  capiPurchaseFailureDefinitive?: boolean;
+  capiPossiblyReceivedAt?: Date;
   confirmationCancelledAt?: Date;
   expiredAt?: Date;
   phoneMismatchAt?: Date;

@@ -31,7 +31,8 @@ export const capiPurchaseJobOptions: JobsOptions = {
 // an add with an existing id: remove it first so the order can be enqueued again. A job still
 // waiting, delayed or active is reused (no duplicate). The worker guards (SENT → exit, writes
 // conditioned on PENDING) prevent a second Purchase.
-// `reused` tells the caller whether an existing job was kept (true) or a job was added (false).
+// `reused` tells the caller whether an existing job was kept (true, with its `state`) or a job
+// was added (false).
 export const enqueueCapiPurchaseWithOutcome = async (orderId: string) => {
   const jobId = buildCapiPurchaseJobId(orderId);
   const existing = await capiPurchaseQueue.getJob(jobId);
@@ -40,7 +41,7 @@ export const enqueueCapiPurchaseWithOutcome = async (orderId: string) => {
     const state = await existing.getState();
 
     if (state !== 'completed' && state !== 'failed' && state !== 'unknown') {
-      return { job: existing, reused: true };
+      return { job: existing, reused: true, state };
     }
 
     if (state === 'completed' || state === 'failed') {

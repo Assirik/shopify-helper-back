@@ -1,16 +1,19 @@
 import { Job, UnrecoverableError, Worker } from 'bullmq';
-import { CapiPurchaseStatus, CustomerConfirmationStatus, IOrder, Order } from '../models/Order';
+import { CapiPurchaseStatus, CapiSkipReason as OrderCapiSkipReason, IOrder, Order } from '../models/Order';
 import { OrderEvent, OrderEventType } from '../models/OrderEvent';
 import { CapiSendResult, MetaCapiError, buildFbc, sendPurchase } from '../providers/metaCapi.provider';
 import { CAPI_PURCHASE_QUEUE_NAME, CapiPurchaseJobData } from '../queues/capi.queue';
 import { getRedisConnection } from '../queues/notification.queue';
 import config from '../utilities/config/env.config';
 import log from '../utilities/logger/logger';
+import { triggerCapiPurchase } from '../utilities/services/capiPurchase.service';
+import { CAPI_MAX_EVENT_AGE_MS, getOrderCapiSkipReason } from '../utilities/services/orderCapabilities.service';
 
-export type CapiSkipReason = 'test' | 'cancelled' | 'disabled' | 'too_old';
+// The values of the Order enum, stored in `capiSkipReason`.
+export type CapiSkipReason = `${OrderCapiSkipReason}`;
 
-// Meta rejects events older than 7 days; keep a 1 h margin for queue and network delays.
-export const CAPI_MAX_EVENT_AGE_MS = 7 * 24 * 60 * 60 * 1000 - 60 * 60 * 1000;
+// Meta rejects events older than 7 days, with a 1 h margin (shared with the resend rules).
+export { CAPI_MAX_EVENT_AGE_MS };
 
 const MAX_ERROR_LENGTH = 300;
 
@@ -50,21 +53,12 @@ export const toShortErrorMessage = (err: unknown): string => {
 };
 
 export const getSkipReason = (order: IOrder, now: Date = new Date()): CapiSkipReason | undefined => {
-  if (order.isTest) {
-    return 'test';
-  }
+  // Test order, cancelled on Shopify, or neither confirmed nor delivered: shared with the
+  // admin resend eligibility (orderCapabilities.service).
+  const orderSkipReason = getOrderCapiSkipReason(order);
 
-  if (order.shopifyCancelledAt) {
-    return 'cancelled';
-  }
-
-  // A Purchase is only sent for a confirmed or delivered order. While the send was delayed
-  // (Meta 5xx, Redis) an agent may have cancelled the order, and a later customer message
-  // may even have reopened it (needs_attention): neither is a sale, so the retry is skipped.
-  // A delivered order is a real sale whatever its confirmation status (cancelByAdmin leaves
-  // operationalStatus untouched, delivery without confirmation is the fallback): it is sent.
-  if (order.customerConfirmationStatus !== CustomerConfirmationStatus.CONFIRMED && !order.deliveredAt) {
-    return 'cancelled';
+  if (orderSkipReason) {
+    return orderSkipReason;
   }
 
   if (!config.metaCapi.enabled) {
@@ -84,12 +78,15 @@ export const getSkipReason = (order: IOrder, now: Date = new Date()): CapiSkipRe
 const updateIfPending = (orderId: IOrder['_id'] | string, update: Record<string, unknown>) =>
   Order.findOneAndUpdate({ _id: orderId, capiPurchaseStatus: CapiPurchaseStatus.PENDING }, update, { new: true });
 
-const markSkipped = async (job: Job<CapiPurchaseJobData>, order: IOrder, reason: CapiSkipReason) => {
-  const updated = await updateIfPending(order._id, { $set: { capiPurchaseStatus: CapiPurchaseStatus.SKIPPED } });
+// True when the skip was recorded (the order was still PENDING).
+const markSkipped = async (job: Job<CapiPurchaseJobData>, order: IOrder, reason: CapiSkipReason): Promise<boolean> => {
+  const updated = await updateIfPending(order._id, {
+    $set: { capiPurchaseStatus: CapiPurchaseStatus.SKIPPED, capiSkipReason: reason }
+  });
 
   if (!updated) {
     log.info({ jobId: job.id, orderId: order._id, reason }, 'CAPI purchase status changed concurrently, skip not recorded');
-    return;
+    return false;
   }
 
   await OrderEvent.create({
@@ -99,9 +96,50 @@ const markSkipped = async (job: Job<CapiPurchaseJobData>, order: IOrder, reason:
   });
 
   log.info({ jobId: job.id, orderId: order._id, reason }, 'CAPI purchase skipped');
+  return true;
 };
 
-const markSent = async (job: Job<CapiPurchaseJobData>, order: IOrder, result: CapiSendResult) => {
+// The order may have been confirmed or delivered between the read above and the skip write:
+// its own trigger then found the Purchase still PENDING and did nothing. Read it again and,
+// if it is now a sale, take the Purchase back as that trigger would have.
+const retakeIfNowASale = async (job: Job<CapiPurchaseJobData>, orderId: IOrder['_id']) => {
+  const current = await Order.findById(orderId);
+
+  if (current && !getOrderCapiSkipReason(current)) {
+    log.info({ jobId: job.id, orderId }, 'Order became a sale while the CAPI purchase was skipped, taking it back');
+    await triggerCapiPurchase(orderId, 'confirmation');
+  }
+};
+
+// A certain refusal by Meta: an HTTP 4xx answer that is not retried, so the event was not
+// counted. Any other final failure (timeout, network, 5xx, 429, error after Meta accepted
+// the event) is ambiguous: Meta may have received it.
+export const isDefinitiveMetaRefusal = (err: unknown): boolean =>
+  err instanceof MetaCapiError &&
+  !err.retryable &&
+  err.status !== undefined &&
+  err.status >= 400 &&
+  err.status < 500;
+
+// Whether a send failure may have reached Meta. A MetaCapiError raised before the HTTP call
+// (missing configuration or data) did not, nor did a certain refusal. Any other error thrown
+// by the send cannot be placed before or after the call: counted as possibly received.
+export const mayHaveReachedMeta = (err: unknown): boolean => {
+  if (err instanceof MetaCapiError) {
+    return err.requestSent && !isDefinitiveMetaRefusal(err);
+  }
+
+  return true;
+};
+
+// Durable fact, written whatever the status and never cleared: `$min` keeps the first attempt.
+const markPossiblyReceived = async (job: Job<CapiPurchaseJobData>, orderId: IOrder['_id'] | string, attemptAt: Date) => {
+  await Order.updateOne({ _id: orderId }, { $min: { capiPossiblyReceivedAt: attemptAt } });
+  log.warn({ jobId: job.id, orderId, attemptAt }, 'CAPI purchase may have reached Meta, marked as possibly received');
+};
+
+// True when the SENT result was recorded.
+const markSent = async (job: Job<CapiPurchaseJobData>, order: IOrder, result: CapiSendResult): Promise<boolean> => {
   const { eventId, valueEur, fxRate } = result.meta;
   const updated = await updateIfPending(order._id, {
     $set: {
@@ -119,7 +157,7 @@ const markSent = async (job: Job<CapiPurchaseJobData>, order: IOrder, result: Ca
       { jobId: job.id, orderId: order._id, eventId, fbtraceId: result.fbtraceId },
       'CAPI purchase sent but status changed concurrently, result not recorded'
     );
-    return;
+    return false;
   }
 
   await OrderEvent.create({
@@ -139,18 +177,32 @@ const markSent = async (job: Job<CapiPurchaseJobData>, order: IOrder, result: Ca
     { jobId: job.id, orderId: order._id, eventId, fbtraceId: result.fbtraceId, eventsReceived: result.eventsReceived },
     'CAPI purchase sent to Meta'
   );
+  return true;
 };
 
 // `attempts` = number of attempts consumed, including the one that just failed.
-const markFailed = async (job: Job<CapiPurchaseJobData>, orderId: IOrder['_id'] | string, err: unknown, attempts: number) => {
+// `possiblyReceived`: an earlier attempt may have reached Meta (`capiPossiblyReceivedAt`), so
+// even a certain refusal now is not a definitive failure. True when the failure was recorded.
+const markFailed = async (
+  job: Job<CapiPurchaseJobData>,
+  orderId: IOrder['_id'] | string,
+  err: unknown,
+  attempts: number,
+  possiblyReceived: boolean
+): Promise<boolean> => {
   const error = toShortErrorMessage(err);
   const updated = await updateIfPending(orderId, {
-    $set: { capiPurchaseStatus: CapiPurchaseStatus.FAILED, capiPurchaseError: error }
+    $set: {
+      capiPurchaseStatus: CapiPurchaseStatus.FAILED,
+      capiPurchaseError: error,
+      capiPurchaseFailedAt: new Date(),
+      capiPurchaseFailureDefinitive: isDefinitiveMetaRefusal(err) && !possiblyReceived
+    }
   });
 
   if (!updated) {
     log.info({ jobId: job.id, orderId }, 'CAPI purchase not pending, failure not recorded');
-    return;
+    return false;
   }
 
   const metaError = err instanceof MetaCapiError ? err : undefined;
@@ -170,6 +222,7 @@ const markFailed = async (job: Job<CapiPurchaseJobData>, orderId: IOrder['_id'] 
   });
 
   log.error({ jobId: job.id, orderId, error, fbtraceId: metaError?.fbtraceId }, 'CAPI purchase failed permanently');
+  return true;
 };
 
 export const processCapiPurchaseJob = async (job: Job<CapiPurchaseJobData>) => {
@@ -199,22 +252,38 @@ export const processCapiPurchaseJob = async (job: Job<CapiPurchaseJobData>) => {
   const skipReason = getSkipReason(order);
 
   if (skipReason) {
-    await markSkipped(job, order, skipReason);
+    const skipped = await markSkipped(job, order, skipReason);
+
+    if (skipped && skipReason === 'cancelled') {
+      await retakeIfNowASale(job, order._id);
+    }
+
     return;
   }
 
   let result: CapiSendResult;
+  const attemptAt = new Date();
 
   try {
     result = await sendPurchase(order);
   } catch (err) {
+    // Every attempt that may have reached Meta is recorded, retried or final.
+    const reachedMeta = mayHaveReachedMeta(err);
+
+    if (reachedMeta) {
+      await markPossiblyReceived(job, order._id, attemptAt);
+    }
+
+    // An earlier attempt of this job counts too: its mark may have failed to be written.
+    const possiblyReceived = reachedMeta || Boolean(order.capiPossiblyReceivedAt) || job.attemptsMade > 0;
+
     if (err instanceof MetaCapiError && !err.retryable) {
       if (isTooOldRejection(err)) {
         await markSkipped(job, order, 'too_old');
         return;
       }
 
-      await markFailed(job, order._id, err, job.attemptsMade + 1);
+      await markFailed(job, order._id, err, job.attemptsMade + 1, possiblyReceived);
       throw new UnrecoverableError(toShortErrorMessage(err));
     }
 
@@ -222,7 +291,7 @@ export const processCapiPurchaseJob = async (job: Job<CapiPurchaseJobData>) => {
     const isLastAttempt = job.attemptsMade + 1 >= attemptsAllowed;
 
     if (isLastAttempt) {
-      await markFailed(job, order._id, err, job.attemptsMade + 1);
+      await markFailed(job, order._id, err, job.attemptsMade + 1, possiblyReceived);
     } else {
       log.warn(
         {
@@ -240,7 +309,17 @@ export const processCapiPurchaseJob = async (job: Job<CapiPurchaseJobData>) => {
     throw err;
   }
 
-  await markSent(job, order, result);
+  // Meta accepted the event: if SENT cannot be recorded (concurrent change, MongoDB error),
+  // the order must keep the fact that Meta received it.
+  let recorded = false;
+
+  try {
+    recorded = await markSent(job, order, result);
+  } finally {
+    if (!recorded) {
+      await markPossiblyReceived(job, order._id, attemptAt);
+    }
+  }
 };
 
 // BullMQ 'failed' listener. Covers final failures the processor could not record itself:
@@ -266,7 +345,13 @@ export const handleCapiPurchaseJobFailed = async (job: Job<CapiPurchaseJobData> 
     );
 
     if (isFinal) {
-      await markFailed(job, job.data.orderId, err, job.attemptsMade);
+      // Failure the processor did not record (stalled job, error outside the send): whether
+      // the last attempt reached Meta is unknown, so it counts as possibly received.
+      const recorded = await markFailed(job, job.data.orderId, err, job.attemptsMade, true);
+
+      if (recorded) {
+        await markPossiblyReceived(job, job.data.orderId, job.processedOn ? new Date(job.processedOn) : new Date());
+      }
     }
   } catch (handlerErr) {
     log.error(

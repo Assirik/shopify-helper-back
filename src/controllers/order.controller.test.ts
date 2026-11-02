@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, jest } from '@jest/globals';
-import { Request, Response } from 'express';
+import express, { Request, Response } from 'express';
+import jwt from 'jsonwebtoken';
 import { Types } from 'mongoose';
+import request from 'supertest';
 import { AttentionReasonCode, ConfirmationSource, CustomerConfirmationStatus, IOrder } from '../models/Order';
 import {
   OrderController,
@@ -15,7 +17,14 @@ import {
 import { IOrderEvent, OrderEvent, OrderEventType } from '../models/OrderEvent';
 import { Message } from '../models/Message';
 import { Order } from '../models/Order';
-import { triggerCapiPurchase } from '../utilities/services/capiPurchase.service';
+import { Role, User } from '../models/User';
+import ordersRouter from '../routes/orders';
+import config from '../utilities/config/env.config';
+import {
+  CapiPurchaseResendError,
+  resendCapiPurchase,
+  triggerCapiPurchase
+} from '../utilities/services/capiPurchase.service';
 import {
   OrderConfirmationError,
   OrderConfirmationService
@@ -28,9 +37,102 @@ jest.mock('../queues/notification.queue', () => ({
   enqueueOrderConfirmed: jest.fn()
 }));
 
-jest.mock('../utilities/services/capiPurchase.service', () => ({
-  triggerCapiPurchase: jest.fn(async () => undefined)
-}));
+jest.mock('../utilities/services/capiPurchase.service', () => {
+  class CapiPurchaseResendError extends Error {
+    constructor(
+      public readonly code: string,
+      message: string,
+      public readonly status = 409
+    ) {
+      super(message);
+    }
+  }
+
+  return {
+    CapiPurchaseResendError,
+    resendCapiPurchase: jest.fn(),
+    triggerCapiPurchase: jest.fn(async () => undefined)
+  };
+});
+
+describe('POST /orders/:id/capi-purchase/resend', () => {
+  const orderId = new Types.ObjectId();
+  const userId = new Types.ObjectId().toString();
+  const resend = jest.mocked(resendCapiPurchase);
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  const buildApp = () => {
+    const app = express();
+    app.use(express.json());
+    app.use('/api/orders', ordersRouter);
+    return app;
+  };
+
+  // requireAuth then requireAdmin both read the user.
+  const loginAs = (role: Role) => {
+    const user = { _id: userId, role, isActive: true, sessionVersion: 0 };
+    jest.spyOn(User, 'findById').mockReturnValue({ select: async () => user } as never);
+    return `Bearer ${jwt.sign({ userId, sessionVersion: 0 }, config.jwtSecret)}`;
+  };
+
+  const post = (role: Role, id = orderId.toString()) =>
+    request(buildApp()).post(`/api/orders/${id}/capi-purchase/resend`).set('Authorization', loginAs(role)).send();
+
+  it('answers 202 with the order in the detail format (capabilities included), for an admin', async () => {
+    resend.mockResolvedValueOnce({
+      _id: orderId,
+      shopifyOrderName: '#1201',
+      customerConfirmationStatus: CustomerConfirmationStatus.CONFIRMED,
+      capiPurchaseStatus: 'pending'
+    } as unknown as IOrder);
+
+    const response = await post(Role.ADMIN);
+
+    expect(response.status).toBe(202);
+    expect(resend).toHaveBeenCalledWith(orderId.toString(), userId);
+    expect(response.body.data.order).toEqual(
+      expect.objectContaining({
+        id: orderId.toString(),
+        capiPurchaseStatus: 'pending',
+        capabilities: expect.objectContaining({ canResendCapi: false })
+      })
+    );
+  });
+
+  it('answers 403 to a non-admin user without calling the service', async () => {
+    const response = await post(Role.USER);
+
+    expect(response.status).toBe(403);
+    expect(response.body).toEqual({ error: 'AdminRequired' });
+    expect(resend).not.toHaveBeenCalled();
+  });
+
+  it('answers 401 without a token', async () => {
+    const response = await request(buildApp()).post(`/api/orders/${orderId}/capi-purchase/resend`).send();
+
+    expect(response.status).toBe(401);
+    expect(resend).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['OrderNotFound', 404],
+    ['CapiPurchaseAlreadySent', 409],
+    ['CapiPurchaseNotResendable', 409],
+    ['CapiPurchaseMayHaveBeenReceived', 409],
+    ['CapiPurchaseTooOld', 409],
+    ['CapiDisabled', 409]
+  ])('maps %s to %i with the error code', async (code, status) => {
+    resend.mockRejectedValueOnce(new CapiPurchaseResendError(code, code, status));
+
+    const response = await post(Role.ADMIN);
+
+    expect(response.status).toBe(status);
+    expect(response.body).toEqual({ error: code });
+  });
+});
 
 describe('order controller attention contracts', () => {
   it('accepts a bounded list of unique ObjectIds', () => {
@@ -101,7 +203,8 @@ describe('order controller attention contracts', () => {
           canDeliver: false,
           canMarkFailed: false,
           canReturn: false,
-          canMarkUnreachable: true
+          canMarkUnreachable: true,
+          canResendCapi: false
         }
       })
     );
