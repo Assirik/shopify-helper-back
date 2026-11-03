@@ -3,6 +3,7 @@ import { MetaWhatsAppProvider } from '../../providers/metaWhatsApp.provider';
 import { TemplateVariable } from '../../providers/messaging.provider';
 import config from '../config/env.config';
 import log from '../logger/logger';
+import { maskPhone } from '../logger/maskPhone';
 
 const MIRROR_TIMEOUT_MS = 5000;
 const TEMPLATE_CACHE_TTL_MS = 10 * 60 * 1000;
@@ -73,7 +74,7 @@ export class ChatwootOutboundMirrorService {
 
       return true;
     } catch (err) {
-      log.error({ err, to: input.to, templateName: input.templateName }, 'Failed to mirror WhatsApp template to Chatwoot');
+      log.error({ err, to: maskPhone(input.to), templateName: input.templateName }, 'Failed to mirror WhatsApp template to Chatwoot');
       return false;
     }
   }

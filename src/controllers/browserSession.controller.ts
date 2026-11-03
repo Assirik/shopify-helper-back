@@ -5,6 +5,7 @@ import { BrowserSession } from '../models/BrowserSession';
 import { getRedisConnection } from '../queues/notification.queue';
 import { PhoneNormalizationService } from '../utilities/services/phoneNormalization.service';
 import log from '../utilities/logger/logger';
+import { maskPhone } from '../utilities/logger/maskPhone';
 
 /**
  * POST /api/session — browser signals sent by the Shopify theme script (`theme/session.js`)
@@ -34,9 +35,6 @@ type RequiredField = 'userAgent' | 'pageUrl';
 const NULLABLE_FIELDS: NullableField[] = ['fbp', 'fbc', 'fbclid'];
 const REQUIRED_FIELDS: RequiredField[] = ['userAgent', 'pageUrl'];
 const SIGNAL_FIELDS = [...NULLABLE_FIELDS, ...REQUIRED_FIELDS];
-
-// Logs never carry the full phone (the record itself is deleted after one hour).
-const maskPhone = (phoneE164: string) => `***${phoneE164.slice(-4)}`;
 
 export interface SessionCapture {
   phoneE164: string;

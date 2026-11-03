@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, jest } from '@jest/globals
 import axios from 'axios';
 import config from '../config/env.config';
 import { MetaWhatsAppProvider } from '../../providers/metaWhatsApp.provider';
+import log from '../logger/logger';
 import { ChatwootOutboundMirrorService, OutboundMirrorInput } from './chatwootOutboundMirror.service';
 
 jest.mock('axios');
@@ -158,6 +159,12 @@ describe('ChatwootOutboundMirrorService', () => {
     });
     mockedCreate.mockReturnValue({ get, post: jest.fn() } as unknown as ReturnType<typeof axios.create>);
 
+    const errorSpy = jest.spyOn(log, 'error').mockImplementation(() => undefined);
     await expect(ChatwootOutboundMirrorService.mirrorTemplateMessage(baseInput)).resolves.toBe(false);
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ to: '***4567' }),
+      'Failed to mirror WhatsApp template to Chatwoot'
+    );
+    errorSpy.mockRestore();
   });
 });
