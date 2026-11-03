@@ -52,6 +52,21 @@ const buildApp = () => {
     err.response = { status: 401, data: 'RESPSECRET' };
     throw err;
   });
+  app.get('/dup', () => {
+    const { MongoServerError } = jest.requireActual<typeof import('mongodb')>('mongodb');
+    throw new MongoServerError({
+      message: 'E11000 duplicate key error collection: shop.browsersessions index: phoneE164_1 dup key: { phoneE164: "+221776986780" }',
+      code: 11000,
+      keyPattern: { phoneE164: 1 },
+      keyValue: { phoneE164: '+221776986780' }
+    });
+  });
+  app.get('/validation', async (_req, _res, next) => {
+    const mongoose = jest.requireActual<typeof import('mongoose')>('mongoose').default;
+    const model = mongoose.models.ReqLogProbe ?? mongoose.model('ReqLogProbe', new mongoose.Schema({ phone: { type: String, minlength: 30 } }));
+    next(await new model({ phone: '+221776986780' }).validate().catch((e: unknown) => e));
+  });
+  app.post('/json', express.json(), (_req, res) => res.json({ ok: true }));
   app.get('/abort', (req, res) => {
     // Client disconnects before any response is sent.
     res.on('close', () => undefined);
@@ -126,6 +141,28 @@ describe('requestLogger', () => {
     const handlerLine = lines.find((l) => l.msg === 'Unhandled API error')!;
     expect(handlerLine.err.type).toBe('Error');
     expect(handlerLine.err.message).toBe('boom');
+  });
+
+  it('keeps the phone of a duplicate-key error out of both lines (req.log)', async () => {
+    await request(buildApp()).get('/dup');
+    expect(lines).toHaveLength(2);
+    expect(JSON.stringify(lines)).not.toContain('776986780');
+    const handlerLine = lines.find((l) => l.msg === 'Unhandled API error')!;
+    expect(handlerLine.err.message).toBe('E11000 duplicate key error collection: shop.browsersessions index: phoneE164_1');
+    expect(handlerLine.err).not.toHaveProperty('keyValue');
+  });
+
+  it('keeps rejected values of a ValidationError out of both lines (req.log)', async () => {
+    await request(buildApp()).get('/validation');
+    expect(JSON.stringify(lines)).not.toContain('776986780');
+    expect(lines.find((l) => l.msg === 'Unhandled API error')!.err.type).toBe('ValidationError');
+  });
+
+  it('keeps the body of a malformed JSON request out of both lines (req.log)', async () => {
+    await request(buildApp()).post('/json').set('Content-Type', 'application/json').send('{"phone":"+221776986780",');
+    expect(lines.length).toBeGreaterThan(0);
+    expect(JSON.stringify(lines)).not.toContain('776986780');
+    expect(lines.some((l) => l.err && 'body' in l.err)).toBe(false);
   });
 
   it('logs a request aborted by the client at warn level', async () => {
