@@ -284,6 +284,34 @@ describe('ShopifyWebhookController.ordersCreate — browser session link', () =>
     expect(linkLogLine()).toEqual(expect.objectContaining({ browserSessionLinked: true, browserSessionLookupFailed: false }));
   });
 
+  it('masks the customer name, phone and e-mail in every info log line', async () => {
+    mockBrowserSessionLookup(null);
+    jest.spyOn(Customer, 'findOneAndUpdate').mockResolvedValue({
+      _id: new Types.ObjectId(),
+      phoneE164: '+221776986780',
+      email: 'amadou.diallo@example.com',
+      save: jest.fn(async () => undefined)
+    } as never);
+
+    const res = await callOrdersCreate({
+      ...payload,
+      email: 'amadou.diallo@example.com',
+      customer: { id: 77, first_name: 'Amadou', last_name: 'Diallo', email: 'amadou.diallo@example.com' }
+    });
+
+    expect(res.statusCode).toBe(202);
+    const lines = (logInfo.mock.calls as unknown[][]).map(call => call[0]);
+    const extracted = lines.find(l => (l as any)?.customerPhoneE164 && (l as any)?.shopifyOrderName) as Record<string, unknown>;
+    expect(extracted).toEqual(
+      expect.objectContaining({ customerPhoneE164: '***6780', customerPhoneRaw: '***7 80', customerName: 'A***', customerEmail: 'a***@example.com' })
+    );
+    const raw = JSON.stringify(lines);
+    for (const value of ['776986780', '77 698 67 80', 'Amadou', 'Diallo', 'amadou.diallo']) {
+      expect(raw).not.toContain(value);
+    }
+    expect(lines.find(l => (l as any)?.customerEmail === 'a***@example.com' && (l as any)?.customerId)).toBeDefined();
+  });
+
   it('reads the ad origin from utm_* attributes and the full_url fbclid over the session one', async () => {
     mockBrowserSessionLookup(browserSession(new Date(ORDER_CREATED_AT.getTime() - 2 * MINUTE)));
     const withNotes = { ...payload, note_attributes: [

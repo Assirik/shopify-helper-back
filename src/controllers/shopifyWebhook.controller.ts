@@ -12,6 +12,8 @@ import { scheduleInitialConfirmationRequest } from '../queues/notification.queue
 import { QUEUE_ADD_TIMEOUT_MS, TimeoutError, withTimeout } from '../queues/queueTimeout';
 import { resolveRegion } from '../utilities/reference/senegalRegions';
 import log from '../utilities/logger/logger';
+import { maskPhone } from '../utilities/logger/maskPhone';
+import { maskEmail, maskName } from '../utilities/logger/maskPersonal';
 import { splitFullName } from '../utilities/services/nameParser';
 import { parseAdAttribution } from '../utilities/services/adAttribution';
 
@@ -645,10 +647,10 @@ export class ShopifyWebhookController {
         shopifyOrderId,
         shopifyOrderName: payload.name,
         shopifyCustomerId: payload.customer?.id?.toString(),
-        customerName,
-        customerPhoneRaw,
-        customerPhoneE164: phone.e164,
-        customerEmail,
+        customerName: maskName(customerName),
+        customerPhoneRaw: maskPhone(customerPhoneRaw),
+        customerPhoneE164: maskPhone(phone.e164),
+        customerEmail: maskEmail(customerEmail),
         phoneValid: phone.isValid,
         phoneErrorReason: phone.errorReason,
         lineItemCount: lineItems.length,
@@ -713,8 +715,8 @@ export class ShopifyWebhookController {
       {
         customerId: customer._id,
         shopifyCustomerId: customer.shopifyCustomerId,
-        customerPhoneE164: customer.phoneE164,
-        customerEmail: customer.email
+        customerPhoneE164: maskPhone(customer.phoneE164),
+        customerEmail: maskEmail(customer.email)
       },
       'Upserted customer from Shopify order'
     );
