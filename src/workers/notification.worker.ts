@@ -29,6 +29,7 @@ import {
 } from '../queues/notification.queue';
 import config from '../utilities/config/env.config';
 import log from '../utilities/logger/logger';
+import { captureJobFailure } from '../utilities/sentry/sentry';
 import { ChatwootOutboundMirrorService } from '../utilities/services/chatwootOutboundMirror.service';
 import {
   CONFIRMABLE_BY_BUTTON,
@@ -1037,6 +1038,7 @@ export const startNotificationWorker = () => {
   });
 
   notificationWorker.on('failed', (job, err) => {
+    captureJobFailure(NOTIFICATION_QUEUE_NAME, job, err);
     const attemptsAllowed = job?.opts.attempts || 1;
     const attemptsMade = job?.attemptsMade || 0;
     const willRetry = attemptsMade < attemptsAllowed;
@@ -1087,6 +1089,7 @@ export const startMaintenanceWorker = () => {
   );
 
   maintenanceWorker.on('failed', (job, err) => {
+    captureJobFailure(MAINTENANCE_QUEUE_NAME, job, err);
     log.error({ err, jobId: job?.id }, 'Confirmation maintenance job failed');
   });
 

@@ -25,6 +25,7 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "@sentry/node": "^11.10.0",
     "@types/bcrypt": "^6.0.0",
     "axios": "^1.18.0",
     "bcrypt": "^6.0.0",
