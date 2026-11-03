@@ -62,8 +62,8 @@ Vérification : sur `dev` (aea3d21), la CI passe (`npm run build` OK, `npm test`
 1062 tests verts). Chaque PR a été relue par un autre modèle que son auteur. Les deux chasses
 aux bloquants du 01/11 (4 puis 2 relecteurs, sur une vraie API avec bases jetables)
 couvraient `dev` jusqu'à 7eaf3a0 : aucun bloquant restant. Ce qui a été fusionné depuis
-(C5.7, C5.26, OBS.1 à OBS.3) passe par une nouvelle chasse avant la réouverture des ventes
-(voir « Points ouverts »).
+(C5.7, C5.26, OBS.1 à OBS.3) passera par une nouvelle chasse juste après la réouverture des
+ventes (voir « Points ouverts »).
 
 ## Bascule : actions humaines, dans l'ordre
 
@@ -74,8 +74,8 @@ couvraient `dev` jusqu'à 7eaf3a0 : aucun bloquant restant. Ce qui a été fusio
      régénérer, si ce n'est pas déjà fait ;
    - WhatsApp : un jeton **permanent** d'utilisateur système. Le 401 du 02/11 laisse penser
      à un jeton temporaire expiré.
-2. **Après un long arrêt, avant le premier `up`**. Le contrôle du 03/11 a donné 0 et 0, mais
-   sans préciser la base ni compter `active` : à refaire tel que décrit ici.
+2. **Après un long arrêt, avant le premier `up`**. Le contrôle du 03/11 a donné 0 et 0 sur la
+   base de l'API, sans compter la file `active` : la compter avant le premier `up`.
    - **commandes anciennes encore « en attente »** : la relance automatique (toutes les
      30 min, jusqu'à 200 commandes par niveau de relance) les reprendrait quel que soit leur
      âge. Requête en lecture seule, **sur la base que l'API utilise** : `MONGODB_DB_NAME` du
@@ -186,7 +186,7 @@ couvraient `dev` jusqu'à 7eaf3a0 : aucun bloquant restant. Ce qui a été fusio
 
 ## Points ouverts
 
-**Avant la réouverture des ventes** (recommandé le 03/11) :
+**Juste après la réouverture des ventes** (décision du 03/11 : rouvrir sans les attendre) :
 
 - **C5.27** : délai maximal de 10 s sur les appels WhatsApp et Termii
   (`metaWhatsApp.provider.ts`, `termiiSms.provider.ts`). La file d'envoi traite un job à la
@@ -195,7 +195,7 @@ couvraient `dev` jusqu'à 7eaf3a0 : aucun bloquant restant. Ce qui a été fusio
   OBS.1 à OBS.3) et sur cette liste de bascule : carte « [Réouverture] Chasse aux
   bloquants ».
 
-**Après la réouverture** :
+**Ensuite** :
 
 - **C5.28** : SMS de secours. L'expéditeur Termii « Alkima » attend sa validation : d'ici
   là, un client sans WhatsApp n'est joint que par l'appel d'un agent. La carte porte aussi
