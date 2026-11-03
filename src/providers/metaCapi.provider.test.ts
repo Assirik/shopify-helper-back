@@ -241,6 +241,34 @@ describe('buildPurchasePayload', () => {
 });
 
 describe('sendPurchase', () => {
+  it('returns Meta warnings as metaMessages', async () => {
+    mockedPost.mockResolvedValueOnce({ data: { events_received: 1, messages: ['x'], fbtrace_id: 't' } });
+    const result = await sendPurchase(baseOrder());
+    expect(result.metaMessages).toEqual(['x']);
+  });
+
+  it.each([
+    ['empty array', []],
+    ['absent', undefined],
+    ['string', 'warning'],
+    ['object', { a: 'b' }],
+    ['null', null],
+    ['only non-strings and empty strings', [1, null, '', {}]]
+  ])('has no metaMessages when messages is %s', async (_label, messages) => {
+    mockedPost.mockResolvedValueOnce({ data: { events_received: 1, messages } });
+    const result = await sendPurchase(baseOrder());
+    expect(result).not.toHaveProperty('metaMessages');
+  });
+
+  it('keeps only non-empty strings, at most 10, each cut to 500 characters', async () => {
+    const many = Array.from({ length: 15 }, (_, i) => `m${i}`);
+    mockedPost.mockResolvedValueOnce({ data: { events_received: 1, messages: [1, '', ...many] } });
+    expect((await sendPurchase(baseOrder())).metaMessages).toEqual(many.slice(0, 10));
+
+    mockedPost.mockResolvedValueOnce({ data: { events_received: 1, messages: ['a'.repeat(900)] } });
+    expect((await sendPurchase(baseOrder())).metaMessages).toEqual(['a'.repeat(500)]);
+  });
+
   it('posts to the dataset events endpoint with a 10 s timeout and returns the trace', async () => {
     mockedPost.mockResolvedValueOnce({ data: { events_received: 1, fbtrace_id: 'trace-1' } });
 

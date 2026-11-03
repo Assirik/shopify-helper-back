@@ -32,6 +32,7 @@ import { CapiPurchaseStatus, CustomerConfirmationStatus, Order } from '../models
 import { OrderEvent, OrderEventType } from '../models/OrderEvent';
 import { MetaCapiError, sendPurchase } from '../providers/metaCapi.provider';
 import { CapiPurchaseJobData } from '../queues/capi.queue';
+import log from '../utilities/logger/logger';
 import config from '../utilities/config/env.config';
 import { triggerCapiPurchase } from '../utilities/services/capiPurchase.service';
 import {
@@ -150,6 +151,88 @@ describe('capi purchase worker', () => {
         valueEur: 21.34
       }
     });
+  });
+
+  const WARNING = 'Meta CAPI accepted the event with warnings';
+  const warningCalls = (warn: jest.Mock) => warn.mock.calls.filter(c => c[1] === WARNING);
+
+  it('logs Meta warnings once and still marks the order sent', async () => {
+    stubOrder(buildOrder());
+    mockedSend.mockResolvedValueOnce({ ...sendResult, metaMessages: ['stale test_event_code'] });
+    const update = spyUpdate({ _id: orderId });
+    const createEvent = jest.spyOn(OrderEvent, 'create').mockResolvedValue({} as never);
+    const warn = jest.spyOn(log, 'warn').mockImplementation((() => undefined) as never) as unknown as jest.Mock;
+
+    await processCapiPurchaseJob(buildJob());
+
+    const calls = warningCalls(warn);
+    expect(calls).toHaveLength(1);
+    expect(calls[0][0]).toEqual({
+      jobId: `capi-purchase-${orderId.toString()}`,
+      orderId,
+      eventId: 'purchase_1234567890',
+      fbtraceId: 'trace-1',
+      messages: ['stale test_event_code']
+    });
+    expect(update).toHaveBeenCalledTimes(1);
+    expect((update.mock.calls[0][1] as Record<string, any>).$set.capiPurchaseStatus).toBe(CapiPurchaseStatus.SENT);
+    expect(markWrite).not.toHaveBeenCalled();
+    expect(createEvent).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(createEvent.mock.calls[0][0])).not.toContain('stale test_event_code');
+    expect((createEvent.mock.calls[0][0] as any).metadata).not.toHaveProperty('messages');
+  });
+
+  it('logs Meta warnings even when SENT is not recorded (concurrent change)', async () => {
+    stubOrder(buildOrder());
+    mockedSend.mockResolvedValueOnce({ ...sendResult, metaMessages: ['w'] });
+    spyUpdate(null);
+    const warn = jest.spyOn(log, 'warn').mockImplementation((() => undefined) as never) as unknown as jest.Mock;
+
+    await processCapiPurchaseJob(buildJob());
+
+    expect(warningCalls(warn)).toHaveLength(1);
+  });
+
+  it('logs Meta warnings and still throws when the SENT write fails', async () => {
+    stubOrder(buildOrder());
+    mockedSend.mockResolvedValueOnce({ ...sendResult, metaMessages: ['w'] });
+    jest.spyOn(Order, 'findOneAndUpdate').mockRejectedValue(new Error('mongo down') as never);
+    const warn = jest.spyOn(log, 'warn').mockImplementation((() => undefined) as never) as unknown as jest.Mock;
+
+    await expect(processCapiPurchaseJob(buildJob())).rejects.toThrow('mongo down');
+
+    expect(warningCalls(warn)).toHaveLength(1);
+  });
+
+  it('redacts the access token from Meta warnings', async () => {
+    config.metaCapi.accessToken = 'secret-tok';
+    stubOrder(buildOrder());
+    mockedSend.mockResolvedValueOnce({
+      ...sendResult,
+      metaMessages: ['bad secret-tok here', 'url ?access_token=xyz&a=1']
+    });
+    spyUpdate({ _id: orderId });
+    jest.spyOn(OrderEvent, 'create').mockResolvedValue({} as never);
+    const warn = jest.spyOn(log, 'warn').mockImplementation((() => undefined) as never) as unknown as jest.Mock;
+
+    await processCapiPurchaseJob(buildJob());
+
+    const logged = JSON.stringify(warningCalls(warn)[0][0]);
+    expect(logged).not.toContain('secret-tok');
+    expect(logged).not.toContain('xyz');
+    expect((warningCalls(warn)[0][0] as any).messages).toEqual(['bad [redacted] here', 'url ?access_token=[redacted]&a=1']);
+  });
+
+  it('does not log a warning when Meta returned no messages', async () => {
+    stubOrder(buildOrder());
+    mockedSend.mockResolvedValueOnce(sendResult);
+    spyUpdate({ _id: orderId });
+    jest.spyOn(OrderEvent, 'create').mockResolvedValue({} as never);
+    const warn = jest.spyOn(log, 'warn').mockImplementation((() => undefined) as never);
+
+    await processCapiPurchaseJob(buildJob());
+
+    expect(warn.mock.calls.filter(c => c[1] === 'Meta CAPI accepted the event with warnings')).toHaveLength(0);
   });
 
   it.each([
