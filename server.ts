@@ -1,9 +1,11 @@
+import './src/instrument';
 import { createServer } from 'http';
 import os from 'os';
 import app from './src/app';
 import config from './src/utilities/config/env.config';
 import { checkCapiStartup, describeCapiStatus } from './src/utilities/config/capiStartup';
 import log from './src/utilities/logger/logger';
+import { flushSentry } from './src/utilities/sentry/sentry';
 import { DatabaseService } from './src/utilities/services/database.service';
 import { scheduleConfirmationSweep } from './src/queues/notification.queue';
 import { CAPI_PURCHASE_SWEEP_INTERVAL_MS, scheduleCapiPurchaseSweep } from './src/queues/capi.queue';
@@ -102,7 +104,10 @@ const shutdown = async (signal: string) => {
   await stopCapiPurchaseSweepWorker();
   server.close(() => {
     log.info('HTTP server closed');
-    process.exit(0);
+    flushSentry().then(
+      () => process.exit(0),
+      () => process.exit(0)
+    );
   });
 };
 

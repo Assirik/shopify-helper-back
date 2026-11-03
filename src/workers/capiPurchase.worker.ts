@@ -6,6 +6,7 @@ import { CAPI_PURCHASE_QUEUE_NAME, CapiPurchaseJobData } from '../queues/capi.qu
 import { getRedisConnection } from '../queues/notification.queue';
 import config from '../utilities/config/env.config';
 import log from '../utilities/logger/logger';
+import { captureJobFailure } from '../utilities/sentry/sentry';
 import { triggerCapiPurchase } from '../utilities/services/capiPurchase.service';
 import { CAPI_MAX_EVENT_AGE_MS, getOrderCapiSkipReason } from '../utilities/services/orderCapabilities.service';
 
@@ -398,6 +399,7 @@ export const startCapiPurchaseWorker = () => {
   });
 
   capiPurchaseWorker.on('failed', (job, err) => {
+    captureJobFailure(CAPI_PURCHASE_QUEUE_NAME, job, err);
     void handleCapiPurchaseJobFailed(job, err);
   });
 

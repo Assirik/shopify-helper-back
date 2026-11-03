@@ -2,6 +2,7 @@ import { Job, Worker } from 'bullmq';
 import { CAPI_PURCHASE_SWEEP_JOB, CAPI_PURCHASE_SWEEP_QUEUE_NAME } from '../queues/capi.queue';
 import { getRedisConnection } from '../queues/notification.queue';
 import log from '../utilities/logger/logger';
+import { captureJobFailure } from '../utilities/sentry/sentry';
 import { runCapiPurchaseSweep } from '../utilities/services/capiPurchase.service';
 
 let capiPurchaseSweepWorker: Worker | null = null;
@@ -26,6 +27,7 @@ export const startCapiPurchaseSweepWorker = () => {
   });
 
   capiPurchaseSweepWorker.on('failed', (job, err) => {
+    captureJobFailure(CAPI_PURCHASE_SWEEP_QUEUE_NAME, job, err);
     log.error({ err, jobId: job?.id }, 'CAPI purchase sweep job failed');
   });
 
