@@ -54,6 +54,8 @@ export interface CapiPurchaseMeta {
 export interface CapiSendResult {
   fbtraceId?: string;
   eventsReceived?: number;
+  // Warnings Meta returned alongside an accepted event (e.g. a stale test_event_code).
+  metaMessages?: string[];
   meta: CapiPurchaseMeta;
 }
 
@@ -236,7 +238,21 @@ export const buildPurchasePayload = (order: IOrder): { payload: CapiPurchasePayl
 interface MetaCapiResponse {
   events_received?: number;
   fbtrace_id?: string;
+  messages?: unknown;
 }
+
+const MAX_META_MESSAGES = 10;
+const MAX_META_MESSAGE_LENGTH = 500;
+
+// Non-empty string entries of Meta's `messages`, bounded defensively; undefined when none.
+const extractMetaMessages = (messages: unknown): string[] | undefined => {
+  if (!Array.isArray(messages)) return undefined;
+  const kept = messages
+    .filter((m): m is string => typeof m === 'string' && m.length > 0)
+    .slice(0, MAX_META_MESSAGES)
+    .map(m => m.slice(0, MAX_META_MESSAGE_LENGTH));
+  return kept.length ? kept : undefined;
+};
 
 interface MetaErrorBody {
   error?: {
@@ -271,9 +287,12 @@ export const sendPurchase = async (order: IOrder): Promise<CapiSendResult> => {
       { timeout: REQUEST_TIMEOUT_MS, headers: { 'Content-Type': 'application/json' } }
     );
 
+    const metaMessages = extractMetaMessages(response.data?.messages);
+
     return {
       fbtraceId: response.data?.fbtrace_id,
       eventsReceived: response.data?.events_received,
+      ...(metaMessages ? { metaMessages } : {}),
       meta
     };
   } catch (err) {

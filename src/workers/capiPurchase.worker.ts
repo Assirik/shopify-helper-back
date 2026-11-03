@@ -38,16 +38,21 @@ export const isTooOldRejection = (err: unknown): boolean => {
   return [err.metaUserTitle, err.metaUserMessage, err.message].some(text => Boolean(text) && TOO_OLD_TEXT.test(text as string));
 };
 
-// Short, token-free error text stored on the order and in the event.
-export const toShortErrorMessage = (err: unknown): string => {
-  let message = err instanceof Error ? err.message : String(err);
+// Removes the Meta access token from any text before it is stored or logged.
+const redactSecrets = (text: string): string => {
+  let message = text;
   const token = config.metaCapi.accessToken;
 
   if (token) {
     message = message.split(token).join('[redacted]');
   }
 
-  message = message.replace(/access_token=[^\s&"']+/gi, 'access_token=[redacted]');
+  return message.replace(/access_token=[^\s&"']+/gi, 'access_token=[redacted]');
+};
+
+// Short, token-free error text stored on the order and in the event.
+export const toShortErrorMessage = (err: unknown): string => {
+  const message = redactSecrets(err instanceof Error ? err.message : String(err));
 
   return message.length > MAX_ERROR_LENGTH ? `${message.slice(0, MAX_ERROR_LENGTH - 1)}…` : message;
 };
@@ -130,6 +135,26 @@ export const mayHaveReachedMeta = (err: unknown): boolean => {
   }
 
   return true;
+};
+
+// Warnings Meta returned with an accepted event. Never throws: logging must not change the job.
+const logMetaWarnings = (job: Job<CapiPurchaseJobData>, orderId: IOrder['_id'], result: CapiSendResult) => {
+  try {
+    if (!result.metaMessages?.length) return;
+
+    log.warn(
+      {
+        jobId: job.id,
+        orderId,
+        eventId: result.meta.eventId,
+        fbtraceId: result.fbtraceId,
+        messages: result.metaMessages.map(redactSecrets)
+      },
+      'Meta CAPI accepted the event with warnings'
+    );
+  } catch {
+    // ignored on purpose
+  }
 };
 
 // Durable fact, written whatever the status and never cleared: `$min` keeps the first attempt.
@@ -316,6 +341,8 @@ export const processCapiPurchaseJob = async (job: Job<CapiPurchaseJobData>) => {
   try {
     recorded = await markSent(job, order, result);
   } finally {
+    logMetaWarnings(job, order._id, result);
+
     if (!recorded) {
       await markPossiblyReceived(job, order._id, attemptAt);
     }
