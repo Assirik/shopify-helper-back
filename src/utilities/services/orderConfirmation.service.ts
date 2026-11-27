@@ -560,8 +560,10 @@ export class OrderConfirmationService {
       return { outcome: 'not_applicable' };
     }
 
-    // Shopify order names are stored as `#1234`.
-    const order = await Order.findOne({ shopifyOrderName: `#${orderNumber}` });
+    // Shopify order names are stored as `#1234`. They are unique per shop only: after a
+    // change of shop the numbering restarts and older orders keep the same name, so the
+    // most recent order is the one the customer just placed.
+    const order = await Order.findOne({ shopifyOrderName: `#${orderNumber}` }, null, { sort: { createdAt: -1 } });
 
     if (!order || !acceptsPrefilledConfirmation(order)) {
       return { outcome: 'not_applicable' };

@@ -738,6 +738,39 @@ describe('pre-filled WhatsApp confirmation (C5.6b)', () => {
     }
   );
 
+  it('targets the most recent order when several orders share the order name (another shop)', async () => {
+    // An older shop left a cancelled #1234; the current shop restarted its numbering.
+    const oldOrder = pendingOrder({
+      _id: new Types.ObjectId(),
+      customerConfirmationStatus: CustomerConfirmationStatus.CANCELLED,
+      confirmationCancelledAt: new Date('2026-08-01T00:00:00Z'),
+      createdAt: new Date('2026-08-01T00:00:00Z')
+    });
+    const newOrder = pendingOrder({ createdAt: new Date('2026-11-27T16:05:34Z') });
+    const findOne = jest.spyOn(Order, 'findOne').mockImplementation(((
+      filter: { shopifyOrderName?: string },
+      _projection?: unknown,
+      options?: { sort?: Record<string, number> }
+    ) => {
+      const sameName = [oldOrder, newOrder].filter(order => order.shopifyOrderName === filter.shopifyOrderName);
+      // Without a sort MongoDB returns the documents in natural (insertion) order.
+      const ordered = options?.sort?.createdAt === -1 ? [...sameName].reverse() : sameName;
+      return Promise.resolve(ordered[0] ?? null);
+    }) as never);
+    const update = jest.spyOn(Order, 'findOneAndUpdate').mockResolvedValue({ _id: orderId } as never);
+    jest.spyOn(OrderEvent, 'create').mockResolvedValue({} as never);
+
+    const result = await OrderConfirmationService.confirmByPrefilledMessage({
+      from: '221771112233',
+      text: 'Je confirme ma commande #1234',
+      waMessageId: 'wamid.dup'
+    });
+
+    expect(findOne).toHaveBeenCalledTimes(1);
+    expect(result).toEqual(expect.objectContaining({ outcome: 'phone_mismatch' }));
+    expect(update.mock.calls[0]?.[0]).toEqual(expect.objectContaining({ _id: orderId }));
+  });
+
   it('flags phone_mismatch without confirming when the sender differs from the order phone', async () => {
     mockFindOne({ '#1234': pendingOrder() });
     const confirmByButton = jest.spyOn(OrderConfirmationService, 'confirmByWhatsAppButton');
