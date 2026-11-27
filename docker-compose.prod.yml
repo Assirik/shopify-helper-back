@@ -9,6 +9,13 @@
 # NB: `${VAR:?message}` fait ÉCHOUER le déploiement si la variable manque
 # (garde-fou volontaire : mieux vaut un abort clair qu'un conteneur cassé).
 
+# Plafonne les logs Docker (json-file) de chaque service.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "20m"
+    max-file: "5"
+
 services:
   api:
     build:
@@ -47,10 +54,12 @@ services:
     security_opt:
       - no-new-privileges:true
     mem_limit: 512m
+    logging: *default-logging
 
   redis:
     image: redis:7-alpine
     container_name: shopify-helper-redis
+    logging: *default-logging
     restart: unless-stopped
     command:
       [

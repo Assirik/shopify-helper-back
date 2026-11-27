@@ -42,7 +42,8 @@ const swaggerOptions: swaggerJSDoc.Options = {
       { name: 'Shopify Webhooks', description: 'Ingestion signée des commandes Shopify' },
       { name: 'WhatsApp Webhooks', description: 'Vérification et événements entrants Meta' },
       { name: 'WhatsApp Templates', description: 'Catalogue des templates Meta' },
-      { name: 'Message Config', description: 'Variables régionales des messages' }
+      { name: 'Message Config', description: 'Variables régionales des messages' },
+      { name: 'Browser Session', description: 'Capture des infos navigateur par le script du thème' }
     ],
     components: {
       securitySchemes: {
@@ -255,8 +256,49 @@ const swaggerOptions: swaggerJSDoc.Options = {
             customerConfirmationStatus: { type: 'string', enum: ['pending', 'confirmed', 'needs_attention', 'expired', 'cancelled', 'sms_only'] },
             confirmationSource: { type: 'string', enum: ['whatsapp_button', 'admin'] },
             confirmedAt: dateTime,
+            fbclid: { type: 'string' },
+            adId: { type: 'string' },
+            campaignId: { type: 'string' },
+            adsetId: { type: 'string' },
+            utmSource: { type: 'string' },
+            utmMedium: { type: 'string' },
+            capiFbp: { type: 'string' },
+            capiFbc: { type: 'string' },
+            capiClientUserAgent: { type: 'string' },
+            capiEventSourceUrl: { type: 'string' },
+            capiValueEur: { type: 'number' },
+            capiFxRate: { type: 'number' },
+            capiPurchaseStatus: { type: 'string', enum: ['pending', 'sent', 'failed', 'skipped'] },
+            capiPurchaseSentAt: dateTime,
+            capiEventId: { type: 'string' },
+            capiPurchaseError: { type: 'string' },
+            capiSkipReason: {
+              type: 'string',
+              enum: ['test', 'cancelled', 'disabled', 'too_old'],
+              description:
+                'Raison pour laquelle le Purchase n’a pas été envoyé à Meta (présente seulement avec capiPurchaseStatus skipped ; effacée dès que le Purchase repasse pending). cancelled : commande ni confirmée ni livrée au moment de l’envoi (reprise automatiquement à la confirmation ou à la livraison suivante), ou commande annulée sur Shopify (jamais envoyée) ; disabled : CAPI coupée ; test : commande de test ; too_old : événement de plus de 7 jours − 1 h.'
+            },
+            capiPurchaseFailedAt: {
+              ...dateTime,
+              description: 'Date de l’échec définitif de l’envoi (présente seulement avec capiPurchaseStatus failed ; effacée dès que le Purchase repasse pending).'
+            },
+            capiPurchaseFailureDefinitive: {
+              type: 'boolean',
+              description:
+                'Présent seulement avec capiPurchaseStatus failed. true : refus certain de Meta (réponse HTTP 4xx non réessayée) et aucune tentative antérieure n’a pu atteindre Meta (pas de capiPossiblyReceivedAt) ; false sinon (délai dépassé, réseau, 5xx, erreur après acceptation, ou tentative antérieure ambiguë). Effacé dès que le Purchase repasse pending.'
+            },
+            capiPossiblyReceivedAt: {
+              ...dateTime,
+              description:
+                'Date de la première tentative d’envoi que Meta a pu enregistrer (échec ambigu, réessayé ou final, ou événement accepté mais non enregistré comme envoyé). Jamais effacée. Meta ne dédoublonne l’event_id que pendant environ 48 h : 47 h ou plus après cette date, ni la relance (409 CapiPurchaseMayHaveBeenReceived) ni la reprise automatique d’un skipped cancelled ne renvoient le Purchase. Champ technique, non destiné à l’affichage.'
+            },
             confirmationCancelledAt: dateTime,
             expiredAt: dateTime,
+            phoneMismatchAt: {
+              ...dateTime,
+              description:
+                'Date du signalement « Numéro différent » (message de confirmation reçu d’un autre numéro). Jamais effacée : tant qu’elle est présente, la commande ne se confirme que par appel (source phone_call).'
+            },
             confirmationCancelReason: { type: 'string' },
             lastCustomerMessageAt: dateTime,
             lastCustomerMessageText: { type: 'string' },
@@ -267,7 +309,7 @@ const swaggerOptions: swaggerJSDoc.Options = {
             attentionReason: { type: 'string' },
             attentionReasonCode: {
               type: 'string',
-              enum: ['free_text', 'sms_only', 'invalid_number', 'late_confirm']
+              enum: ['free_text', 'sms_only', 'invalid_number', 'late_confirm', 'phone_mismatch', 'notification_not_scheduled']
             },
             attentionRequiredAt: dateTime,
             needsHelpdeskAttention: { type: 'boolean' },
@@ -277,11 +319,16 @@ const swaggerOptions: swaggerJSDoc.Options = {
         },
         OrderActionCapabilities: {
           type: 'object',
-          required: ['canConfirm', 'canRemind', 'canCancel'],
+          required: ['canConfirm', 'canRemind', 'canCancel', 'canResendCapi'],
           properties: {
             canConfirm: { type: 'boolean' },
             canRemind: { type: 'boolean' },
-            canCancel: { type: 'boolean' }
+            canCancel: { type: 'boolean' },
+            canResendCapi: {
+              type: 'boolean',
+              description:
+                'Le Purchase Meta peut être renvoyé par POST /api/orders/{id}/capi-purchase/resend (mêmes règles que la route : jamais pour une commande de test ou annulée sur Shopify ; statut failed sur refus certain de Meta ou échec de moins de 47 h, skipped avec la raison disabled, ou skipped avec la raison cancelled si la commande est maintenant confirmée ou livrée ; jamais 47 h ou plus après la première tentative ayant pu atteindre Meta (capiPossiblyReceivedAt) ; événement de moins de 7 jours − 1 h ; CAPI active). Ne tient pas compte du rôle : la route est réservée aux administrateurs.'
+            }
           }
         },
         AttentionOrder: {
@@ -302,7 +349,12 @@ const swaggerOptions: swaggerJSDoc.Options = {
               }
             },
             isCashOnDelivery: { type: 'boolean' },
-            reason: { type: 'string', enum: ['free_text', 'sms_only', 'invalid_number', 'late_confirm'] },
+            reason: { type: 'string', enum: ['free_text', 'sms_only', 'invalid_number', 'late_confirm', 'phone_mismatch', 'notification_not_scheduled'] },
+            phoneMismatchAt: {
+              ...dateTime,
+              description:
+                'Date du signalement « Numéro différent », conservée même si le motif courant change : la commande ne se confirme que par appel.'
+            },
             lastCustomerMessage: { type: 'string' },
             receivedAt: dateTime,
             customerConfirmationStatus: { type: 'string', enum: ['pending', 'confirmed', 'needs_attention', 'expired', 'cancelled', 'sms_only'] },
@@ -311,13 +363,15 @@ const swaggerOptions: swaggerJSDoc.Options = {
         },
         AttentionCounts: {
           type: 'object',
-          required: ['all', 'free_text', 'sms_only', 'invalid_number', 'late_confirm'],
+          required: ['all', 'free_text', 'sms_only', 'invalid_number', 'late_confirm', 'phone_mismatch', 'notification_not_scheduled'],
           properties: {
             all: { type: 'integer', minimum: 0 },
             free_text: { type: 'integer', minimum: 0 },
             sms_only: { type: 'integer', minimum: 0 },
             invalid_number: { type: 'integer', minimum: 0 },
-            late_confirm: { type: 'integer', minimum: 0 }
+            late_confirm: { type: 'integer', minimum: 0 },
+            phone_mismatch: { type: 'integer', minimum: 0 },
+            notification_not_scheduled: { type: 'integer', minimum: 0 }
           }
         },
         BulkOrderInput: {

@@ -6,7 +6,10 @@ import { AttentionReasonCode, CustomerConfirmationStatus, Order, OrderOperationa
 import config from '../utilities/config/env.config';
 import log from '../utilities/logger/logger';
 import { ChatwootForwardService } from '../utilities/services/chatwootForward.service';
-import { OrderConfirmationService } from '../utilities/services/orderConfirmation.service';
+import {
+  OrderConfirmationService,
+  PrefilledConfirmationResult
+} from '../utilities/services/orderConfirmation.service';
 import { PhoneNormalizationService } from '../utilities/services/phoneNormalization.service';
 
 interface MetaWhatsAppButtonPayload {
@@ -285,15 +288,23 @@ const handleCustomerReaction = async (message: MetaWhatsAppMessagePayload, rawPa
     set.attentionReason = reason;
     set.attentionReasonCode = AttentionReasonCode.FREE_TEXT;
     set.attentionRequiredAt = new Date();
-
-    // Only downgrade to needs_attention when the order is not yet in a final
-    // confirmation state; otherwise keep its status and just flag the helpdesk.
-    if (!preserveStatus) {
-      set.customerConfirmationStatus = CustomerConfirmationStatus.NEEDS_ATTENTION;
-    }
   }
 
-  await Order.findByIdAndUpdate(order._id, { $set: set });
+  // Only downgrade to needs_attention when the order is not yet in a final confirmation
+  // state; otherwise keep its status and just flag the helpdesk. The downgrade is
+  // conditional: an order confirmed (or closed) since it was read keeps its status and gets
+  // the same write as if it had been read so (a confirmed sale must keep its Purchase).
+  const downgraded =
+    !isCompleted && !preserveStatus
+      ? await Order.findOneAndUpdate(
+          { _id: order._id, customerConfirmationStatus: { $nin: PRESERVED_CONFIRMATION_STATUSES } },
+          { $set: { ...set, customerConfirmationStatus: CustomerConfirmationStatus.NEEDS_ATTENTION } }
+        )
+      : null;
+
+  if (!downgraded) {
+    await Order.findByIdAndUpdate(order._id, { $set: set });
+  }
 
   return InboundWhatsAppEvent.create({
     waMessageId: message.id,
@@ -308,12 +319,68 @@ const handleCustomerReaction = async (message: MetaWhatsAppMessagePayload, rawPa
   });
 };
 
+// Pre-filled "Je confirme ma commande #1234" text. Returns undefined when the message is
+// not one (or targets no confirmable order) so the regular reaction handling applies.
+const handlePrefilledConfirmation = async (message: MetaWhatsAppMessagePayload, rawPayload: unknown) => {
+  if (message.type !== 'text') {
+    return undefined;
+  }
+
+  const text = message.text?.body?.trim();
+  let result: PrefilledConfirmationResult;
+
+  try {
+    result = await OrderConfirmationService.confirmByPrefilledMessage({
+      from: message.from,
+      text,
+      waMessageId: message.id
+    });
+  } catch (err) {
+    // The service absorbs failures that follow an order write, so an error here comes from
+    // a read or a write that did not apply (barring a write lost in a network error): the
+    // regular handling still records and mirrors the message.
+    log.error(
+      { err, waMessageId: message.id },
+      'Pre-filled WhatsApp confirmation failed, falling back to the regular handling'
+    );
+    return undefined;
+  }
+
+  if (result.outcome === 'not_applicable') {
+    return undefined;
+  }
+
+  if (result.outcome === 'phone_mismatch') {
+    log.warn(
+      { orderId: result.order._id, waMessageId: message.id },
+      'Pre-filled WhatsApp confirmation sent from a different phone number'
+    );
+  }
+
+  return InboundWhatsAppEvent.create({
+    waMessageId: message.id,
+    from: message.from,
+    type: message.type,
+    text,
+    orderId: result.order._id,
+    rawPayload,
+    processedStatus:
+      result.outcome === 'confirmed' ? InboundWhatsAppEventStatus.PROCESSED : InboundWhatsAppEventStatus.NEEDS_ATTENTION
+  });
+};
+
 const handleInboundMessage = async (message: MetaWhatsAppMessagePayload, rawPayload: unknown) => {
   const buttonPayload = extractButtonPayload(message);
   const buttonText = extractButtonText(message);
 
   if (buttonPayload) {
     return handleConfirmButton(message, buttonPayload, buttonText, rawPayload);
+  }
+
+  const prefilledEvent = await handlePrefilledConfirmation(message, rawPayload);
+
+  if (prefilledEvent) {
+    return prefilledEvent;
   }
 
   return handleCustomerReaction(message, rawPayload);

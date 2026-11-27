@@ -4,13 +4,18 @@ import config from '../utilities/config/env.config';
 import { PhoneNormalizationService } from '../utilities/services/phoneNormalization.service';
 import { Customer } from '../models/Customer';
 import { Message, MessageChannel, MessageProvider, MessageStatus, TemplatePurpose } from '../models/Message';
-import { AttentionReasonCode, NotificationStatus, Order } from '../models/Order';
+import { AttentionReasonCode, CustomerConfirmationStatus, NotificationStatus, Order } from '../models/Order';
+import { BrowserSession } from '../models/BrowserSession';
 import { Product } from '../models/Product';
 import { WebhookEvent, WebhookEventStatus } from '../models/WebhookEvent';
-import { enqueueOrderConfirmation } from '../queues/notification.queue';
+import { scheduleInitialConfirmationRequest } from '../queues/notification.queue';
+import { QUEUE_ADD_TIMEOUT_MS, TimeoutError, withTimeout } from '../queues/queueTimeout';
 import { resolveRegion } from '../utilities/reference/senegalRegions';
 import log from '../utilities/logger/logger';
+import { maskPhone } from '../utilities/logger/maskPhone';
+import { maskEmail, maskName } from '../utilities/logger/maskPersonal';
 import { splitFullName } from '../utilities/services/nameParser';
+import { parseAdAttribution } from '../utilities/services/adAttribution';
 
 /**
  * Types locaux pour les champs Shopify utilisés par le MVP.
@@ -320,6 +325,110 @@ const getPayloadHash = (req: Request) => {
   return crypto.createHash('sha256').update(body).digest('hex');
 };
 
+// Browser signals (POST /api/session) are linked to the order when the capture happened
+// between 30 min before and 5 min after the order creation (clock skew tolerance).
+export const BROWSER_SESSION_LINK_WINDOW_BEFORE_MS = 30 * 60 * 1000;
+export const BROWSER_SESSION_LINK_WINDOW_AFTER_MS = 5 * 60 * 1000;
+// The lookup must never hold the ingestion: server-side limit on the query, plus an overall
+// deadline in case the driver itself hangs (pool exhausted, network stall).
+export const BROWSER_SESSION_QUERY_MAX_TIME_MS = 1000;
+export const BROWSER_SESSION_LOOKUP_TIMEOUT_MS = 1500;
+
+export interface BrowserSessionCapiFields {
+  capiFbp?: string;
+  capiFbc?: string;
+  capiClientUserAgent?: string;
+  capiEventSourceUrl?: string;
+  // Session fallback for Order.fbclid (the order's full_url takes precedence).
+  fbclid?: string;
+}
+
+export const NOTIFICATION_NOT_SCHEDULED_ATTENTION_REASON = 'Demande de confirmation non programmée';
+
+// C5.15: the delayed initial request could not be scheduled (Redis error or no answer within
+// QUEUE_ADD_TIMEOUT_MS), so a helpdesk agent takes over. Conditional writes: the send status
+// only leaves PENDING (FAILED while the order awaits confirmation, SKIPPED once it no longer
+// does, as the delayed job would), and an attention reason already set (e.g. `invalid_number`
+// at ingestion, a WhatsApp message received meanwhile) or an order no longer pending is never
+// overwritten. Returns true when the attention reason was set.
+export const flagUnscheduledConfirmationRequest = async (orderId: string) => {
+  await Order.updateOne(
+    {
+      _id: orderId,
+      notificationStatus: NotificationStatus.PENDING,
+      customerConfirmationStatus: CustomerConfirmationStatus.PENDING
+    },
+    { $set: { notificationStatus: NotificationStatus.FAILED } }
+  );
+  await Order.updateOne(
+    {
+      _id: orderId,
+      notificationStatus: NotificationStatus.PENDING,
+      customerConfirmationStatus: { $ne: CustomerConfirmationStatus.PENDING }
+    },
+    { $set: { notificationStatus: NotificationStatus.SKIPPED } }
+  );
+
+  const result = await Order.updateOne(
+    {
+      _id: orderId,
+      needsHelpdeskAttention: { $ne: true },
+      customerConfirmationStatus: CustomerConfirmationStatus.PENDING
+    },
+    {
+      $set: {
+        needsHelpdeskAttention: true,
+        attentionReasonCode: AttentionReasonCode.NOTIFICATION_NOT_SCHEDULED,
+        attentionReason: NOTIFICATION_NOT_SCHEDULED_ATTENTION_REASON,
+        attentionRequiredAt: new Date()
+      }
+    }
+  );
+
+  return result.modifiedCount > 0;
+};
+
+const getOrderCreatedAt = (payload: ShopifyOrderPayload) => {
+  const createdAt = payload.created_at ? new Date(payload.created_at) : new Date();
+  return Number.isNaN(createdAt.getTime()) ? new Date() : createdAt;
+};
+
+// Latest capture for the same phone (one record per phone), kept only inside the window.
+export const findBrowserSessionCapiFields = async (
+  phoneE164: string | undefined,
+  orderCreatedAt: Date
+): Promise<{ linked: boolean; fields: BrowserSessionCapiFields }> => {
+  if (!phoneE164) {
+    return { linked: false, fields: {} };
+  }
+
+  const session = await BrowserSession.findOne({ phoneE164 }).maxTimeMS(BROWSER_SESSION_QUERY_MAX_TIME_MS).lean();
+
+  if (!session?.updatedAt) {
+    return { linked: false, fields: {} };
+  }
+
+  const capturedAt = new Date(session.updatedAt).getTime();
+  const createdAt = orderCreatedAt.getTime();
+
+  if (
+    capturedAt < createdAt - BROWSER_SESSION_LINK_WINDOW_BEFORE_MS ||
+    capturedAt > createdAt + BROWSER_SESSION_LINK_WINDOW_AFTER_MS
+  ) {
+    return { linked: false, fields: {} };
+  }
+
+  const fields: BrowserSessionCapiFields = {
+    ...(session.fbp ? { capiFbp: session.fbp } : {}),
+    ...(session.fbc ? { capiFbc: session.fbc } : {}),
+    ...(session.userAgent ? { capiClientUserAgent: session.userAgent } : {}),
+    ...(session.pageUrl ? { capiEventSourceUrl: session.pageUrl } : {}),
+    ...(session.fbclid ? { fbclid: session.fbclid } : {})
+  };
+
+  return { linked: Object.keys(fields).length > 0, fields };
+};
+
 // Prépare le catalogue produit futur à partir des commandes reçues.
 // Ce n'est pas encore une gestion de stock: on garde seulement la dernière vue
 // connue du produit/variant et un compteur total commandé.
@@ -538,10 +647,10 @@ export class ShopifyWebhookController {
         shopifyOrderId,
         shopifyOrderName: payload.name,
         shopifyCustomerId: payload.customer?.id?.toString(),
-        customerName,
-        customerPhoneRaw,
-        customerPhoneE164: phone.e164,
-        customerEmail,
+        customerName: maskName(customerName),
+        customerPhoneRaw: maskPhone(customerPhoneRaw),
+        customerPhoneE164: maskPhone(phone.e164),
+        customerEmail: maskEmail(customerEmail),
         phoneValid: phone.isValid,
         phoneErrorReason: phone.errorReason,
         lineItemCount: lineItems.length,
@@ -606,11 +715,30 @@ export class ShopifyWebhookController {
       {
         customerId: customer._id,
         shopifyCustomerId: customer.shopifyCustomerId,
-        customerPhoneE164: customer.phoneE164,
-        customerEmail: customer.email
+        customerPhoneE164: maskPhone(customer.phoneE164),
+        customerEmail: maskEmail(customer.email)
       },
       'Upserted customer from Shopify order'
     );
+
+    // 6b. Browser signals captured by the theme script (C5.12a).
+    // Filled only on creation: a replayed webhook stops earlier (steps 2 and 4) so it can
+    // never overwrite existing values. A failure here never blocks the ingestion.
+    let browserSessionLink: Awaited<ReturnType<typeof findBrowserSessionCapiFields>> = { linked: false, fields: {} };
+    let browserSessionLookupFailed = false;
+
+    try {
+      browserSessionLink = await withTimeout(
+        findBrowserSessionCapiFields(phone.e164, getOrderCreatedAt(payload)),
+        BROWSER_SESSION_LOOKUP_TIMEOUT_MS
+      );
+    } catch (err) {
+      browserSessionLookupFailed = true;
+      log.warn({ err, shopifyOrderId }, 'Browser session lookup failed, order ingested without browser signals');
+    }
+
+    // Advertising origin (C5.2): utm_* attributes first, full_url as fallback.
+    const adAttribution = parseAdAttribution(noteAttributes);
 
     // 7. Création de la commande enrichie.
     // Elle garde les infos utiles pour le dashboard, les notifications et le futur stock.
@@ -645,6 +773,9 @@ export class ShopifyWebhookController {
       financialStatus: payload.financial_status || undefined,
       fulfillmentStatus: payload.fulfillment_status || undefined,
       notificationStatus,
+      // Spread after the session: the order's own full_url fbclid wins, the session's is the fallback.
+      ...browserSessionLink.fields,
+      ...adAttribution,
       ...(!phone.isValid && !skipNotificationReason
         ? {
             needsHelpdeskAttention: true,
@@ -677,6 +808,17 @@ export class ShopifyWebhookController {
         shippingPrice: order.shippingPrice
       },
       'Created order from Shopify webhook'
+    );
+
+    // Tracks the browser session → order link rate.
+    log.info(
+      {
+        orderId: order._id,
+        shopifyOrderId,
+        browserSessionLinked: browserSessionLink.linked,
+        browserSessionLookupFailed
+      },
+      'Browser session link checked'
     );
 
     // 9. Audit webhook après succès d'ingestion.
@@ -738,45 +880,51 @@ export class ShopifyWebhookController {
       });
     }
 
-    // 11. Message WhatsApp initial.
-    // Le provider réel ne sera appelé que par le worker BullMQ, pas dans le webhook.
-    const message = await Message.create({
-      orderId: order._id,
-      channel: MessageChannel.WHATSAPP,
-      provider: MessageProvider.META,
-      status: MessageStatus.QUEUED,
-      templateName: config.metaWhatsApp.templateName,
-      templatePurpose: TemplatePurpose.ORDER_CONFIRMATION_REQUEST
-    });
+    // 11. Delayed initial WhatsApp confirmation request (C5.6a).
+    // The customer often confirms within a minute through the pre-filled EasySell message, so
+    // no Message is created here: a delayed job (deterministic jobId) re-checks the order when
+    // the delay expires and only then creates the Message and hands over to the send flow.
+    // A scheduling failure never fails the ingestion. With Redis unreachable the add never
+    // settles (offline queue, `maxRetriesPerRequest: null`), hence the bounded wait (C5.15):
+    // on error or timeout the order goes to the helpdesk queue and the webhook still gets 202.
+    // If the hung add lands later anyway, the T+5 job runs under the worker guards: sent when
+    // the order is still pending and not reminded (the hand-over clears `notification_not_scheduled`,
+    // then notificationStatus goes FAILED → SENT), skipped otherwise (status and flag stay; a
+    // reminder that is actually sent clears the flag).
+    let scheduledJobId: string | undefined;
 
-    log.info(
-      {
-        orderId: order._id,
-        messageId: message._id,
-        channel: message.channel,
-        provider: message.provider,
-        status: message.status
-      },
-      'Created queued WhatsApp message'
-    );
+    try {
+      const job = await withTimeout(scheduleInitialConfirmationRequest(order._id.toString()), QUEUE_ADD_TIMEOUT_MS);
+      scheduledJobId = job.id;
 
-    // 12. Enqueue asynchrone.
-    // Le webhook peut répondre vite: l'envoi WhatsApp/SMS sera traité hors requête HTTP.
-    const job = await enqueueOrderConfirmation({
-      orderId: order._id.toString(),
-      messageId: message._id.toString(),
-      channel: MessageChannel.WHATSAPP
-    });
+      log.info(
+        {
+          orderId: order._id,
+          jobId: job.id,
+          queueName: job.queueName,
+          delayMinutes: config.confirmation.initialRequestDelayMinutes
+        },
+        'Scheduled delayed initial confirmation request'
+      );
+    } catch (err) {
+      log.error(
+        { err, orderId: order._id, shopifyOrderId, timedOut: err instanceof TimeoutError },
+        'Failed to schedule the initial confirmation request; order ingested without it'
+      );
 
-    log.info(
-      {
-        orderId: order._id,
-        messageId: message._id,
-        jobId: job.id,
-        queueName: job.queueName
-      },
-      'Enqueued order confirmation notification job'
-    );
+      try {
+        const flagged = await flagUnscheduledConfirmationRequest(order._id.toString());
+        log.info(
+          { orderId: order._id, attentionReasonCode: AttentionReasonCode.NOTIFICATION_NOT_SCHEDULED, flagged },
+          'Unscheduled confirmation request handed over to the helpdesk'
+        );
+      } catch (flagErr) {
+        log.error(
+          { err: flagErr, orderId: order._id, shopifyOrderId },
+          'Failed to flag the unscheduled confirmation request for helpdesk attention'
+        );
+      }
+    }
 
     // Réponse volontairement courte: IDs de suivi pour debug/dashboard.
     return res.status(202).json({
@@ -784,9 +932,8 @@ export class ShopifyWebhookController {
       orderId: order._id,
       customerId: customer._id,
       webhookEventId: webhookEvent._id,
-      messageId: message._id,
-      jobId: job.id,
-      notificationQueued: true,
+      jobId: scheduledJobId,
+      notificationQueued: Boolean(scheduledJobId),
       phoneValid: true
     });
   }

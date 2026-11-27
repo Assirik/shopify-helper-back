@@ -1,16 +1,29 @@
+import './src/instrument';
 import { createServer } from 'http';
 import os from 'os';
 import app from './src/app';
 import config from './src/utilities/config/env.config';
-import log from './src/utilities/logger/logger';
+import { checkCapiStartup, describeCapiStatus } from './src/utilities/config/capiStartup';
+import log, { closeLogger } from './src/utilities/logger/logger';
+import { flushSentry } from './src/utilities/sentry/sentry';
 import { DatabaseService } from './src/utilities/services/database.service';
 import { scheduleConfirmationSweep } from './src/queues/notification.queue';
+import { CAPI_PURCHASE_SWEEP_INTERVAL_MS, scheduleCapiPurchaseSweep } from './src/queues/capi.queue';
 import {
   startMaintenanceWorker,
   startNotificationWorker,
   stopMaintenanceWorker,
   stopNotificationWorker
 } from './src/workers/notification.worker';
+import { startCapiPurchaseWorker, stopCapiPurchaseWorker } from './src/workers/capiPurchase.worker';
+import { startCapiPurchaseSweepWorker, stopCapiPurchaseSweepWorker } from './src/workers/capiPurchaseSweep.worker';
+
+const capiError = checkCapiStartup(config.metaCapi);
+if (capiError) {
+  log.fatal(capiError);
+  process.exit(1);
+}
+log.info(describeCapiStatus(config.metaCapi), `CAPI ${config.metaCapi.enabled ? 'enabled' : 'disabled'}`);
 
 const port = config.port;
 app.set('port', port);
@@ -64,12 +77,21 @@ server.listen(port, async () => {
   await DatabaseService.connectWithRetry();
   startNotificationWorker();
   startMaintenanceWorker();
+  startCapiPurchaseWorker();
+  startCapiPurchaseSweepWorker();
 
   try {
     await scheduleConfirmationSweep(config.confirmation.sweepIntervalMinutes);
     log.info({ intervalMinutes: config.confirmation.sweepIntervalMinutes }, 'Confirmation sweep scheduled');
   } catch (err) {
     log.error({ err }, 'Failed to schedule confirmation sweep');
+  }
+
+  try {
+    await scheduleCapiPurchaseSweep();
+    log.info({ intervalMinutes: CAPI_PURCHASE_SWEEP_INTERVAL_MS / 60_000 }, 'CAPI purchase sweep scheduled');
+  } catch (err) {
+    log.error({ err }, 'Failed to schedule CAPI purchase sweep');
   }
 });
 
@@ -78,9 +100,15 @@ const shutdown = async (signal: string) => {
 
   await stopNotificationWorker();
   await stopMaintenanceWorker();
+  await stopCapiPurchaseWorker();
+  await stopCapiPurchaseSweepWorker();
   server.close(() => {
     log.info('HTTP server closed');
-    process.exit(0);
+    // Sentry first: closeLogger can block the event loop (up to ~1.5 s) while the log transport drains.
+    flushSentry()
+      .catch(() => undefined)
+      .then(() => closeLogger(2000))
+      .finally(() => process.exit(0));
   });
 };
 

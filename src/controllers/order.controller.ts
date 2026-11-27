@@ -1,10 +1,11 @@
 import { Request, Response } from 'express';
 import { Types } from 'mongoose';
 import { Message } from '../models/Message';
-import { OrderEvent } from '../models/OrderEvent';
+import { IOrderEvent, OrderEvent } from '../models/OrderEvent';
 import {
   AttentionReasonCode,
   CodPaymentStatus,
+  ConfirmationSource,
   CustomerConfirmationStatus,
   DeliveryChannel,
   IOrder,
@@ -12,8 +13,14 @@ import {
   Order,
   OrderOperationalStatus
 } from '../models/Order';
+import { CapiPurchaseResendError, resendCapiPurchase } from '../utilities/services/capiPurchase.service';
 import { getOrderActionCapabilities } from '../utilities/services/orderCapabilities.service';
-import { OrderConfirmationError, OrderConfirmationService } from '../utilities/services/orderConfirmation.service';
+import {
+  ADMIN_CONFIRMATION_SOURCES,
+  AdminConfirmationSource,
+  OrderConfirmationError,
+  OrderConfirmationService
+} from '../utilities/services/orderConfirmation.service';
 import { OrderFulfillmentError, OrderFulfillmentService } from '../utilities/services/orderFulfillment.service';
 import { ReconciliationError, ReconciliationService } from '../utilities/services/reconciliation.service';
 import { resolveRegion } from '../utilities/reference/senegalRegions';
@@ -59,6 +66,16 @@ export const parseOptionalAmount = (value: unknown): { ok: true; value?: number 
   return { ok: true, value: parsed };
 };
 
+// Source de confirmation déclarée par l'agent : omise => `admin` (comportement historique),
+// toute autre valeur que admin/phone_call => rejet.
+export const parseConfirmationSource = (
+  value: unknown
+): { ok: true; value: AdminConfirmationSource } | { ok: false } => {
+  if (value === undefined) return { ok: true, value: ConfirmationSource.ADMIN };
+  const source = ADMIN_CONFIRMATION_SOURCES.find(candidate => candidate === value);
+  return source ? { ok: true, value: source } : { ok: false };
+};
+
 const escapeRegExp = (value: string) => {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 };
@@ -75,16 +92,49 @@ const createPagination = (page: number, limit: number, total: number) => {
 const MAX_BULK_ORDERS = 100;
 const BULK_CONCURRENCY = 5;
 
+// Champs couverts par la recherche unifiée (F20).
+const SEARCH_FIELDS = [
+  'shopifyOrderName',
+  'customerName',
+  'customerPhoneE164',
+  'customerPhoneRaw',
+  'customerEmail',
+  'tags',
+  'lineItems.title',
+  'lineItems.sku'
+];
+const PHONE_FIELDS = ['customerPhoneE164', 'customerPhoneRaw'];
+const PHONE_LIKE = /^[\d\s+().-]+$/;
+
+const containsInsensitive = (value: string) => ({ $regex: escapeRegExp(value), $options: 'i' });
+
+const buildSearchClause = (search: string) => {
+  const clauses: Record<string, unknown>[] = SEARCH_FIELDS.map(field => ({ [field]: containsInsensitive(search) }));
+
+  // « 77 412 88 90 » doit retrouver « +221774128890 » : on cherche aussi les chiffres seuls
+  // sur les téléphones, uniquement si la saisie ressemble à un numéro (pas « #1156 »).
+  const digits = search.replace(/\D/g, '');
+  if (PHONE_LIKE.test(search) && digits.length >= 4 && digits !== search) {
+    clauses.push(...PHONE_FIELDS.map(field => ({ [field]: containsInsensitive(digits) })));
+  }
+
+  return { $or: clauses };
+};
+
 export const buildOrderListFilters = (query: Pick<Request, 'query'>['query']) => {
   const status = toStringFilter(query.status);
   const customerConfirmationStatus = toStringFilter(query.customerConfirmationStatus);
   const operationalStatus = toStringFilter(query.operationalStatus);
   const orderName = toStringFilter(query.orderName);
   const phone = toStringFilter(query.phone);
+  const search = toStringFilter(query.search);
   const cod = toStringFilter(query.cod);
   const hideCompleted = toStringFilter(query.hideCompleted);
+  const hideCancelled = toStringFilter(query.hideCancelled);
 
   const filters: Record<string, unknown> = {};
+  // Chaque groupe `$or` va sous `$and` : deux `$or` au même niveau s'écraseraient.
+  const andClauses: Record<string, unknown>[] = [];
 
   if (status && Object.values(NotificationStatus).includes(status as NotificationStatus)) {
     filters.notificationStatus = status;
@@ -106,14 +156,24 @@ export const buildOrderListFilters = (query: Pick<Request, 'query'>['query']) =>
   }
 
   if (phone) {
-    filters.$or = [
-      { customerPhoneE164: { $regex: escapeRegExp(phone), $options: 'i' } },
-      { customerPhoneRaw: { $regex: escapeRegExp(phone), $options: 'i' } }
-    ];
+    andClauses.push({ $or: PHONE_FIELDS.map(field => ({ [field]: containsInsensitive(phone) })) });
+  }
+
+  if (search) {
+    andClauses.push(buildSearchClause(search));
+  }
+
+  if (andClauses.length) {
+    filters.$and = andClauses;
   }
 
   if (cod === 'true' || cod === 'false') {
     filters.isCashOnDelivery = cod === 'true';
+  }
+
+  // Un filtre de confirmation explicite (y compris « cancelled ») l'emporte sur le masquage.
+  if (hideCancelled === 'true' && !filters.customerConfirmationStatus) {
+    filters.customerConfirmationStatus = { $ne: CustomerConfirmationStatus.CANCELLED };
   }
 
   // Désencombrement : exclut les commandes dont tout le process est terminé
@@ -131,8 +191,10 @@ export const buildOrderListFilters = (query: Pick<Request, 'query'>['query']) =>
     operationalStatus,
     orderName,
     phone,
+    search,
     cod,
-    hideCompleted
+    hideCompleted,
+    hideCancelled
   };
 };
 
@@ -214,6 +276,23 @@ const getOrderNoteAttribute = (order: IOrder, ...names: string[]) => {
   return undefined;
 };
 
+type PopulatedActor = { _id: Types.ObjectId; userName?: string };
+
+/**
+ * Événement de timeline avec `actorId` peuplé (`populate('actorId', 'userName')`) :
+ * on renvoie l'id à plat + `actorName`, attendus par le front. Un auteur supprimé
+ * est peuplé à `null` et ressort sans id ni nom.
+ */
+export const toOrderEventResponse = (event: IOrderEvent) => {
+  const actor = event.actorId as unknown as PopulatedActor | null | undefined;
+
+  return {
+    ...event.toJSON(),
+    actorId: actor?._id?.toString(),
+    actorName: actor?.userName
+  };
+};
+
 /**
  * Reconstitue les champs de livraison des anciennes commandes qui ne
  * possèdent que les note_attributes Easysell.
@@ -264,6 +343,8 @@ export const toAttentionOrder = (order: IOrder) => {
     },
     isCashOnDelivery: order.isCashOnDelivery,
     reason: order.attentionReasonCode,
+    // Durable "confirmation from another number" marker: the order is confirmed by call only.
+    phoneMismatchAt: order.phoneMismatchAt,
     lastCustomerMessage: order.lastCustomerMessageText || '',
     receivedAt: order.attentionRequiredAt || order.lastCustomerMessageAt || order.updatedAt || order.createdAt,
     customerConfirmationStatus: order.customerConfirmationStatus,
@@ -276,7 +357,9 @@ export class OrderController {
     const orderIds = parseBulkOrderIds(req.body?.orderIds);
     if (!orderIds) return res.status(400).json({ error: 'InvalidOrderIds' });
 
-    const results = await runWithConcurrency(orderIds, orderId => OrderConfirmationService.confirmByAdmin(orderId));
+    const results = await runWithConcurrency(orderIds, orderId =>
+      OrderConfirmationService.confirmByAdmin(orderId, req.userId)
+    );
     const succeeded = results
       .filter(result => result.status === 'fulfilled')
       .map(result => ({ orderId: result.orderId }));
@@ -303,7 +386,9 @@ export class OrderController {
     const orderIds = parseBulkOrderIds(req.body?.orderIds);
     if (!orderIds) return res.status(400).json({ error: 'InvalidOrderIds' });
 
-    const results = await runWithConcurrency(orderIds, orderId => OrderConfirmationService.remindByAdmin(orderId));
+    const results = await runWithConcurrency(orderIds, orderId =>
+      OrderConfirmationService.remindByAdmin(orderId, req.userId)
+    );
     const succeeded = results
       .filter(result => result.status === 'fulfilled')
       .map(result => ({ orderId: result.orderId }));
@@ -335,8 +420,14 @@ export class OrderController {
       return res.status(400).json({ error: 'InvalidAttentionReason' });
     }
 
-    const filters: Record<string, unknown> = {
+    const openOrdersFilter = {
       needsHelpdeskAttention: true,
+      operationalStatus: { $nin: [OrderOperationalStatus.DELIVERED, OrderOperationalStatus.RETURNED] },
+      customerConfirmationStatus: { $ne: CustomerConfirmationStatus.CANCELLED }
+    };
+
+    const filters: Record<string, unknown> = {
+      ...openOrdersFilter,
       attentionReasonCode: reason ? reason : { $in: Object.values(AttentionReasonCode) }
     };
 
@@ -349,7 +440,7 @@ export class OrderController {
       Order.aggregate<{ _id: AttentionReasonCode; count: number }>([
         {
           $match: {
-            needsHelpdeskAttention: true,
+            ...openOrdersFilter,
             attentionReasonCode: { $in: Object.values(AttentionReasonCode) }
           }
         },
@@ -367,7 +458,10 @@ export class OrderController {
         free_text: 0,
         sms_only: 0,
         invalid_number: 0,
-        late_confirm: 0
+        late_confirm: 0,
+        unreachable: 0,
+        phone_mismatch: 0,
+        notification_not_scheduled: 0
       } as Record<'all' | AttentionReasonCode, number>
     );
 
@@ -384,8 +478,17 @@ export class OrderController {
     const page = toPositiveInteger(req.query.page, 1);
     const limit = Math.min(toPositiveInteger(req.query.limit, DEFAULT_LIMIT), MAX_LIMIT);
     const skip = (page - 1) * limit;
-    const { filters, status, customerConfirmationStatus, operationalStatus, orderName, phone, cod } =
-      buildOrderListFilters(req.query);
+    const {
+      filters,
+      status,
+      customerConfirmationStatus,
+      operationalStatus,
+      orderName,
+      phone,
+      search,
+      cod,
+      hideCancelled
+    } = buildOrderListFilters(req.query);
 
     const [orders, total] = await Promise.all([
       Order.find(filters).sort({ createdAt: -1 }).skip(skip).limit(limit),
@@ -403,7 +506,9 @@ export class OrderController {
         operationalStatus,
         hasOrderNameFilter: Boolean(orderName),
         hasPhoneFilter: Boolean(phone),
-        hasCodFilter: cod === 'true' || cod === 'false'
+        hasSearchFilter: Boolean(search),
+        hasCodFilter: cod === 'true' || cod === 'false',
+        hideCancelled: hideCancelled === 'true'
       },
       'Listed orders'
     );
@@ -429,7 +534,7 @@ export class OrderController {
 
     const [messages, events] = await Promise.all([
       Message.find({ orderId: order._id }).sort({ createdAt: -1 }),
-      OrderEvent.find({ orderId: order._id }).sort({ createdAt: -1 })
+      OrderEvent.find({ orderId: order._id }).sort({ createdAt: -1 }).populate('actorId', 'userName')
     ]);
     const messageSummary = buildMessageSummary(messages);
 
@@ -447,7 +552,7 @@ export class OrderController {
         order: toOrderResponse(order),
         messages,
         messageSummary,
-        events,
+        events: events.map(toOrderEventResponse),
         capabilities: getOrderActionCapabilities(order)
       }
     });
@@ -455,15 +560,18 @@ export class OrderController {
 
   public static async confirm(req: Request, res: Response) {
     const id = typeof req.params.id === 'string' ? req.params.id : '';
+    const source = parseConfirmationSource(req.body?.source);
+    if (!source.ok) return res.status(400).json({ error: 'InvalidConfirmationSource' });
 
     try {
-      const result = await OrderConfirmationService.confirmByAdmin(id, req.userId);
+      const result = await OrderConfirmationService.confirmByAdmin(id, req.userId, source.value);
 
       log.info(
         {
           orderId: result.order._id,
           messageId: result.message._id,
-          jobId: result.job.id
+          jobId: result.job.id,
+          source: source.value
         },
         'Admin confirmed order'
       );
@@ -634,6 +742,58 @@ export class OrderController {
       const order = await OrderFulfillmentService.markReturned(id, reason, req.userId);
 
       return res.status(200).json({ data: { order: toOrderResponse(order) } });
+    } catch (err) {
+      if (err instanceof OrderFulfillmentError) {
+        return res.status(err.status).json({ error: err.code });
+      }
+
+      throw err;
+    }
+  }
+
+  public static async markUnreachable(req: Request, res: Response) {
+    const id = typeof req.params.id === 'string' ? req.params.id : '';
+    const note = typeof req.body?.note === 'string' ? req.body.note : undefined;
+
+    try {
+      const { order, event } = await OrderConfirmationService.markUnreachable(id, note, req.userId);
+
+      log.info({ orderId: order._id, hasNote: Boolean(note?.trim()) }, 'Admin marked order unreachable');
+
+      return res.status(200).json({ data: { order: toOrderResponse(order), event } });
+    } catch (err) {
+      if (err instanceof OrderConfirmationError) {
+        return res.status(err.status).json({ error: err.code });
+      }
+
+      throw err;
+    }
+  }
+
+  public static async resendCapiPurchase(req: Request, res: Response) {
+    const id = typeof req.params.id === 'string' ? req.params.id : '';
+
+    try {
+      const order = await resendCapiPurchase(id, req.userId);
+
+      return res.status(202).json({ data: { order: toOrderResponse(order) } });
+    } catch (err) {
+      if (err instanceof CapiPurchaseResendError) {
+        return res.status(err.status).json({ error: err.code });
+      }
+
+      throw err;
+    }
+  }
+
+  public static async addNote(req: Request, res: Response) {
+    const id = typeof req.params.id === 'string' ? req.params.id : '';
+    const text = typeof req.body?.text === 'string' ? req.body.text : undefined;
+
+    try {
+      const { order, event } = await OrderFulfillmentService.addNote(id, text, req.userId);
+
+      return res.status(201).json({ data: { order: toOrderResponse(order), event } });
     } catch (err) {
       if (err instanceof OrderFulfillmentError) {
         return res.status(err.status).json({ error: err.code });

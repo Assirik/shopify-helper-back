@@ -10,6 +10,21 @@ export enum NotificationStatus {
   PARTIALLY_SENT = 'partially_sent'
 }
 
+export enum CapiPurchaseStatus {
+  PENDING = 'pending',
+  SENT = 'sent',
+  FAILED = 'failed',
+  SKIPPED = 'skipped'
+}
+
+// Why the worker did not send the Purchase (`getSkipReason`, or Meta's "too old" rejection).
+export enum CapiSkipReason {
+  TEST = 'test',
+  CANCELLED = 'cancelled',
+  DISABLED = 'disabled',
+  TOO_OLD = 'too_old'
+}
+
 export enum CustomerConfirmationStatus {
   PENDING = 'pending',
   CONFIRMED = 'confirmed',
@@ -21,7 +36,8 @@ export enum CustomerConfirmationStatus {
 
 export enum ConfirmationSource {
   WHATSAPP_BUTTON = 'whatsapp_button',
-  ADMIN = 'admin'
+  ADMIN = 'admin',
+  PHONE_CALL = 'phone_call'
 }
 
 export enum ReminderSource {
@@ -52,7 +68,10 @@ export enum AttentionReasonCode {
   FREE_TEXT = 'free_text',
   SMS_ONLY = 'sms_only',
   INVALID_NUMBER = 'invalid_number',
-  LATE_CONFIRM = 'late_confirm'
+  LATE_CONFIRM = 'late_confirm',
+  UNREACHABLE = 'unreachable',
+  PHONE_MISMATCH = 'phone_mismatch',
+  NOTIFICATION_NOT_SCHEDULED = 'notification_not_scheduled'
 }
 
 const OrderLineItemSchema = new Schema<IOrderLineItem>(
@@ -126,8 +145,36 @@ const OrderSchema = new Schema<IOrder>(
     },
     confirmationSource: { type: String, enum: Object.values(ConfirmationSource) },
     confirmedAt: { type: Date },
+    fbclid: { type: String, trim: true },
+    adId: { type: String, trim: true },
+    campaignId: { type: String, trim: true },
+    adsetId: { type: String, trim: true },
+    utmSource: { type: String, trim: true },
+    utmMedium: { type: String, trim: true },
+    capiFbp: { type: String, trim: true },
+    capiFbc: { type: String, trim: true },
+    capiClientUserAgent: { type: String, trim: true },
+    capiEventSourceUrl: { type: String, trim: true },
+    capiValueEur: { type: Number },
+    capiFxRate: { type: Number },
+    capiPurchaseStatus: { type: String, enum: Object.values(CapiPurchaseStatus) },
+    capiPurchaseSentAt: { type: Date },
+    capiEventId: { type: String, trim: true },
+    capiPurchaseError: { type: String, trim: true },
+    // Set with SKIPPED, removed whenever the Purchase goes back to PENDING.
+    capiSkipReason: { type: String, enum: Object.values(CapiSkipReason) },
+    // Set with FAILED (both removed whenever the Purchase goes back to PENDING): when the final
+    // failure happened, and whether it was a certain refusal by Meta (4xx, not retryable: the
+    // event was not counted) rather than an ambiguous failure (timeout, network, 5xx…).
+    capiPurchaseFailedAt: { type: Date },
+    capiPurchaseFailureDefinitive: { type: Boolean },
+    // First attempt Meta may have recorded (ambiguous failure, or accepted but not recorded as
+    // SENT). A fact, never cleared: Meta deduplicates on event_id only for about 48 h.
+    capiPossiblyReceivedAt: { type: Date },
     confirmationCancelledAt: { type: Date },
     expiredAt: { type: Date },
+    // Set when a confirmation message came from another phone number; never cleared.
+    phoneMismatchAt: { type: Date },
     confirmationCancelReason: { type: String, trim: true },
     lastCustomerMessageAt: { type: Date },
     lastCustomerMessageText: { type: String, trim: true },
@@ -155,7 +202,9 @@ const OrderSchema = new Schema<IOrder>(
     carrierFeeAmount: { type: Number },
     codNetRemitted: { type: Number },
     codPaymentStatus: { type: String, enum: Object.values(CodPaymentStatus) },
-    collectedAt: { type: Date }
+    collectedAt: { type: Date },
+    lastNoteText: { type: String, trim: true },
+    lastNoteAt: { type: Date }
   },
   {
     timestamps: true
@@ -171,6 +220,7 @@ OrderSchema.index({ operationalStatus: 1, createdAt: -1 });
 OrderSchema.index({ assignedCourierId: 1, deliveredAt: 1 });
 OrderSchema.index({ assignedCarrierId: 1, deliveredAt: 1 });
 OrderSchema.index({ deliveredAt: 1 });
+OrderSchema.index({ capiPurchaseStatus: 1, confirmedAt: 1 });
 OrderSchema.index({ shopifyOrderName: 'text', customerPhoneE164: 'text', customerPhoneRaw: 'text' });
 
 OrderSchema.set('toJSON', {
@@ -221,8 +271,29 @@ export interface IOrder extends Document {
   customerConfirmationStatus: CustomerConfirmationStatus;
   confirmationSource?: ConfirmationSource;
   confirmedAt?: Date;
+  fbclid?: string;
+  adId?: string;
+  campaignId?: string;
+  adsetId?: string;
+  utmSource?: string;
+  utmMedium?: string;
+  capiFbp?: string;
+  capiFbc?: string;
+  capiClientUserAgent?: string;
+  capiEventSourceUrl?: string;
+  capiValueEur?: number;
+  capiFxRate?: number;
+  capiPurchaseStatus?: CapiPurchaseStatus;
+  capiPurchaseSentAt?: Date;
+  capiEventId?: string;
+  capiPurchaseError?: string;
+  capiSkipReason?: CapiSkipReason;
+  capiPurchaseFailedAt?: Date;
+  capiPurchaseFailureDefinitive?: boolean;
+  capiPossiblyReceivedAt?: Date;
   confirmationCancelledAt?: Date;
   expiredAt?: Date;
+  phoneMismatchAt?: Date;
   confirmationCancelReason?: string;
   lastCustomerMessageAt?: Date;
   lastCustomerMessageText?: string;
@@ -251,6 +322,8 @@ export interface IOrder extends Document {
   codNetRemitted?: number;
   codPaymentStatus?: CodPaymentStatus;
   collectedAt?: Date;
+  lastNoteText?: string;
+  lastNoteAt?: Date;
   createdAt: Date;
   updatedAt: Date;
 }

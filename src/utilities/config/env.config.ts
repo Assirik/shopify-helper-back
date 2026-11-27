@@ -13,6 +13,62 @@ const allowedOrigins =
 const jwtSecret = process.env.JWT_SECRET || 'change-me-in-env';
 const initialAdminBootstrapSecret = process.env.INITIAL_ADMIN_BOOTSTRAP_SECRET || '';
 
+export const DEFAULT_FX_XOF_EUR = 655.957;
+
+// META_CAPI_ENABLED: 'true' / 'false' (case and surrounding spaces ignored); absent or blank = off.
+// Any other value is flagged `enabledInvalid` (sending stays off) and refused at startup by checkCapiStartup.
+const parseCapiEnabled = (value?: string): { enabled: boolean; enabledInvalid: boolean } => {
+  const normalized = (value || '').trim().toLowerCase();
+  if (normalized === '' || normalized === 'false') return { enabled: false, enabledInvalid: false };
+  if (normalized === 'true') return { enabled: true, enabledInvalid: false };
+  return { enabled: false, enabledInvalid: true };
+};
+
+export const buildMetaCapiConfig = (env: NodeJS.ProcessEnv) => {
+  const fx = Number(env.META_CAPI_FX_XOF_EUR);
+  return {
+    ...parseCapiEnabled(env.META_CAPI_ENABLED),
+    datasetId: (env.META_CAPI_DATASET_ID || '').trim(),
+    accessToken: (env.META_CAPI_ACCESS_TOKEN || '').trim(),
+    graphApiVersion: (env.META_CAPI_GRAPH_API_VERSION || '').trim() || 'v26.0',
+    fxXofEur: Number.isFinite(fx) && fx > 0 ? fx : DEFAULT_FX_XOF_EUR,
+    testEventCode: (env.META_CAPI_TEST_EVENT_CODE || '').trim()
+  };
+};
+
+// Origins (shop storefront domains) allowed to post browser signals to POST /api/session.
+// Empty list => the route rejects every request.
+export const parseSessionCaptureOrigins = (value?: string) =>
+  (value || '')
+    .split(',')
+    .map(origin => origin.trim().toLowerCase().replace(/\/+$/, ''))
+    .filter(origin => origin.length > 0);
+
+// Delay before the first WhatsApp confirmation request (C5.6a): the customer often confirms
+// within a minute through the pre-filled EasySell message. Never shorter than 5 minutes.
+export const MIN_INITIAL_CONFIRMATION_REQUEST_DELAY_MINUTES = 5;
+
+export const parseInitialConfirmationRequestDelayMinutes = (value?: string) => {
+  const minutes = Number(value);
+  return Number.isFinite(minutes) && minutes > MIN_INITIAL_CONFIRMATION_REQUEST_DELAY_MINUTES
+    ? minutes
+    : MIN_INITIAL_CONFIRMATION_REQUEST_DELAY_MINUTES;
+};
+
+// Expected pre-filled WhatsApp confirmation text (C5.17), identical to the EasySell message
+// with its EasySell variables. Template and message are compared in lower case, NFC, edge
+// spaces and invisible characters removed; the fixed text is compared as is. Required
+// {{order.number}}: `1234`, `#1234` or `##1234`. Any other variable: 1 to 100 characters on
+// a single line. Message over 500 characters: no match. Absent, empty or blank: this default.
+// Invalid (without {{order.number}}, fixed text under 5 letters, adjacent variables): logged at
+// startup and the confirmation by message is disabled.
+export const DEFAULT_PREFILLED_CONFIRMATION_TEMPLATE = 'Je confirme ma commande #{{order.number}}';
+
+// An empty or blank variable is treated as absent (default template). A non-empty value is
+// kept as is: the comparison rule handles its edges.
+export const parsePrefilledConfirmationTemplate = (value?: string) =>
+  value && value.trim() ? value : DEFAULT_PREFILLED_CONFIRMATION_TEMPLATE;
+
 export default {
   port,
   apiEndpoint,
@@ -40,7 +96,11 @@ export default {
     webhookVerifyToken: process.env.META_WHATSAPP_WEBHOOK_VERIFY_TOKEN || '',
     templateLanguage:
       process.env.META_WHATSAPP_TEMPLATE_LANGUAGE || process.env.META_WHATSAPP_TEMPLATE_LANGUAGE_CODE || 'fr',
-    graphApiVersion: process.env.META_WHATSAPP_GRAPH_API_VERSION || 'v20.0'
+    graphApiVersion: process.env.META_WHATSAPP_GRAPH_API_VERSION || 'v26.0'
+  },
+  metaCapi: buildMetaCapiConfig(process.env),
+  sessionCapture: {
+    allowedOrigins: parseSessionCaptureOrigins(process.env.SESSION_CAPTURE_ALLOWED_ORIGINS)
   },
   chatwoot: {
     // Base URL of the self-hosted Chatwoot instance. Leave empty to disable forwarding.
@@ -64,12 +124,16 @@ export default {
     baseUrl: process.env.TERMII_BASE_URL || 'https://v3.api.termii.com'
   },
   confirmation: {
+    initialRequestDelayMinutes: parseInitialConfirmationRequestDelayMinutes(
+      process.env.CONFIRMATION_INITIAL_REQUEST_DELAY_MINUTES
+    ),
     firstReminderHours: Number(process.env.CONFIRMATION_FIRST_REMINDER_HOURS) || 24,
     secondReminderHours: Number(process.env.CONFIRMATION_SECOND_REMINDER_HOURS) || 48,
     expireHours: Number(process.env.CONFIRMATION_EXPIRE_HOURS) || 72,
     maxReminders: Number(process.env.CONFIRMATION_MAX_REMINDERS) || 2,
     reminderCooldownMinutes: Number(process.env.CONFIRMATION_REMINDER_COOLDOWN_MINUTES) || 60,
-    sweepIntervalMinutes: Number(process.env.CONFIRMATION_SWEEP_INTERVAL_MINUTES) || 30
+    sweepIntervalMinutes: Number(process.env.CONFIRMATION_SWEEP_INTERVAL_MINUTES) || 30,
+    prefilledTemplate: parsePrefilledConfirmationTemplate(process.env.PREFILLED_CONFIRMATION_TEMPLATE)
   },
   delivery: {
     defaultFee: Number(process.env.DELIVERY_DEFAULT_FEE) || 0,

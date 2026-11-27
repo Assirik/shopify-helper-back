@@ -10,7 +10,13 @@ export enum OrderEventType {
   DELIVERED = 'delivered',
   DELIVERY_FAILED = 'delivery_failed',
   RETURNED = 'returned',
-  PAYMENT_RECORDED = 'payment_recorded'
+  PAYMENT_RECORDED = 'payment_recorded',
+  NOTE = 'note',
+  CAPI_PURCHASE_SENT = 'capi_purchase_sent',
+  CAPI_PURCHASE_FAILED = 'capi_purchase_failed',
+  CAPI_PURCHASE_SKIPPED = 'capi_purchase_skipped',
+  CAPI_PURCHASE_RESEND_REQUESTED = 'capi_purchase_resend_requested',
+  PHONE_MISMATCH = 'phone_mismatch'
 }
 
 const OrderEventSchema = new Schema<IOrderEvent>(

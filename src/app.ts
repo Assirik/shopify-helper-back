@@ -7,14 +7,21 @@ import router from './routes/routes';
 import config from './utilities/config/env.config';
 import { errorHandler } from './middlewares/errorHandler';
 import log from './utilities/logger/logger';
+import { requestLogger } from './middlewares/requestLogger';
 
 const app = express();
+// Behind one reverse proxy: req.ip is the client address from X-Forwarded-For, not the proxy's.
+// Anything further left in that header is client-supplied and is ignored.
+app.set('trust proxy', 1);
 
 const captureRawBody = (req: IncomingMessage, _res: ServerResponse, buffer: Buffer) => {
   if (buffer.length) {
     (req as express.Request).rawBody = Buffer.from(buffer);
   }
 };
+
+// Before body parsing so every request is logged with a request id; no bodies are logged.
+app.use(requestLogger);
 
 app.use(express.json({ limit: '1mb', verify: captureRawBody }));
 app.use(express.urlencoded({ extended: false }));

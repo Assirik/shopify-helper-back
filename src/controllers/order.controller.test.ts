@@ -1,19 +1,138 @@
-import { describe, expect, it, jest } from '@jest/globals';
+import { afterEach, describe, expect, it, jest } from '@jest/globals';
+import express, { Request, Response } from 'express';
+import jwt from 'jsonwebtoken';
 import { Types } from 'mongoose';
-import { AttentionReasonCode, CustomerConfirmationStatus, IOrder } from '../models/Order';
+import request from 'supertest';
+import { AttentionReasonCode, ConfirmationSource, CustomerConfirmationStatus, IOrder } from '../models/Order';
 import {
+  OrderController,
   buildOrderListFilters,
   parseBulkOrderIds,
+  parseConfirmationSource,
   parseOptionalAmount,
   toAttentionOrder,
+  toOrderEventResponse,
   toOrderResponse
 } from './order.controller';
+import { IOrderEvent, OrderEvent, OrderEventType } from '../models/OrderEvent';
+import { Message } from '../models/Message';
+import { Order } from '../models/Order';
+import { Role, User } from '../models/User';
+import ordersRouter from '../routes/orders';
+import config from '../utilities/config/env.config';
+import {
+  CapiPurchaseResendError,
+  resendCapiPurchase,
+  triggerCapiPurchase
+} from '../utilities/services/capiPurchase.service';
+import {
+  OrderConfirmationError,
+  OrderConfirmationService
+} from '../utilities/services/orderConfirmation.service';
+import { OrderFulfillmentService } from '../utilities/services/orderFulfillment.service';
 
 jest.mock('../queues/notification.queue', () => ({
   enqueueConfirmationReminder: jest.fn(),
   enqueueOrderCancelled: jest.fn(),
   enqueueOrderConfirmed: jest.fn()
 }));
+
+jest.mock('../utilities/services/capiPurchase.service', () => {
+  class CapiPurchaseResendError extends Error {
+    constructor(
+      public readonly code: string,
+      message: string,
+      public readonly status = 409
+    ) {
+      super(message);
+    }
+  }
+
+  return {
+    CapiPurchaseResendError,
+    resendCapiPurchase: jest.fn(),
+    triggerCapiPurchase: jest.fn(async () => undefined)
+  };
+});
+
+describe('POST /orders/:id/capi-purchase/resend', () => {
+  const orderId = new Types.ObjectId();
+  const userId = new Types.ObjectId().toString();
+  const resend = jest.mocked(resendCapiPurchase);
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  const buildApp = () => {
+    const app = express();
+    app.use(express.json());
+    app.use('/api/orders', ordersRouter);
+    return app;
+  };
+
+  // requireAuth then requireAdmin both read the user.
+  const loginAs = (role: Role) => {
+    const user = { _id: userId, role, isActive: true, sessionVersion: 0 };
+    jest.spyOn(User, 'findById').mockReturnValue({ select: async () => user } as never);
+    return `Bearer ${jwt.sign({ userId, sessionVersion: 0 }, config.jwtSecret)}`;
+  };
+
+  const post = (role: Role, id = orderId.toString()) =>
+    request(buildApp()).post(`/api/orders/${id}/capi-purchase/resend`).set('Authorization', loginAs(role)).send();
+
+  it('answers 202 with the order in the detail format (capabilities included), for an admin', async () => {
+    resend.mockResolvedValueOnce({
+      _id: orderId,
+      shopifyOrderName: '#1201',
+      customerConfirmationStatus: CustomerConfirmationStatus.CONFIRMED,
+      capiPurchaseStatus: 'pending'
+    } as unknown as IOrder);
+
+    const response = await post(Role.ADMIN);
+
+    expect(response.status).toBe(202);
+    expect(resend).toHaveBeenCalledWith(orderId.toString(), userId);
+    expect(response.body.data.order).toEqual(
+      expect.objectContaining({
+        id: orderId.toString(),
+        capiPurchaseStatus: 'pending',
+        capabilities: expect.objectContaining({ canResendCapi: false })
+      })
+    );
+  });
+
+  it('answers 403 to a non-admin user without calling the service', async () => {
+    const response = await post(Role.USER);
+
+    expect(response.status).toBe(403);
+    expect(response.body).toEqual({ error: 'AdminRequired' });
+    expect(resend).not.toHaveBeenCalled();
+  });
+
+  it('answers 401 without a token', async () => {
+    const response = await request(buildApp()).post(`/api/orders/${orderId}/capi-purchase/resend`).send();
+
+    expect(response.status).toBe(401);
+    expect(resend).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['OrderNotFound', 404],
+    ['CapiPurchaseAlreadySent', 409],
+    ['CapiPurchaseNotResendable', 409],
+    ['CapiPurchaseMayHaveBeenReceived', 409],
+    ['CapiPurchaseTooOld', 409],
+    ['CapiDisabled', 409]
+  ])('maps %s to %i with the error code', async (code, status) => {
+    resend.mockRejectedValueOnce(new CapiPurchaseResendError(code, code, status));
+
+    const response = await post(Role.ADMIN);
+
+    expect(response.status).toBe(status);
+    expect(response.body).toEqual({ error: code });
+  });
+});
 
 describe('order controller attention contracts', () => {
   it('accepts a bounded list of unique ObjectIds', () => {
@@ -83,7 +202,9 @@ describe('order controller attention contracts', () => {
           canDispatch: false,
           canDeliver: false,
           canMarkFailed: false,
-          canReturn: false
+          canReturn: false,
+          canMarkUnreachable: true,
+          canResendCapi: false
         }
       })
     );
@@ -131,6 +252,97 @@ describe('order controller list filters', () => {
     expect(buildOrderListFilters({ hideCompleted: 'false' }).filters).toEqual({});
     expect(buildOrderListFilters({}).filters).toEqual({});
   });
+
+  const phoneClause = {
+    $or: [
+      { customerPhoneE164: { $regex: '771234567', $options: 'i' } },
+      { customerPhoneRaw: { $regex: '771234567', $options: 'i' } }
+    ]
+  };
+
+  it('searches every supported field in a single $or nested under $and', () => {
+    const { filters } = buildOrderListFilters({ search: '  awa  ' });
+    const fields = [
+      'shopifyOrderName',
+      'customerName',
+      'customerPhoneE164',
+      'customerPhoneRaw',
+      'customerEmail',
+      'tags',
+      'lineItems.title',
+      'lineItems.sku'
+    ];
+
+    expect(filters).toEqual({
+      $and: [{ $or: fields.map(field => ({ [field]: { $regex: 'awa', $options: 'i' } })) }]
+    });
+  });
+
+  it.each([
+    [{ phone: '771234567' }, [phoneClause]],
+    [{ phone: '771234567', search: 'awa' }, [phoneClause, expect.objectContaining({ $or: expect.any(Array) })]]
+  ])('keeps the phone filter alongside the search for %p', (query, expected) => {
+    const { filters } = buildOrderListFilters(query);
+
+    expect(filters.$or).toBeUndefined();
+    expect(filters.$and).toEqual(expected);
+  });
+
+  it('escapes regex special characters in the search', () => {
+    const { filters } = buildOrderListFilters({ search: '#1156 (a+b)' });
+    const [clause] = filters.$and as { $or: Record<string, { $regex: string }>[] }[];
+
+    expect(clause?.$or[0]).toEqual({ shopifyOrderName: { $regex: '#1156 \\(a\\+b\\)', $options: 'i' } });
+  });
+
+  it('also matches phones on digits only when the search is typed with spaces', () => {
+    const { filters } = buildOrderListFilters({ search: '77 412 88 90' });
+    const [clause] = filters.$and as { $or: Record<string, unknown>[] }[];
+
+    expect(clause?.$or).toEqual(
+      expect.arrayContaining([
+        { customerPhoneE164: { $regex: '774128890', $options: 'i' } },
+        { customerPhoneRaw: { $regex: '774128890', $options: 'i' } }
+      ])
+    );
+  });
+
+  it.each(['awa', '#1156', '1156', 'SKU-2024-01'])('does not add a digits-only phone clause to %p', search => {
+    const { filters } = buildOrderListFilters({ search });
+    const [clause] = filters.$and as { $or: unknown[] }[];
+
+    expect(clause?.$or).toHaveLength(8);
+  });
+
+  it.each([
+    [{ hideCancelled: 'true' }, { customerConfirmationStatus: { $ne: CustomerConfirmationStatus.CANCELLED } }],
+    [{ hideCancelled: 'false' }, {}],
+    [{}, {}],
+    [
+      { hideCancelled: 'true', customerConfirmationStatus: CustomerConfirmationStatus.CANCELLED },
+      { customerConfirmationStatus: CustomerConfirmationStatus.CANCELLED }
+    ],
+    [
+      { hideCancelled: 'true', customerConfirmationStatus: CustomerConfirmationStatus.CONFIRMED },
+      { customerConfirmationStatus: CustomerConfirmationStatus.CONFIRMED }
+    ],
+    [
+      { hideCancelled: 'true', customerConfirmationStatus: 'unknown' },
+      { customerConfirmationStatus: { $ne: CustomerConfirmationStatus.CANCELLED } }
+    ]
+  ])('applies hideCancelled to %p', (query, expected) => {
+    expect(buildOrderListFilters(query).filters).toEqual(expected);
+  });
+
+  it('combines search, hideCancelled and hideCompleted without overwriting each other', () => {
+    const { filters } = buildOrderListFilters({ search: 'awa', hideCancelled: 'true', hideCompleted: 'true' });
+
+    expect(filters).toEqual({
+      $and: [expect.objectContaining({ $or: expect.any(Array) })],
+      customerConfirmationStatus: { $ne: CustomerConfirmationStatus.CANCELLED },
+      $nor: [{ operationalStatus: 'delivered', codPaymentStatus: 'paid' }]
+    });
+  });
 });
 
 describe('order controller optional amount parsing', () => {
@@ -145,5 +357,544 @@ describe('order controller optional amount parsing', () => {
 
   it.each([null, '', '   ', 'abc', -1, NaN, {}])('rejects the invalid amount %p', value => {
     expect(parseOptionalAmount(value)).toEqual({ ok: false });
+  });
+});
+
+describe('order controller confirmation source parsing', () => {
+  it('defaults to admin when the source is omitted', () => {
+    expect(parseConfirmationSource(undefined)).toEqual({ ok: true, value: ConfirmationSource.ADMIN });
+  });
+
+  it.each([ConfirmationSource.ADMIN, ConfirmationSource.PHONE_CALL])('accepts %p', source => {
+    expect(parseConfirmationSource(source)).toEqual({ ok: true, value: source });
+  });
+
+  it.each([ConfirmationSource.WHATSAPP_BUTTON, 'sms', '', null, 42])('rejects %p', source => {
+    expect(parseConfirmationSource(source)).toEqual({ ok: false });
+  });
+});
+
+describe('order controller timeline events', () => {
+  const buildEvent = (actorId: unknown) =>
+    ({
+      actorId,
+      toJSON: () => ({ type: OrderEventType.NOTE, note: 'Livrer chez son frère', actorId })
+    }) as unknown as IOrderEvent;
+
+  it('flattens a populated author into actorId and actorName', () => {
+    const userId = new Types.ObjectId();
+
+    expect(toOrderEventResponse(buildEvent({ _id: userId, userName: 'awa' }))).toEqual(
+      expect.objectContaining({ note: 'Livrer chez son frère', actorId: userId.toString(), actorName: 'awa' })
+    );
+  });
+
+  it.each([null, undefined])('leaves the author empty when the actor is %p', actorId => {
+    expect(toOrderEventResponse(buildEvent(actorId))).toEqual(
+      expect.objectContaining({ actorId: undefined, actorName: undefined })
+    );
+  });
+});
+
+describe('order controller bulk actions', () => {
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  const buildBulkCall = (orderIds: string[]) => {
+    const userId = new Types.ObjectId().toString();
+    const req = { body: { orderIds }, userId } as unknown as Request;
+    const json = jest.fn();
+    const res = { status: jest.fn(() => ({ json })) } as unknown as Response;
+    return { req, res, userId };
+  };
+
+  it.each([
+    ['bulkConfirm', 'confirmByAdmin'],
+    ['bulkRemind', 'remindByAdmin']
+  ] as const)('%s records the acting user as the author of every order event', async (handler, serviceMethod) => {
+    const orderIds = [new Types.ObjectId().toString(), new Types.ObjectId().toString()];
+    const service = jest.spyOn(OrderConfirmationService, serviceMethod).mockResolvedValue({} as never);
+    const { req, res, userId } = buildBulkCall(orderIds);
+
+    await OrderController[handler](req, res);
+
+    expect(service).toHaveBeenCalledTimes(orderIds.length);
+    orderIds.forEach(orderId => expect(service).toHaveBeenCalledWith(orderId, userId));
+  });
+
+  it('bulkConfirm ignores a source sent in the body: a bulk confirmation is never a phone call (C5.23)', async () => {
+    const orderIds = [new Types.ObjectId().toString()];
+    const service = jest.spyOn(OrderConfirmationService, 'confirmByAdmin').mockResolvedValue({} as never);
+    const { req, res, userId } = buildBulkCall(orderIds);
+    (req.body as Record<string, unknown>).source = 'phone_call';
+
+    await OrderController.bulkConfirm(req, res);
+
+    expect(service).toHaveBeenCalledTimes(1);
+    expect(service.mock.calls[0]).toEqual([orderIds[0], userId]);
+  });
+
+  it('bulkConfirm triggers the Meta Purchase once per confirmed order (C5.5)', async () => {
+    const orderIds = [new Types.ObjectId(), new Types.ObjectId()];
+    jest
+      .spyOn(Order, 'findOneAndUpdate')
+      .mockImplementation(((filter: { _id: string }) => Promise.resolve({ _id: filter._id })) as never);
+    jest.spyOn(OrderEvent, 'create').mockResolvedValue({} as never);
+    jest.spyOn(Message, 'create').mockResolvedValue({ _id: new Types.ObjectId() } as never);
+    const { req, res } = buildBulkCall(orderIds.map(id => id.toString()));
+
+    await OrderController.bulkConfirm(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(200);
+    expect(triggerCapiPurchase).toHaveBeenCalledTimes(orderIds.length);
+    orderIds.forEach(id => expect(triggerCapiPurchase).toHaveBeenCalledWith(id.toString(), 'confirmation'));
+  });
+
+  it('bulkConfirm never confirms a phone_mismatch order and lists it as not processed (C5.23)', async () => {
+    const regularId = new Types.ObjectId().toString();
+    const mismatchId = new Types.ObjectId().toString();
+    const markedId = new Types.ObjectId().toString();
+    const store: Record<string, Record<string, unknown>> = {
+      [regularId]: { _id: regularId, customerConfirmationStatus: CustomerConfirmationStatus.PENDING },
+      [mismatchId]: {
+        _id: mismatchId,
+        customerConfirmationStatus: CustomerConfirmationStatus.PENDING,
+        attentionReasonCode: AttentionReasonCode.PHONE_MISMATCH
+      },
+      // Flagged earlier, reason since replaced by a free text: the durable marker remains.
+      [markedId]: {
+        _id: markedId,
+        customerConfirmationStatus: CustomerConfirmationStatus.NEEDS_ATTENTION,
+        attentionReasonCode: AttentionReasonCode.FREE_TEXT,
+        phoneMismatchAt: new Date()
+      }
+    };
+    // Honours the write filter as MongoDB would (`$in` on the status, `$ne` on the reason,
+    // `null` matching a missing marker).
+    jest.spyOn(Order, 'findOneAndUpdate').mockImplementation(((
+      filter: {
+        _id: string;
+        customerConfirmationStatus: { $in: string[] };
+        attentionReasonCode?: { $ne: string };
+        phoneMismatchAt?: null;
+      },
+      change: { $set: Record<string, unknown>; $unset: Record<string, unknown> }
+    ) => {
+      const order = store[filter._id];
+      if (
+        !order ||
+        !filter.customerConfirmationStatus.$in.includes(order.customerConfirmationStatus as string) ||
+        (filter.attentionReasonCode && order.attentionReasonCode === filter.attentionReasonCode.$ne) ||
+        (filter.phoneMismatchAt === null && order.phoneMismatchAt != null)
+      ) {
+        return Promise.resolve(null);
+      }
+      Object.assign(order, change.$set);
+      Object.keys(change.$unset).forEach(key => delete order[key]);
+      return Promise.resolve({ ...order });
+    }) as never);
+    jest
+      .spyOn(Order, 'findById')
+      .mockImplementation(((id: string) => Promise.resolve(store[id] ? { ...store[id] } : null)) as never);
+    jest.spyOn(OrderEvent, 'create').mockResolvedValue({} as never);
+    jest.spyOn(Message, 'create').mockResolvedValue({ _id: new Types.ObjectId() } as never);
+    const json = jest.fn();
+    const res = { status: jest.fn(() => ({ json })) } as unknown as Response;
+    const req = {
+      body: { orderIds: [mismatchId, regularId, markedId] },
+      userId: new Types.ObjectId().toString()
+    } as unknown as Request;
+
+    await OrderController.bulkConfirm(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(207);
+    expect(json).toHaveBeenCalledWith({
+      data: {
+        requested: 3,
+        succeeded: [{ orderId: regularId }],
+        failed: [
+          { orderId: mismatchId, error: 'PhoneMismatchRequiresCall', status: 409 },
+          { orderId: markedId, error: 'PhoneMismatchRequiresCall', status: 409 }
+        ],
+        summary: { succeeded: 1, failed: 2 }
+      }
+    });
+    expect(store[markedId].customerConfirmationStatus).toBe(CustomerConfirmationStatus.NEEDS_ATTENTION);
+    expect(store[regularId].customerConfirmationStatus).toBe(CustomerConfirmationStatus.CONFIRMED);
+    expect(store[mismatchId]).toEqual(
+      expect.objectContaining({
+        customerConfirmationStatus: CustomerConfirmationStatus.PENDING,
+        attentionReasonCode: AttentionReasonCode.PHONE_MISMATCH
+      })
+    );
+    expect(triggerCapiPurchase).toHaveBeenCalledTimes(1);
+    expect(triggerCapiPurchase).toHaveBeenCalledWith(regularId, 'confirmation');
+  });
+});
+
+// Handlers HTTP du Lot 0 : on vérifie le contrat (statuts, codes d'erreur, arguments
+// transmis aux services) sans base de données, comme le reste de ce fichier.
+const mockResponse = () => {
+  const json = jest.fn((_body: unknown) => undefined);
+  const status = jest.fn((_code: number) => ({ json }));
+  return { res: { status } as unknown as Response, status, json };
+};
+
+const mockRequest = (input: { params?: Record<string, string>; body?: unknown; query?: unknown }) =>
+  ({ params: {}, query: {}, userId: new Types.ObjectId().toString(), ...input }) as unknown as Request;
+
+// `Order.find(...).sort().skip().limit()` sans base : la chaîne renvoie une liste vide.
+const mockOrderFind = () => {
+  const query = { sort: jest.fn(), skip: jest.fn(), limit: jest.fn() };
+  query.sort.mockReturnValue(query);
+  query.skip.mockReturnValue(query);
+  query.limit.mockResolvedValue([] as never);
+  return jest.spyOn(Order, 'find').mockReturnValue(query as never);
+};
+
+describe('order controller attention queue (Lot 0 · F1)', () => {
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  it('excludes delivered, returned and cancelled orders from the list, the total and the per-reason counts', async () => {
+    const find = mockOrderFind();
+    const count = jest.spyOn(Order, 'countDocuments').mockResolvedValue(0 as never);
+    const aggregate = jest.spyOn(Order, 'aggregate').mockResolvedValue([] as never);
+    const { res, status } = mockResponse();
+
+    await OrderController.attentionQueue(mockRequest({}), res);
+
+    const exclusions = {
+      needsHelpdeskAttention: true,
+      operationalStatus: { $nin: ['delivered', 'returned'] },
+      customerConfirmationStatus: { $ne: CustomerConfirmationStatus.CANCELLED }
+    };
+    expect(status).toHaveBeenCalledWith(200);
+    expect(find.mock.calls[0]?.[0]).toEqual(expect.objectContaining(exclusions));
+    expect(count.mock.calls[0]?.[0]).toEqual(expect.objectContaining(exclusions));
+    const pipeline = aggregate.mock.calls[0]?.[0] as { $match?: unknown }[];
+    expect(pipeline[0]?.$match).toEqual(expect.objectContaining(exclusions));
+  });
+
+  it('accepts the unreachable reason filter (F15)', async () => {
+    const find = mockOrderFind();
+    jest.spyOn(Order, 'countDocuments').mockResolvedValue(0 as never);
+    jest.spyOn(Order, 'aggregate').mockResolvedValue([] as never);
+    const { res, status } = mockResponse();
+
+    await OrderController.attentionQueue(mockRequest({ query: { reason: AttentionReasonCode.UNREACHABLE } }), res);
+
+    expect(status).toHaveBeenCalledWith(200);
+    expect(find.mock.calls[0]?.[0]).toEqual(
+      expect.objectContaining({ attentionReasonCode: AttentionReasonCode.UNREACHABLE })
+    );
+  });
+
+  it('accepts the phone_mismatch reason filter and counts it (C5.6b)', async () => {
+    const find = mockOrderFind();
+    const count = jest.spyOn(Order, 'countDocuments').mockResolvedValue(2 as never);
+    jest.spyOn(Order, 'aggregate').mockResolvedValue([
+      { _id: AttentionReasonCode.PHONE_MISMATCH, count: 2 },
+      { _id: AttentionReasonCode.FREE_TEXT, count: 3 }
+    ] as never);
+    const { res, status, json } = mockResponse();
+
+    await OrderController.attentionQueue(mockRequest({ query: { reason: 'phone_mismatch' } }), res);
+
+    expect(status).toHaveBeenCalledWith(200);
+    expect(find.mock.calls[0]?.[0]).toEqual(
+      expect.objectContaining({ attentionReasonCode: AttentionReasonCode.PHONE_MISMATCH })
+    );
+    expect(count.mock.calls[0]?.[0]).toEqual(
+      expect.objectContaining({ attentionReasonCode: AttentionReasonCode.PHONE_MISMATCH })
+    );
+    expect(json.mock.calls[0]?.[0]).toEqual(
+      expect.objectContaining({
+        counts: {
+          all: 5,
+          free_text: 3,
+          sms_only: 0,
+          invalid_number: 0,
+          late_confirm: 0,
+          unreachable: 0,
+          phone_mismatch: 2,
+          notification_not_scheduled: 0
+        }
+      })
+    );
+  });
+
+  it('accepts the notification_not_scheduled reason filter and counts it (C5.15)', async () => {
+    const find = mockOrderFind();
+    const count = jest.spyOn(Order, 'countDocuments').mockResolvedValue(4 as never);
+    jest.spyOn(Order, 'aggregate').mockResolvedValue([
+      { _id: AttentionReasonCode.NOTIFICATION_NOT_SCHEDULED, count: 4 },
+      { _id: AttentionReasonCode.INVALID_NUMBER, count: 1 }
+    ] as never);
+    const { res, status, json } = mockResponse();
+
+    await OrderController.attentionQueue(mockRequest({ query: { reason: 'notification_not_scheduled' } }), res);
+
+    expect(status).toHaveBeenCalledWith(200);
+    expect(find.mock.calls[0]?.[0]).toEqual(
+      expect.objectContaining({ attentionReasonCode: AttentionReasonCode.NOTIFICATION_NOT_SCHEDULED })
+    );
+    expect(count.mock.calls[0]?.[0]).toEqual(
+      expect.objectContaining({ attentionReasonCode: AttentionReasonCode.NOTIFICATION_NOT_SCHEDULED })
+    );
+    expect(json.mock.calls[0]?.[0]).toEqual(
+      expect.objectContaining({
+        counts: {
+          all: 5,
+          free_text: 0,
+          sms_only: 0,
+          invalid_number: 1,
+          late_confirm: 0,
+          unreachable: 0,
+          phone_mismatch: 0,
+          notification_not_scheduled: 4
+        }
+      })
+    );
+  });
+
+  it('includes notification_not_scheduled orders in the unfiltered queue and the counts (C5.15)', async () => {
+    const find = mockOrderFind();
+    jest.spyOn(Order, 'countDocuments').mockResolvedValue(0 as never);
+    const aggregate = jest.spyOn(Order, 'aggregate').mockResolvedValue([] as never);
+    const { res, json } = mockResponse();
+
+    await OrderController.attentionQueue(mockRequest({}), res);
+
+    const filter = find.mock.calls[0]?.[0] as unknown as { attentionReasonCode: { $in: string[] } };
+    expect(filter.attentionReasonCode.$in).toContain('notification_not_scheduled');
+    const pipeline = aggregate.mock.calls[0]?.[0] as unknown as Array<{ $match?: { attentionReasonCode: { $in: string[] } } }>;
+    expect(pipeline[0]?.$match?.attentionReasonCode.$in).toContain('notification_not_scheduled');
+    expect((json.mock.calls[0]?.[0] as { counts: Record<string, number> }).counts).toHaveProperty('notification_not_scheduled', 0);
+  });
+
+  it('includes phone_mismatch orders in the unfiltered queue (C5.6b)', async () => {
+    const find = mockOrderFind();
+    jest.spyOn(Order, 'countDocuments').mockResolvedValue(0 as never);
+    jest.spyOn(Order, 'aggregate').mockResolvedValue([] as never);
+    const { res } = mockResponse();
+
+    await OrderController.attentionQueue(mockRequest({}), res);
+
+    const filter = find.mock.calls[0]?.[0] as unknown as { attentionReasonCode: { $in: string[] } };
+    expect(filter.attentionReasonCode.$in).toContain('phone_mismatch');
+  });
+});
+
+describe('order controller notes endpoint (Lot 0 · F16)', () => {
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  it.each([undefined, '', '   ', 42])('answers 400 NoteTextRequired for the text %p', async text => {
+    const update = jest.spyOn(Order, 'findByIdAndUpdate');
+    const { res, status, json } = mockResponse();
+
+    await OrderController.addNote(
+      mockRequest({ params: { id: new Types.ObjectId().toString() }, body: { text } }),
+      res
+    );
+
+    expect(status).toHaveBeenCalledWith(400);
+    expect(json).toHaveBeenCalledWith({ error: 'NoteTextRequired' });
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  it('answers 201 with the order and the note event, authored by the signed-in user', async () => {
+    const orderId = new Types.ObjectId();
+    const event = { type: OrderEventType.NOTE, note: 'Reporter à samedi' };
+    const addNote = jest
+      .spyOn(OrderFulfillmentService, 'addNote')
+      .mockResolvedValue({ order: { _id: orderId, lastNoteText: 'Reporter à samedi' }, event } as never);
+    const req = mockRequest({ params: { id: orderId.toString() }, body: { text: 'Reporter à samedi' } });
+    const { res, status, json } = mockResponse();
+
+    await OrderController.addNote(req, res);
+
+    expect(addNote).toHaveBeenCalledWith(orderId.toString(), 'Reporter à samedi', req.userId);
+    expect(status).toHaveBeenCalledWith(201);
+    expect(json).toHaveBeenCalledWith({
+      data: { order: expect.objectContaining({ lastNoteText: 'Reporter à samedi' }), event }
+    });
+  });
+});
+
+describe('order controller confirmation source and unreachable (Lot 0 · F15)', () => {
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  it('rejects an unknown confirmation source before touching the order', async () => {
+    const confirm = jest.spyOn(OrderConfirmationService, 'confirmByAdmin');
+    const { res, status, json } = mockResponse();
+
+    await OrderController.confirm(
+      mockRequest({ params: { id: new Types.ObjectId().toString() }, body: { source: 'whatsapp_button' } }),
+      res
+    );
+
+    expect(status).toHaveBeenCalledWith(400);
+    expect(json).toHaveBeenCalledWith({ error: 'InvalidConfirmationSource' });
+    expect(confirm).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [{}, ConfirmationSource.ADMIN],
+    [{ source: ConfirmationSource.PHONE_CALL }, ConfirmationSource.PHONE_CALL]
+  ] as const)('confirms with body %p as source %p', async (body, expected) => {
+    const orderId = new Types.ObjectId();
+    const confirm = jest.spyOn(OrderConfirmationService, 'confirmByAdmin').mockResolvedValue({
+      order: { _id: orderId },
+      message: { _id: new Types.ObjectId() },
+      job: { id: 'job-1', queueName: 'notifications' }
+    } as never);
+    const req = mockRequest({ params: { id: orderId.toString() }, body });
+    const { res, status } = mockResponse();
+
+    await OrderController.confirm(req, res);
+
+    expect(confirm).toHaveBeenCalledWith(orderId.toString(), req.userId, expected);
+    expect(status).toHaveBeenCalledWith(202);
+  });
+
+  it('marks an order unreachable with the optional note and the signed-in user', async () => {
+    const orderId = new Types.ObjectId();
+    const markUnreachable = jest
+      .spyOn(OrderConfirmationService, 'markUnreachable')
+      .mockResolvedValue({ order: { _id: orderId }, event: {} } as never);
+    const req = mockRequest({ params: { id: orderId.toString() }, body: { note: 'Messagerie' } });
+    const { res, status } = mockResponse();
+
+    await OrderController.markUnreachable(req, res);
+
+    expect(markUnreachable).toHaveBeenCalledWith(orderId.toString(), 'Messagerie', req.userId);
+    expect(status).toHaveBeenCalledWith(200);
+  });
+
+  it('maps a refused unreachable transition to its error code', async () => {
+    jest
+      .spyOn(OrderConfirmationService, 'markUnreachable')
+      .mockRejectedValue(new OrderConfirmationError('OrderUnreachableNotAllowed', 'Not allowed', 409));
+    const { res, status, json } = mockResponse();
+
+    await OrderController.markUnreachable(mockRequest({ params: { id: new Types.ObjectId().toString() } }), res);
+
+    expect(status).toHaveBeenCalledWith(409);
+    expect(json).toHaveBeenCalledWith({ error: 'OrderUnreachableNotAllowed' });
+  });
+});
+
+describe('order controller list endpoint (Lot 0 · F20/F21)', () => {
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  it('queries orders with the search under $and, the phone filter kept and cancelled orders hidden', async () => {
+    const find = mockOrderFind();
+    jest.spyOn(Order, 'countDocuments').mockResolvedValue(0 as never);
+    const { res, status } = mockResponse();
+
+    await OrderController.list(
+      mockRequest({ query: { search: 'awa', phone: '771234567', hideCancelled: 'true' } }),
+      res
+    );
+
+    expect(status).toHaveBeenCalledWith(200);
+    const filters = find.mock.calls[0]?.[0] as unknown as Record<string, unknown>;
+    expect(filters.$or).toBeUndefined();
+    expect(filters.$and).toHaveLength(2);
+    expect(filters.customerConfirmationStatus).toEqual({ $ne: CustomerConfirmationStatus.CANCELLED });
+  });
+});
+
+describe('phoneMismatchAt marker is exposed to the helpdesk (C5.23)', () => {
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  const phoneMismatchAt = new Date('2026-10-01T10:00:00.000Z');
+  // Real Mongoose document (no database needed): proves the schema field is serialized.
+  const markedOrder = () =>
+    new Order({
+      shopifyOrderId: '1001',
+      shopifyOrderName: '#1001',
+      totalPrice: '18500',
+      currency: 'XOF',
+      customerPhoneE164: '+221776986780',
+      customerConfirmationStatus: CustomerConfirmationStatus.NEEDS_ATTENTION,
+      needsHelpdeskAttention: true,
+      attentionReasonCode: AttentionReasonCode.FREE_TEXT,
+      phoneMismatchAt
+    });
+
+  const mockFindResult = (orders: unknown[]) => {
+    const query = { sort: jest.fn(), skip: jest.fn(), limit: jest.fn() };
+    query.sort.mockReturnValue(query);
+    query.skip.mockReturnValue(query);
+    query.limit.mockResolvedValue(orders as never);
+    return jest.spyOn(Order, 'find').mockReturnValue(query as never);
+  };
+
+  it('in the order list (GET /orders)', async () => {
+    const order = markedOrder();
+    mockFindResult([order]);
+    jest.spyOn(Order, 'countDocuments').mockResolvedValue(1 as never);
+    const { res, json } = mockResponse();
+
+    await OrderController.list(mockRequest({}), res);
+
+    const body = json.mock.calls[0]?.[0] as { data: Array<Record<string, unknown>> };
+    expect(body.data[0]).toEqual(expect.objectContaining({ id: order._id.toString(), phoneMismatchAt }));
+  });
+
+  it('in the order detail (GET /orders/:id)', async () => {
+    const order = markedOrder();
+    jest.spyOn(Order, 'findById').mockResolvedValue(order as never);
+    jest.spyOn(Message, 'find').mockReturnValue({ sort: jest.fn(async () => []) } as never);
+    jest
+      .spyOn(OrderEvent, 'find')
+      .mockReturnValue({ sort: jest.fn(() => ({ populate: jest.fn(async () => []) })) } as never);
+    const { res, status, json } = mockResponse();
+
+    await OrderController.detail(mockRequest({ params: { id: order._id.toString() } }), res);
+
+    expect(status).toHaveBeenCalledWith(200);
+    const body = json.mock.calls[0]?.[0] as { data: { order: Record<string, unknown> } };
+    expect(body.data.order).toEqual(expect.objectContaining({ phoneMismatchAt }));
+  });
+
+  it('in the attention queue (GET /orders/attention)', async () => {
+    const order = markedOrder();
+    mockFindResult([order]);
+    jest.spyOn(Order, 'countDocuments').mockResolvedValue(1 as never);
+    jest.spyOn(Order, 'aggregate').mockResolvedValue([] as never);
+    const { res, json } = mockResponse();
+
+    await OrderController.attentionQueue(mockRequest({}), res);
+
+    const body = json.mock.calls[0]?.[0] as { data: Array<Record<string, unknown>> };
+    expect(body.data[0]).toEqual(
+      expect.objectContaining({ reason: AttentionReasonCode.FREE_TEXT, phoneMismatchAt })
+    );
+  });
+
+  it('is absent for an order never flagged', () => {
+    const order = new Order({
+      shopifyOrderId: '1002',
+      shopifyOrderName: '#1002',
+      totalPrice: '18500',
+      currency: 'XOF',
+      attentionReasonCode: AttentionReasonCode.FREE_TEXT
+    });
+
+    expect(toAttentionOrder(order).phoneMismatchAt).toBeUndefined();
+    expect(toOrderResponse(order)).not.toHaveProperty('phoneMismatchAt');
   });
 });
